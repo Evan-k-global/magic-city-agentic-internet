@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.magiccity.runner</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{HELPER_BINARY}}</string>
+    <string>start</string>
+    <string>--base-url</string>
+    <string>{{MAGIC_CITY_BASE_URL}}</string>
+    <string>--device-id</string>
+    <string>{{NATIVE_RUNNER_DEVICE_ID}}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MAGIC_CITY_BROWSER_WORKER_PLUGIN_ID</key>
+    <string>local-authenticated-browser-plugin</string>
+    <key>MAGIC_CITY_BROWSER_WORKER_OWNER</key>
+    <string>local-authenticated-browser-agent</string>
+    <key>MAGIC_CITY_BROWSER_USER_DATA_DIR</key>
+    <string>{{BROWSER_USER_DATA_DIR}}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{{LOG_DIR}}/magic-city-runner.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{LOG_DIR}}/magic-city-runner.err.log</string>
+</dict>
+</plist>

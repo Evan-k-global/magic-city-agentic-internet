@@ -1,0 +1,2793 @@
+const DEFAULT_BASE_URL = 'https://magic-city.ai';
+const POLL_ALARM = 'magic-city-runner-poll';
+const RESUME_ALARM = 'magic-city-runner-resume';
+const POLL_PERIOD_MINUTES = 1;
+const RUNNER_EXTENSION_PLUGIN_ID = 'magic-city-runner-extension';
+const RUNNER_EXTENSION_OWNER_AGENT_ID = 'magic-city-runner-extension';
+const PENDING_SITE_MISSION_MAX_AGE_MS = 15 * 60 * 1000;
+const EXECUTOR_FILE = 'executor.js';
+const RUNNER_PROTOCOL = 'declarative-v1';
+const PLAN_SCHEMA = 'magic-city-browser-plan-v1';
+const MAX_PLAN_ACTIONS = 64;
+const MAX_PLANNED_BASKET_ITEMS = 12;
+const API_TIMEOUT_MS = 20_000;
+const RUNNER_STATUS_TIMEOUT_MS = 4_000;
+const RUNNER_STATUS_LEASE_MS = 3_000;
+const RUNNER_RESUME_DELAY_MS = 5_000;
+// Keep exactly one recovery wake for an already approved mission. Chrome can
+// suspend an MV3 worker between two valid checkpoints; this lets it resume the
+// signed next action without turning the runner into a background crawler.
+const RUNNER_CONTINUATION_DELAY_MS = 30_000;
+const PAYMENT_WAIT_RESUME_DELAY_MS = 5_000;
+const PAYMENT_WAIT_HEARTBEAT_MS = 60_000;
+const PAYMENT_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
+const TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS = [200, 700];
+const TAB_COMMAND_TIMEOUT_MS = 15_000;
+const BROWSER_ACTION_TIMEOUT_MS = 45_000;
+const SAFE_PLAN_ACTION_TYPES = new Set(['navigate', 'inspect', 'search', 'select_candidate', 'click_intent', 'fill_checkout_profile', 'final_submit', 'pause']);
+const inFlightSessionIds = new Set();
+
+function normalizeBaseUrl(value = '') {
+  return String(value || DEFAULT_BASE_URL).trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
+}
+
+function normalizePairingCode(value = '') {
+  return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, nested]) => nested !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, stableValue(nested)])
+    );
+  }
+  return value;
+}
+
+function stableJson(value) {
+  return JSON.stringify(stableValue(value));
+}
+
+async function hashPlan(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableJson(value)));
+  return `0x${Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function base64Url(bytes) {
+  const values = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let binary = '';
+  for (const value of values) binary += String.fromCharCode(value);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function randomNonce() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return base64Url(bytes);
+}
+
+function domainForUrl(value = '') {
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return String(value || '').toLowerCase().replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, '');
+  }
+}
+
+function isAmazonRetailShoppingUrl(value = '') {
+  let url = null;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (domainForUrl(url.href) !== 'amazon.com') return true;
+  const path = String(url.pathname || '').toLowerCase();
+  const blockedPath = /^\/(?:alm|gp\/video|video|primevideo|music|amazon-music|kindle-dbs|hz\/audible|audible|photos|luna|customer-preferences|gp\/customer-preferences)(?:\/|$)/i.test(path);
+  const department = String(url.searchParams.get('i') || '').toLowerCase();
+  const blockedDepartment = /^(?:instant-video|movies-tv|digital-music|popular|stripbooks)$/.test(department);
+  return !blockedPath && !blockedDepartment;
+}
+
+function withAmazonEnglishLocale(value = '') {
+  try {
+    const url = new URL(String(value || ''));
+    if (domainForUrl(url.href) === 'amazon.com') url.searchParams.set('language', 'en_US');
+    return url.toString();
+  } catch {
+    return String(value || '');
+  }
+}
+
+function amazonCartRecoveryUrl(plan = {}) {
+  const cartAction = Array.isArray(plan.actions)
+    ? plan.actions.find((action) => action.id === 'open-cart' && action.type === 'navigate')
+    : null;
+  return withAmazonEnglishLocale(cartAction?.url || 'https://www.amazon.com/gp/cart/view.html');
+}
+
+function isAmazonCheckoutPreludeUrl(value = '', plan = {}) {
+  try {
+    const url = new URL(String(value || ''));
+    const domain = domainForUrl(url.href);
+    const fixtureHost = domain === '127.0.0.1' || domain === 'localhost';
+    const targetDomain = String(plan.targetDomain || '').toLowerCase().replace(/^www\./, '');
+    return ((targetDomain === 'amazon.com' && domain === 'amazon.com') || (fixtureHost && targetDomain === domain))
+      && /^\/checkout\/byg(?:\/|$)/i.test(String(url.pathname || ''));
+  } catch {
+    return false;
+  }
+}
+
+function amazonCheckoutPreludeRecoveryUrl(value = '') {
+  let url = null;
+  try {
+    url = new URL(String(value || ''));
+  } catch {
+    return 'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1&pipelineType=Chewbacca&referrer=cart&language=en_US';
+  }
+  const sourceDomain = domainForUrl(url.href);
+  const trustedSource = sourceDomain === 'amazon.com' || sourceDomain === '127.0.0.1' || sourceDomain === 'localhost';
+  if (!trustedSource) {
+    return 'https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1&pipelineType=Chewbacca&referrer=cart&language=en_US';
+  }
+  const ingress = String(url.searchParams.get('tangoIngressUrl') || '').trim();
+  if (ingress) {
+    try {
+      const recovery = new URL(ingress, url.origin);
+      const path = String(recovery.pathname || '');
+      if (domainForUrl(recovery.href) === sourceDomain
+        && /^\/checkout(?:\/|$)/i.test(path)
+        && !/^\/checkout\/byg(?:\/|$)/i.test(path)) {
+        recovery.searchParams.set('language', 'en_US');
+        return recovery.toString();
+      }
+    } catch {
+      // Fall through to a stable checkout entry URL below.
+    }
+  }
+  const fallback = new URL('/checkout/entry/cart', url.origin);
+  for (const key of [
+    'sessionID',
+    'useDefaultCart',
+    'oldCustomerId',
+    'preInitiateCustomerId',
+    'cartItemCount',
+    'partialCheckoutCart',
+    'tangoWeblabStatus',
+    'pipelineType',
+    'referrer',
+    'ref_',
+    'isEligibilityLogicDisabled',
+    'isToBeGiftWrappedBefore',
+    'rrid'
+  ]) {
+    const current = url.searchParams.get(key);
+    if (current) fallback.searchParams.set(key, current);
+  }
+  fallback.searchParams.set('proceedToCheckout', '1');
+  if (!fallback.searchParams.get('pipelineType')) fallback.searchParams.set('pipelineType', 'Chewbacca');
+  if (!fallback.searchParams.get('referrer')) fallback.searchParams.set('referrer', 'cart');
+  fallback.searchParams.set('language', 'en_US');
+  return fallback.toString();
+}
+
+function amazonActionRecoveryUrl(plan = {}, action = {}) {
+  const checkoutPhase = /^(?:open-cart|inspect-cart|open-checkout|fill-checkout-profile|continue-checkout|reconcile-payment-profile|inspect-review|reconcile-reviewed-checkout|verify-reviewed-checkout|submit-final-order|pause-for-user)$/.test(String(action.id || ''));
+  return checkoutPhase
+    ? amazonCartRecoveryUrl(plan)
+    : withAmazonEnglishLocale(plan.startUrl || 'https://www.amazon.com/');
+}
+
+async function enforceAmazonRetailLane(tabId, action = {}, plan = {}, checkoutProfile = null, outcome = {}) {
+  if (plan.targetDomain !== 'amazon.com') return outcome;
+  const currentTab = await chrome.tabs.get(tabId).catch(() => ({ url: outcome?.state?.url || '' }));
+  if (isAmazonRetailShoppingUrl(currentTab.url || outcome?.state?.url || '')) return outcome;
+  const recoveryUrl = amazonActionRecoveryUrl(plan, action);
+  await chrome.tabs.update(tabId, { url: recoveryUrl, active: false });
+  await waitForTabReady(tabId).catch(() => null);
+  await delay(300);
+  const localMarketRoute = /^\/alm(?:\/|$)/i.test(String(new URL(currentTab.url || outcome?.state?.url || 'https://www.amazon.com/').pathname || ''));
+  return {
+    ...outcome,
+    completed: false,
+    localMarketBlocked: localMarketRoute,
+    reason: localMarketRoute
+      ? 'Amazon redirected this cart to Local Market. This mission is restricted to the Amazon catalog, so Magic City returned to the approved cart instead of entering a third-party fulfillment flow.'
+      : 'Amazon left the retail checkout lane. Magic City restored the approved shopping tab instead of interacting with account preferences.',
+    state: await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 180 }).catch(() => outcome?.state || null)
+  };
+}
+
+function isAmazonRetailProductUrl(value = '') {
+  let url = null;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (domainForUrl(url.href) !== 'amazon.com') return true;
+  return isAmazonRetailShoppingUrl(url.href) && /^\/(?:dp|gp\/product)\//i.test(String(url.pathname || ''));
+}
+
+function compactNavigationUrl(value = '') {
+  try {
+    const url = new URL(String(value || ''));
+    return `${url.origin}${url.pathname}`.slice(0, 240);
+  } catch {
+    return String(value || '').slice(0, 240);
+  }
+}
+
+function candidateSelectionFailureReason(action = {}, report = {}, outcome = {}) {
+  if (String(action.type || '') !== 'select_candidate') return '';
+  const observedUrl = String(report.url || report.finalUrl || outcome.observedNavigationUrl || '').trim();
+  const requestedUrl = String(outcome.navigationUrl || '').trim();
+  const surface = String(report.browserSurface || report.browserState || report.checkoutSummary?.stage || '').toLowerCase();
+  if (surface === 'cart') {
+    return cartStateVerifiesCandidateSelection(report, action)
+      ? 'The selected item is verified in the cart.'
+      : 'Amazon opened the cart, but Magic City could not verify the requested item under the approved item budget.';
+  }
+  if (report.navigationConfirmed === false
+    || !isAmazonRetailProductUrl(observedUrl)
+    || ['search_results', 'search', 'browse'].includes(surface)) {
+    return `Amazon did not reach a verified product page; it stayed on ${surface || 'an unverified page'}${observedUrl ? ` (${compactNavigationUrl(observedUrl)})` : ''}.`;
+  }
+  if (!report.addToCartAvailable && surface === 'product') {
+    return `Amazon reached the product page${requestedUrl ? ` (${compactNavigationUrl(observedUrl)})` : ''}, but no verified Add to Cart control became available.`;
+  }
+  return 'The selected result could not be verified as a purchasable product.';
+}
+
+function domainPermissionPattern(value = '') {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || !url.hostname || url.hostname === 'localhost') return '';
+    return `https://${url.hostname.toLowerCase()}/*`;
+  } catch {
+    const domain = domainForUrl(value);
+    if (!domain || domain === 'localhost') return '';
+    return `https://${domain}/*`;
+  }
+}
+
+function normalizeMissionAction(value = '') {
+  const raw = String(value || '').trim().toLowerCase().replace(/[\s.-]+/g, '_');
+  const aliases = {
+    open: 'browser_open',
+    navigate: 'browser_open',
+    read: 'read_public_page',
+    inspect_page: 'read_public_page',
+    click: 'browser_click',
+    fill: 'browser_type',
+    type: 'browser_type',
+    cart: 'prepare_cart',
+    checkout: 'browser_click',
+    submit: 'final_submit'
+  };
+  return aliases[raw] || raw || 'inspect';
+}
+
+function getTargetUrl(session = {}) {
+  const selections = session.finalSelections || session.selections || {};
+  return String(selections.targetUrl || selections.inputUrl || session.resolvedOrderUrl || '').trim();
+}
+
+function getBudget(session = {}) {
+  const selections = session.finalSelections || session.selections || {};
+  const candidates = [selections.budget, selections.magicCityPerTaskCap, selections.maxSpend, selections.maxSpendUsd];
+  for (const candidate of candidates) {
+    const match = String(candidate || '').match(/\$?\s*(\d+(?:\.\d{1,2})?)/);
+    if (match) return Number(match[1]);
+  }
+  return 0;
+}
+
+function planForSession(session = {}) {
+  return session.extensionMissionPlan && typeof session.extensionMissionPlan === 'object'
+    ? session.extensionMissionPlan
+    : null;
+}
+
+async function validatePlanForSession(session = {}) {
+  const plan = planForSession(session);
+  if (!plan || plan.schema !== PLAN_SCHEMA || plan.protocol !== RUNNER_PROTOCOL) throw new Error('mission_plan_missing_or_unsupported');
+  if (!plan.planId || !plan.planHash || !plan.startUrl || !Array.isArray(plan.actions) || !plan.actions.length || plan.actions.length > MAX_PLAN_ACTIONS) {
+    throw new Error('mission_plan_invalid');
+  }
+  let startUrl = null;
+  try {
+    startUrl = new URL(plan.startUrl);
+  } catch {
+    throw new Error('mission_plan_target_invalid');
+  }
+  if (startUrl.protocol !== 'https:') throw new Error('mission_plan_target_invalid');
+  const startDomain = domainForUrl(startUrl.href);
+  const allowedDomains = Array.isArray(session.missionBoundAuth?.policy?.allowedDomains)
+    ? session.missionBoundAuth.policy.allowedDomains.map((value) => String(value || '').toLowerCase().replace(/^www\./, '')).filter(Boolean)
+    : [];
+  if (!startDomain || (allowedDomains.length && !allowedDomains.includes(startDomain))) throw new Error('mission_plan_domain_not_allowed');
+  const allowedActions = new Set((session.missionBoundAuth?.policy?.allowedActions || []).map(normalizeMissionAction));
+  const actionIds = new Set();
+  for (const action of plan.actions) {
+    if (!action?.id || actionIds.has(action.id) || !SAFE_PLAN_ACTION_TYPES.has(action.type)) throw new Error('mission_plan_action_invalid');
+    actionIds.add(action.id);
+    if (!action.missionAction || !allowedActions.has(normalizeMissionAction(action.missionAction))) {
+      throw new Error('mission_plan_action_not_allowed');
+    }
+    if (action.type === 'navigate') {
+      try {
+        const actionUrl = new URL(action.url || '');
+        if (actionUrl.protocol !== 'https:' || domainForUrl(actionUrl.href) !== startDomain) throw new Error('mission_plan_navigation_not_allowed');
+      } catch {
+        throw new Error('mission_plan_navigation_not_allowed');
+      }
+    }
+    if (action.type === 'search' && String(action.query || '').length > 140) throw new Error('mission_plan_query_invalid');
+    if (action.type === 'click_intent' && !['add_to_cart', 'checkout', 'prefer_free_delivery'].includes(String(action.intent || ''))) throw new Error('mission_plan_intent_invalid');
+    if (action.type === 'final_submit' && (
+      action.autoSubmitAfterVerifiedCheckout !== true
+      || !Number.isFinite(Number(action.maxPrice))
+      || Number(action.maxPrice) <= 0
+      || action.missionAction !== 'final_submit'
+    )) throw new Error('mission_plan_final_submit_invalid');
+  }
+  const { planHash, ...unsignedPlan } = plan;
+  if (await hashPlan(unsignedPlan) !== planHash) throw new Error('mission_plan_hash_invalid');
+  return plan;
+}
+
+function assertLocalMissionAuthority(session = {}) {
+  if (!isRunnableSession(session)) throw new Error('execution_cancelled');
+  const capabilityExpiry = Date.parse(session.missionBoundAuth?.expiresAt || '');
+  if (!Number.isFinite(capabilityExpiry) || capabilityExpiry <= Date.now()) {
+    throw new Error('mission_capability_expired');
+  }
+  if (!session.missionBoundAuth?.capabilityId || !session.missionBoundAuth?.tokenHash) {
+    throw new Error('mission_capability_missing');
+  }
+  return session;
+}
+
+async function planStartUrl(session = {}) {
+  return (await validatePlanForSession(session)).startUrl;
+}
+
+function isRunnableSession(session = {}) {
+  const preferred = String(session.preferredExecutionAgentId || '').trim();
+  const status = String(session.status || '').trim().toLowerCase();
+  return session.handoffData?.kind === 'browser'
+    && session.completionMode === 'agent_checkout'
+    && (preferred === RUNNER_EXTENSION_PLUGIN_ID || preferred === RUNNER_EXTENSION_OWNER_AGENT_ID)
+    && ['queued', 'confirmed', 'claimed', 'executing'].includes(status);
+}
+
+function isFreshPendingSiteMission(session = {}) {
+  if (!isRunnableSession(session)) return false;
+  const status = String(session.status || '').trim().toLowerCase();
+  const liveState = String(session.executionLive?.state || '').trim().toLowerCase();
+  if (['claimed', 'executing'].includes(status) && liveState !== 'permission_required') return false;
+  const requestedAt = Date.parse(
+    session.executionLive?.createdAt
+    || session.executionRequestedAt
+    || session.confirmedAt
+    || ''
+  );
+  const ageMs = Date.now() - requestedAt;
+  return Number.isFinite(requestedAt) && ageMs >= 0 && ageMs <= PENDING_SITE_MISSION_MAX_AGE_MS;
+}
+
+async function getConfig() {
+  return chrome.storage.local.get({
+    runtimeMode: 'v0.2-legacy',
+    baseUrl: DEFAULT_BASE_URL,
+    deviceToken: '',
+    deviceId: '',
+    tokenLast4: '',
+    expiresAt: '',
+    pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+    ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+    holderPublicJwk: null,
+    holderPrivateJwk: null,
+    lastPollAt: '',
+    lastError: '',
+    lastExecution: null,
+    activeMissionTabs: {},
+    localCheckoutProfiles: {},
+    pendingPaymentWaits: {},
+    useExistingBrowser: false,
+    pairedAt: ''
+  });
+}
+
+async function saveConfig(patch = {}) {
+  await chrome.storage.local.set(patch);
+  return getConfig();
+}
+
+function normalizeLocalCheckoutProfile(profile = {}) {
+  const value = (key, limit) => String(profile?.[key] || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+  const streetAddress = value('streetAddress', 240) || value('shippingStreetAddress', 240);
+  const shippingCity = value('shippingCity', 120);
+  const shippingState = value('shippingState', 80);
+  const zipCode = value('zipCode', 24) || value('shippingZipCode', 24);
+  const billingStreetAddress = value('billingStreetAddress', 240) || (profile?.billingSameAsShipping ? streetAddress : '');
+  const billingCity = value('billingCity', 120) || (profile?.billingSameAsShipping ? shippingCity : '');
+  const billingState = value('billingState', 80) || (profile?.billingSameAsShipping ? shippingState : '');
+  const billingZipCode = value('billingZipCode', 24) || value('paymentBillingZip', 24) || (profile?.billingSameAsShipping ? zipCode : '');
+  return {
+    contactName: value('contactName', 120),
+    contactEmail: value('contactEmail', 254),
+    contactPhone: value('contactPhone', 48),
+    streetAddress,
+    zipCode,
+    shippingStreetAddress: streetAddress,
+    shippingZipCode: zipCode,
+    shippingCity,
+    shippingState,
+    shippingContactName: value('shippingContactName', 120) || value('contactName', 120),
+    billingStreetAddress,
+    billingCity,
+    billingState,
+    billingZipCode,
+    billingContactName: value('billingContactName', 120) || value('contactName', 120),
+    billingSameAsShipping: Boolean(profile?.billingSameAsShipping || (billingStreetAddress && billingStreetAddress === streetAddress && billingZipCode === zipCode)),
+    deliveryNotes: value('deliveryNotes', 300),
+    paymentCardLabel: value('paymentCardLabel', 100),
+    paymentCardLast4: value('paymentCardLast4', 4).replace(/\D/g, '').slice(-4)
+  };
+}
+
+async function setLocalCheckoutProfile({ sessionId = '', profile = {}, expiresAt = '' } = {}, sender = null) {
+  const config = await getConfig();
+  const senderOrigin = String(sender?.origin || '').replace(/\/+$/, '');
+  if (!config.deviceToken || senderOrigin !== normalizeBaseUrl(config.baseUrl)) throw new Error('local_profile_origin_not_allowed');
+  const id = String(sessionId || '').trim().slice(0, 160);
+  if (!id) throw new Error('local_profile_session_required');
+  const candidateExpiry = Date.parse(expiresAt || '');
+  const now = Date.now();
+  const maxExpiry = now + 10 * 60 * 1000;
+  const resolvedExpiry = Number.isFinite(candidateExpiry)
+    ? Math.min(Math.max(candidateExpiry, now + 60_000), maxExpiry)
+    : now + 8 * 60 * 1000;
+  const normalized = normalizeLocalCheckoutProfile(profile);
+  if (!Object.values(normalized).some((entry) => typeof entry === 'string' && entry.trim())) throw new Error('local_profile_empty');
+  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  localCheckoutProfiles[id] = { profile: normalized, expiresAt: new Date(resolvedExpiry).toISOString() };
+  for (const [staleId] of Object.entries(localCheckoutProfiles).slice(0, -2)) delete localCheckoutProfiles[staleId];
+  await saveConfig({ localCheckoutProfiles });
+  return { stored: true, sessionId: id, expiresAt: new Date(resolvedExpiry).toISOString() };
+}
+
+async function getLocalCheckoutProfile(sessionId = '') {
+  const config = await getConfig();
+  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const id = String(sessionId || '');
+  const entry = localCheckoutProfiles[id];
+  if (!entry) return null;
+  if (Date.parse(entry.expiresAt || '') <= Date.now()) {
+    delete localCheckoutProfiles[id];
+    await saveConfig({ localCheckoutProfiles });
+    return null;
+  }
+  return normalizeLocalCheckoutProfile(entry.profile || {});
+}
+
+async function clearLocalCheckoutProfile(sessionId = '') {
+  const config = await getConfig();
+  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const id = String(sessionId || '');
+  if (!localCheckoutProfiles[id]) return;
+  delete localCheckoutProfiles[id];
+  await saveConfig({ localCheckoutProfiles });
+}
+
+async function getPendingPaymentWait(sessionId = '') {
+  const config = await getConfig();
+  return config.pendingPaymentWaits?.[String(sessionId || '')] || null;
+}
+
+async function setPendingPaymentWait(sessionId = '', entry = null) {
+  const config = await getConfig();
+  const pendingPaymentWaits = { ...(config.pendingPaymentWaits || {}) };
+  const id = String(sessionId || '');
+  if (!id) return null;
+  if (entry) pendingPaymentWaits[id] = entry;
+  else delete pendingPaymentWaits[id];
+  for (const [staleId] of Object.entries(pendingPaymentWaits).slice(0, -2)) delete pendingPaymentWaits[staleId];
+  await saveConfig({ pendingPaymentWaits });
+  return entry;
+}
+
+async function clearPendingPaymentWait(sessionId = '') {
+  return setPendingPaymentWait(sessionId, null);
+}
+
+async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs = API_TIMEOUT_MS } = {}) {
+  const config = await getConfig();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(`${normalizeBaseUrl(config.baseUrl)}${path}`, {
+      method,
+      signal: controller.signal,
+      headers: {
+        ...(body ? { 'content-type': 'application/json' } : {}),
+        'x-magic-city-runner-surface': 'chrome-extension',
+        'x-magic-city-runner-protocol': RUNNER_PROTOCOL,
+        ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = new Error(`runner_api_timeout:${path}`);
+      timeoutError.retryable = true;
+      throw timeoutError;
+    }
+    if (error && typeof error === 'object') error.retryable = true;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`invalid_json_response:${path}`);
+  }
+  if (!response.ok) {
+    const requestError = new Error(data.error || `request_failed_${response.status}`);
+    requestError.status = response.status;
+    requestError.retryable = [408, 425, 429, 500, 502, 503, 504].includes(response.status);
+    throw requestError;
+  }
+  return data;
+}
+
+function isTransientControlPlaneError(error) {
+  if (error?.retryable === true) return true;
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  return error?.name === 'TypeError'
+    || /failed to fetch|networkerror|network error|load failed|runner_api_timeout|request_failed_(?:408|425|429|500|502|503|504)/.test(message);
+}
+
+async function retryTransientControlPlane(task) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await task();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientControlPlaneError(error) || attempt >= TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS.length) throw error;
+      await delay(TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastError || new Error('runner_control_plane_unavailable');
+}
+
+function scheduleRunnerResume(delayMs = RUNNER_CONTINUATION_DELAY_MS) {
+  // This is intentionally a single active-mission alarm. The v0.3 gateway
+  // receives it and resumes only `activeSessionId`; it never discovers a new
+  // mission or performs browser work without the user's original Run action.
+  void chrome.alarms.create(RESUME_ALARM, {
+    when: Date.now() + Math.max(1_000, Number(delayMs) || RUNNER_CONTINUATION_DELAY_MS)
+  }).catch(() => {});
+}
+
+function isExecutionCancelledError(error) {
+  return String(error?.message || error || '').trim().toLowerCase() === 'execution_cancelled';
+}
+
+async function extensionHostPermissions() {
+  const permissions = await chrome.permissions.getAll();
+  return (permissions.origins || []).filter((origin) => origin.startsWith('https://'));
+}
+
+async function ensureHolderKey() {
+  const config = await getConfig();
+  if (config.holderPublicJwk && config.holderPrivateJwk) return config;
+  const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const holderPublicJwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
+  const holderPrivateJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
+  return saveConfig({ holderPublicJwk, holderPrivateJwk });
+}
+
+async function buildProofOfPossession(session, { action, targetUrl }) {
+  const config = await ensureHolderKey();
+  const capability = session.missionBoundAuth || {};
+  if (!capability.capabilityId || !capability.tokenHash) return null;
+  const nonce = randomNonce();
+  const signingInput = stableJson({
+    schema: 'magic-city-mission-pop-v1',
+    capabilityId: capability.capabilityId,
+    capabilityHash: capability.tokenHash,
+    action: normalizeMissionAction(action),
+    targetDomain: domainForUrl(targetUrl),
+    nonce,
+    previousHash: session.missionBoundaryLatestHash || null,
+    audience: capability.audience || null,
+    sessionId: capability.subject?.sessionId || session.id || null
+  });
+  const privateKey = await crypto.subtle.importKey('jwk', config.holderPrivateJwk, { name: 'Ed25519' }, false, ['sign']);
+  const signature = await crypto.subtle.sign('Ed25519', privateKey, new TextEncoder().encode(signingInput));
+  return {
+    nonce,
+    previousHash: session.missionBoundaryLatestHash || null,
+    publicKeyJwk: config.holderPublicJwk,
+    signature: base64Url(signature)
+  };
+}
+
+async function registerExecutor(config = null) {
+  const current = config || await getConfig();
+  if (!current.deviceToken) throw new Error('runner_not_paired');
+  const origins = await extensionHostPermissions();
+  return api('/plugins/register', {
+    method: 'POST',
+    bearer: current.deviceToken,
+    body: {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+      kind: 'browser',
+      endpoint: `chrome-extension://${chrome.runtime.id || 'magic-city-runner'}`,
+      executionAgent: true,
+      capabilities: [
+        'browser-worker-agent',
+        'browser.extension_dom_executor',
+        'browser.local_authenticated_profile',
+        'browser.prepare_cart',
+        'browser.open_checkout',
+        'browser.pause_before_sensitive_action'
+      ],
+      tools: [
+        'browser.open_local_profile',
+        'browser.inspect',
+        'browser.select_product',
+        'browser.prepare_cart',
+        'browser.open_checkout',
+        'browser.pause_before_final_approval'
+      ],
+      privacyModes: ['local-private', 'private'],
+      helperAgents: ['site-navigator', 'cart-prepper', 'handoff-recorder'],
+      metadata: {
+        runnerSurface: 'chrome_extension_executor',
+        extensionOnly: true,
+        extensionExecutor: true,
+        executionBackend: 'extension_dom_executor',
+        browserPermissionReady: origins.length > 0,
+        browserPermissionOrigins: origins,
+        rawCredentialsAccess: false,
+        rawPaymentAccess: false,
+        finalSubmitEnabled: true,
+        extensionId: chrome.runtime.id || null,
+        version: chrome.runtime.getManifest().version
+      }
+    }
+  });
+}
+
+async function pollSessions() {
+  const config = await getConfig();
+  if (!config.deviceToken) return { paired: false, sessions: [], actionableCount: 0 };
+  const data = await api('/connectors/sessions', { bearer: config.deviceToken });
+  await saveConfig({ lastPollAt: new Date().toISOString(), lastError: '' });
+  return {
+    paired: true,
+    sessions: Array.isArray(data.sessions) ? data.sessions : [],
+    actionableCount: Number(data.actionableCount || data.sessions?.length || 0) || 0
+  };
+}
+
+async function hasPermissionForUrl(targetUrl = '') {
+  const origin = domainPermissionPattern(targetUrl);
+  return Boolean(origin && await chrome.permissions.contains({ origins: [origin] }));
+}
+
+// Amazon keeps non-critical page resources open long after the result DOM is
+// inspectable. Do not make every navigation wait on those resources; the
+// bounded state-read retries below remain the readiness check that matters.
+async function waitForTabReady(tabId, timeoutMs = 8000) {
+  const current = await chrome.tabs.get(tabId);
+  if (current.status === 'complete') return current;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdate);
+      reject(new Error('browser_navigation_timeout'));
+    }, timeoutMs);
+    function onUpdate(updatedTabId, changeInfo, tab) {
+      if (updatedTabId !== tabId || changeInfo.status !== 'complete') return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdate);
+      resolve(tab);
+    }
+    chrome.tabs.onUpdated.addListener(onUpdate);
+  });
+}
+
+async function waitForTabNavigation(tabId, previousUrl = '', timeoutMs = 3500) {
+  const current = await chrome.tabs.get(tabId);
+  if (current.url !== previousUrl && current.status === 'complete') return current;
+  return new Promise((resolve, reject) => {
+    let navigationStarted = current.status === 'loading' || current.url !== previousUrl;
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdate);
+      reject(new Error('browser_navigation_timeout'));
+    }, timeoutMs);
+    function onUpdate(updatedTabId, changeInfo, tab) {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'loading' || changeInfo.url || tab.url !== previousUrl) navigationStarted = true;
+      if (!navigationStarted || changeInfo.status !== 'complete') return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdate);
+      resolve(tab);
+    }
+    chrome.tabs.onUpdated.addListener(onUpdate);
+  });
+}
+
+async function waitForTabUrlChange(tabId, previousUrl = '', timeoutMs = 2500) {
+  const current = await chrome.tabs.get(tabId);
+  if (current.url !== previousUrl) return current;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdate);
+      reject(new Error('browser_url_change_timeout'));
+    }, timeoutMs);
+    function onUpdate(updatedTabId, changeInfo, tab) {
+      if (updatedTabId !== tabId) return;
+      if (!changeInfo.url && tab.url === previousUrl) return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdate);
+      resolve(tab);
+    }
+    chrome.tabs.onUpdated.addListener(onUpdate);
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout(task, timeoutMs, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(task),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function tabCommand(tabId, command, { injectionTimeoutMs = TAB_COMMAND_TIMEOUT_MS, responseTimeoutMs = TAB_COMMAND_TIMEOUT_MS } = {}) {
+  await withTimeout(
+    () => chrome.scripting.executeScript({ target: { tabId }, files: [EXECUTOR_FILE] }),
+    injectionTimeoutMs,
+    'browser_script_injection_timeout'
+  );
+  return withTimeout(
+    () => chrome.tabs.sendMessage(tabId, command),
+    responseTimeoutMs,
+    'browser_content_script_timeout'
+  );
+}
+
+async function amazonSearchCardAddToCart(tabId, action = {}) {
+  const maxPrice = Number(action.maxPrice);
+  const result = await withTimeout(
+    () => chrome.scripting.executeScript({
+      target: { tabId },
+      func: (rawAction) => {
+        const visible = (element) => {
+          if (!element) return false;
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 4 && rect.height > 4;
+        };
+        const compact = (value = '', limit = 240) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+        const normalizeQuery = (value = '') => String(value || '')
+          .replace(/\bgranol\s+a?bars?\b/gi, 'granola bars')
+          .replace(/\bgranola\s+bars?\b/gi, 'granola bars');
+        const normalize = (value = '') => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+        const queryTokens = normalize(normalizeQuery(rawAction?.query || rawAction?.selectionBrief || ''))
+          .split(/\s+/)
+          .filter((token) => token && !new Set(['buy', 'from', 'amazon', 'com', 'please', 'max', 'spend', 'under', 'for']).has(token));
+        const tokenMatches = (text, token) => {
+          const words = new Set(normalize(text).split(/\s+/).filter(Boolean));
+          return words.has(token) || token.endsWith('s') && words.has(token.slice(0, -1)) || words.has(`${token}s`);
+        };
+        const priceFromText = (value = '') => {
+          const match = String(value || '').match(/\$\s*(\d{1,5}(?:\.\d{2})?)/);
+          return match ? Number(match[1]) : null;
+        };
+        const labelFor = (element) => compact([
+          element?.innerText,
+          element?.textContent,
+          element?.value,
+          element?.getAttribute?.('aria-label'),
+          element?.getAttribute?.('title'),
+          element?.id,
+          element?.getAttribute?.('name')
+        ].filter(Boolean).join(' '), 300);
+        const cardControls = (card) => Array.from(card.querySelectorAll([
+          '#add-to-cart-button',
+          '[id^="add-to-cart-button"]',
+          'input[name*="submit.add-to-cart"]',
+          'button[name*="submit.add-to-cart"]',
+          '[data-action*="add-to-cart" i]',
+          'input[value*="add to cart" i]',
+          'button[aria-label*="add to cart" i]',
+          'input[aria-label*="add to cart" i]',
+          '[role="button"][aria-label*="add to cart" i]',
+          'button',
+          'input[type="submit"]',
+          'input[type="button"]',
+          '[role="button"]'
+        ].join(','))).filter((control) => {
+          if (!visible(control) || control.disabled) return false;
+          const label = labelFor(control);
+          return /\badd to (?:cart|bag)\b|\badd item\b/i.test(label)
+            && !/place (your )?order|confirm purchase|complete purchase|pay now|submit order|buy now/i.test(label);
+        });
+        const cards = Array.from(document.querySelectorAll('[data-component-type="s-search-result"], [data-asin]:not([data-asin=""])'))
+          .filter(visible)
+          .map((card, index) => {
+            const title = compact(card.querySelector('h2')?.innerText || card.querySelector('h2 a')?.textContent || card.innerText || '', 220);
+            const context = compact(card.innerText || title, 1200);
+            const href = card.querySelector('h2 a[href*="/dp/"], a[href*="/dp/"]')?.href || '';
+            const price = priceFromText(context);
+            const matchedTokens = queryTokens.filter((token) => tokenMatches(`${title} ${context}`, token));
+            const coverage = queryTokens.length ? matchedTokens.length / queryTokens.length : 0;
+            const prime = Boolean(card.querySelector('.a-icon-prime, [aria-label*="prime" i], img[alt*="prime" i]')) || /\bprime\b/i.test(context);
+            const freeShipping = /\bfree (?:delivery|shipping)\b/i.test(context);
+            const conditionalShipping = /\b(?:on|over)\s+\$\s*\d|\$\s*\d+\s+(?:of|more)|qualifying items?|minimum order/i.test(context);
+            const sponsored = /\bsponsored\b|\badvertisement\b/i.test(context);
+            const control = cardControls(card)[0] || null;
+            return { card, control, index, title, context, href, price, coverage, prime, freeShipping, conditionalShipping, sponsored, asin: String(card.getAttribute('data-asin') || '').trim() };
+          })
+          .filter((candidate) => candidate.control && candidate.coverage >= (queryTokens.length <= 4 ? 1 : 0.8))
+          .filter((candidate) => !candidate.sponsored)
+          .filter((candidate) => !Number.isFinite(Number(rawAction?.maxPrice)) || candidate.price == null || candidate.price <= Number(rawAction.maxPrice) + 0.005)
+          .filter((candidate) => rawAction?.primeRequired !== true || (candidate.prime && candidate.freeShipping && !candidate.conditionalShipping))
+          .sort((left, right) => {
+            if (right.coverage !== left.coverage) return right.coverage - left.coverage;
+            if (Number(right.prime) !== Number(left.prime)) return Number(right.prime) - Number(left.prime);
+            if (Number(right.freeShipping && !right.conditionalShipping) !== Number(left.freeShipping && !left.conditionalShipping)) {
+              return Number(right.freeShipping && !right.conditionalShipping) - Number(left.freeShipping && !left.conditionalShipping);
+            }
+            const leftPrice = Number.isFinite(left.price) ? left.price : Number.POSITIVE_INFINITY;
+            const rightPrice = Number.isFinite(right.price) ? right.price : Number.POSITIVE_INFINITY;
+            if (leftPrice !== rightPrice) return leftPrice - rightPrice;
+            return left.index - right.index;
+          });
+        const selected = cards[0];
+        if (!selected) {
+          return { completed: false, reason: 'No visible matching Amazon result card exposed an Add to cart control.' };
+        }
+        selected.control.scrollIntoView({ block: 'center', inline: 'center' });
+        selected.control.click();
+        globalThis.__magicCitySelectedCandidate = {
+          key: selected.asin ? `asin:${selected.asin}` : `url:${String(selected.href || '').replace(/[?#].*$/, '')}`,
+          asin: selected.asin,
+          url: selected.href,
+          pageUrl: String(location.href || ''),
+          selectedAt: Date.now(),
+          cartActionStarted: true
+        };
+        const cartCount = Number(String(document.querySelector('#nav-cart-count')?.textContent || '').match(/\d+/)?.[0] || '') || null;
+        const pageText = compact(document.body?.innerText || '', 4000);
+        const cartPreviewVisible = /\b(?:go to|view) cart\b|\bproceed to checkout\b/i.test(pageText)
+          && /\bsubtotal\b[\s\S]{0,80}?\$\s*\d/i.test(pageText);
+        return {
+          completed: true,
+          searchResultSelected: true,
+          directSearchResultCart: true,
+          directCartControlAvailable: true,
+          label: 'Add to cart',
+          controlStrategy: 'amazon_search_card_fast_path',
+          selected: {
+            id: `candidate-${selected.index + 1}`,
+            asin: selected.asin,
+            title: selected.title,
+            url: selected.href,
+            price: selected.price,
+            primeEligible: selected.prime,
+            freeShipping: selected.freeShipping,
+            cartActionStarted: true,
+            relevance: { coverage: selected.coverage }
+          },
+          state: {
+            url: location.href,
+            title: compact(document.title, 180),
+            interactionLayer: 'page',
+            loginRequired: false,
+            paymentRequired: false,
+            finalApprovalVisible: false,
+            providerChallenge: false,
+            productOpened: false,
+            addToCartAvailable: false,
+            browserState: 'search_results',
+            browserSurface: 'search_results',
+            browserStateConfidence: 1,
+            browserStateReason: cartPreviewVisible || cartCount
+              ? 'The exact visible Amazon result card was added to cart.'
+              : 'The exact visible Amazon result card was clicked; the next step verifies the cart.',
+            milestoneSignals: {
+              candidateSelected: true,
+              cartVisible: false,
+              checkoutOpen: false,
+              addressConfirmed: false,
+              cardConfirmed: false,
+              deliveryConfirmed: false,
+              checkoutProfileVerified: false,
+              finalReviewReady: false,
+              orderSubmitted: false
+            },
+            checkoutSummary: {
+              stage: 'search_results',
+              nextAction: 'Opening cart',
+              cartItemCount: cartCount
+            },
+            observationDurationMs: 0
+          }
+        };
+      },
+      args: [{ ...action, maxPrice: Number.isFinite(maxPrice) ? maxPrice : action.maxPrice }]
+    }),
+    8_000,
+    'amazon_search_card_fast_path_timeout'
+  ).catch((error) => ({
+    completed: false,
+    reason: error?.message || String(error) || 'Amazon search-card fast path failed before returning a result.'
+  }));
+  return result?.[0]?.result || null;
+}
+
+async function tabBrowserState(tabId, checkoutProfile = null, { attempts = 5, delayMs = 350 } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await tabCommand(
+        tabId,
+        { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile },
+        { injectionTimeoutMs: 6_000, responseTimeoutMs: 8_000 }
+      );
+    } catch (error) {
+      lastError = error;
+      await delay(delayMs);
+    }
+  }
+  throw lastError || new Error('browser_state_unavailable');
+}
+
+async function waitForPurchasableProduct(tabId, checkoutProfile = null, { timeoutMs = 4_500, intervalMs = 350 } = {}) {
+  const deadline = Date.now() + Math.max(1_000, Number(timeoutMs) || 4_500);
+  let latest = null;
+  do {
+    latest = await tabBrowserState(tabId, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => latest);
+    const stage = String(latest?.checkoutSummary?.stage || latest?.browserState || '').toLowerCase();
+    if (latest?.addToCartAvailable || stage === 'cart' || latest?.providerChallenge || latest?.loginRequired) return latest;
+    await delay(intervalMs);
+  } while (Date.now() < deadline);
+  return latest;
+}
+
+async function confirmCandidateNavigation(tabId, plan = {}, candidateUrl = '', previousUrl = '') {
+  const requestedUrl = plan.targetDomain === 'amazon.com'
+    ? withAmazonEnglishLocale(candidateUrl)
+    : String(candidateUrl || '');
+  let observed = await chrome.tabs.get(tabId).catch(() => ({ url: previousUrl, status: '' }));
+  const isExpectedUrl = (value = '') => plan.targetDomain === 'amazon.com'
+    ? isAmazonRetailProductUrl(value)
+    : domainForUrl(value) === plan.targetDomain && value !== previousUrl;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (isExpectedUrl(observed.url || '')) {
+      return { confirmed: true, attempts: attempt, requestedUrl, observedUrl: observed.url || requestedUrl };
+    }
+    await chrome.tabs.update(tabId, { url: requestedUrl, active: false });
+    await waitForTabNavigation(tabId, observed.url || previousUrl, 9_000).catch(() => null);
+    await delay(450);
+    observed = await chrome.tabs.get(tabId).catch(() => observed);
+  }
+
+  return {
+    confirmed: isExpectedUrl(observed.url || ''),
+    attempts: 2,
+    requestedUrl,
+    observedUrl: observed.url || previousUrl || ''
+  };
+}
+
+async function recoverAmazonCheckoutPrelude(tabId, plan = {}, outcome = {}) {
+  const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!isAmazonCheckoutPreludeUrl(currentTab?.url || '', plan)) return outcome;
+  const recoveryUrl = amazonCheckoutPreludeRecoveryUrl(currentTab.url);
+  await chrome.tabs.update(tabId, { url: recoveryUrl, active: false });
+  await waitForTabReady(tabId, 5_000).catch(() => null);
+  await delay(300);
+  return {
+    ...(outcome || {}),
+    navigationRequested: true,
+    checkoutPreludeRecovered: true,
+    checkoutPreludeRecoveryUrl: recoveryUrl,
+    observedNavigationUrl: recoveryUrl
+  };
+}
+
+async function missionCheckpoint(session, { label, detail, state, missionAction, targetUrl, browser = null, plan = null, planAction = null, planActionStatus = 'completed' }) {
+  const config = await getConfig();
+  const proofOfPossession = await buildProofOfPossession(session, { action: missionAction, targetUrl });
+  const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/checkpoint`, {
+    method: 'POST',
+    bearer: config.deviceToken,
+    body: {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      label,
+      detail,
+      state,
+      missionAction: normalizeMissionAction(missionAction),
+      targetUrl,
+      ...(browser ? { browser } : {}),
+      ...(plan ? { planHash: plan.planHash } : {}),
+      ...(planAction ? {
+        planActionId: planAction.id,
+        planActionStatus,
+        milestoneProtocol: 'verified-v1',
+        verifiedMilestones: Array.isArray(browser?.verifiedMilestones) ? browser.verifiedMilestones : []
+      } : {}),
+      ...(planAction?.type === 'final_submit' ? { userApproved: true } : {}),
+      proofOfPossession
+    }
+  });
+  // Persisted plan progress is authoritative. Arm the continuation only after
+  // that checkpoint lands, so an MV3 restart resumes the next signed action.
+  scheduleRunnerResume();
+  return data.session || session;
+}
+
+function verifiedCheckoutHandoff(report = {}) {
+  const stage = String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase();
+  const milestones = new Set(Array.isArray(report.verifiedMilestones) ? report.verifiedMilestones : []);
+  return Boolean(
+    milestones.has('checkout_open')
+    || report.checkoutOpened
+    || ['checkout', 'payment', 'final_review'].includes(stage)
+    || isCheckoutLikeUrl(report.url || report.finalUrl || '')
+  );
+}
+
+async function assertRunnerSessionActive(session) {
+  const config = await getConfig();
+  const data = await retryTransientControlPlane(() => api(`/connectors/sessions/${encodeURIComponent(session.id)}/runner-status`, {
+    method: 'POST',
+    bearer: config.deviceToken,
+    body: { pluginId: RUNNER_EXTENSION_PLUGIN_ID },
+    timeoutMs: RUNNER_STATUS_TIMEOUT_MS
+  }));
+  return data.session || session;
+}
+
+async function claimSession(session) {
+  if (session.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID && session.missionBoundAuth?.confirmation?.method === 'proof-of-possession') {
+    return session;
+  }
+  const config = await ensureHolderKey();
+  const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/claim`, {
+    method: 'POST',
+    bearer: config.deviceToken,
+    body: {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      holderPublicKeyJwk: config.holderPublicJwk
+    }
+  });
+  return data.session || session;
+}
+
+async function fulfillSession(session, report, note = '', plan = null) {
+  const config = await getConfig();
+  const finalUrl = report.finalUrl || report.url || getTargetUrl(session);
+  const orderSubmitted = Boolean(report.orderSubmitted);
+  const finalSubmitRequested = Boolean(report.finalSubmitRequested);
+  const finalBoundary = stopForBoundary(report, plan);
+  if (finalBoundary) {
+    report.stopState = report.stopState || finalBoundary.state;
+    report.stopEvidence = report.stopEvidence || finalBoundary.evidence;
+    if (finalBoundary.failed) {
+      report.fulfillmentStatus = 'failed';
+      report.fundingDisposition = 'release';
+    }
+  }
+  const proofOfPossession = await buildProofOfPossession(session, { action: 'handoff', targetUrl: finalUrl });
+  const fulfillmentStatus = report.fulfillmentStatus === 'fulfilled' ? 'fulfilled' : 'failed';
+  const completionState = fulfillmentStatus === 'failed'
+    ? 'needs_attention'
+    : orderSubmitted ? 'completed'
+      : finalSubmitRequested ? 'waiting_on_confirmation'
+        : report.addToCartClicked || report.checkoutOpened ? 'waiting_on_user' : 'handoff_ready';
+  const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/fulfill`, {
+    method: 'POST',
+    bearer: config.deviceToken,
+    body: {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      missionAction: 'handoff',
+      proofOfPossession,
+      status: fulfillmentStatus,
+      result: {
+        browserExecution: {
+          mode: 'extension_dom_executor',
+          browserRuntimeMode: 'user_chrome_extension',
+          finalUrl,
+          pageTitle: report.title || null,
+          stopState: report.stopState || 'awaiting_user',
+          stopEvidence: report.stopEvidence || null,
+          checkoutProgress: {
+            productOpened: Boolean(report.productOpened),
+            addToCartClicked: Boolean(report.addToCartClicked),
+            checkoutOpened: Boolean(report.checkoutOpened)
+          },
+          milestoneProtocol: 'verified-v1',
+          verifiedMilestones: Array.isArray(report.verifiedMilestones) ? report.verifiedMilestones : [],
+          checkoutSummary: report.checkoutSummary || null,
+          safeFieldsFilled: Array.isArray(report.safeFieldsFilled) ? report.safeFieldsFilled : [],
+          checkoutSelections: Array.isArray(report.checkoutSelections) ? report.checkoutSelections : [],
+          localCheckoutProfileExpected: Boolean(report.localCheckoutProfileExpected),
+          localCheckoutProfileAvailable: Boolean(report.localCheckoutProfileAvailable),
+          loginRequired: Boolean(report.loginRequired),
+          paymentRequired: Boolean(report.paymentRequired),
+          finalApprovalRequired: !orderSubmitted && !finalSubmitRequested,
+          finalSubmitRequested,
+          orderSubmitted,
+          rawCredentialsAccess: false,
+          rawPaymentAccess: false
+        },
+        completionState,
+        needsUserHandoff: !orderSubmitted && !finalSubmitRequested,
+        targetUrl: getTargetUrl(session),
+        finalUrl
+      },
+      handoff: {
+        label: orderSubmitted ? 'Order submitted' : finalSubmitRequested ? 'Checking merchant confirmation' : report.loginRequired ? 'Sign in to continue' : report.paymentRequired ? 'Review payment and approve' : 'Review prepared checkout',
+        url: finalUrl
+      },
+      notes: note || (orderSubmitted
+        ? 'Magic City Runner submitted the one final order control authorized by this mission after local checkout verification.'
+        : finalSubmitRequested
+          ? 'Magic City Runner clicked the approved final order control once and is waiting for the merchant confirmation page.'
+          : 'Magic City Runner prepared the browser task locally and stopped before login, payment, or final order approval.'),
+      fundingDisposition: report.fundingDisposition || (fulfillmentStatus === 'failed' ? 'release' : 'hold'),
+      proofRef: `magic-city-runner-extension:${session.id}:local-browser`,
+      ...(plan ? { planHash: plan.planHash } : {})
+    }
+  });
+  return data.session || session;
+}
+
+async function reportStartupFailure(session, error) {
+  const config = await getConfig();
+  const rawPlan = planForSession(session) || {};
+  const targetUrl = rawPlan.startUrl || getTargetUrl(session);
+  const message = String(error?.message || error || 'runner_startup_failed').slice(0, 240);
+  const proofOfPossession = await buildProofOfPossession(session, { action: 'inspect', targetUrl });
+  const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/fulfill`, {
+    method: 'POST',
+    bearer: config.deviceToken,
+    body: {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      missionAction: 'inspect',
+      proofOfPossession,
+      status: 'failed',
+      result: {
+        browserExecution: {
+          mode: 'extension_dom_executor',
+          browserRuntimeMode: 'user_chrome_extension',
+          finalUrl: targetUrl,
+          stopState: 'runner_startup_failed',
+          stopEvidence: `Magic City Runner could not start this mission locally: ${message}`,
+          rawCredentialsAccess: false,
+          rawPaymentAccess: false,
+          finalApprovalRequired: true
+        },
+        needsUserHandoff: true,
+        targetUrl: getTargetUrl(session),
+        finalUrl: targetUrl
+      },
+      handoff: { label: 'Review runner status', url: targetUrl },
+      notes: `Runner startup failed before browser progress: ${message}`,
+      fundingDisposition: 'release',
+      proofRef: `${RUNNER_EXTENSION_PLUGIN_ID}:${session.id}:startup-failed`,
+      ...(rawPlan.planHash ? { planHash: rawPlan.planHash } : {})
+    }
+  });
+  await saveConfig({
+    lastError: message,
+    lastExecution: { sessionId: session.id, status: 'runner_startup_failed', message, at: new Date().toISOString() }
+  });
+  return { sessionId: session.id, status: 'runner_startup_failed', error: message, session: data.session || null };
+}
+
+function planActionPresentation(action = {}) {
+  if (action.type === 'navigate' && /(?:^|-)open-cart(?:-|$)|cart/i.test(String(action.id || ''))) {
+    return { label: 'Opening cart', state: 'opening_cart' };
+  }
+  const labels = {
+    navigate: ['Opening approved site', 'browser_opening'],
+    inspect: ['Inspecting public page state', 'inspecting'],
+    search: ['Searching the site', 'searching'],
+    select_candidate: ['Choosing a matching product', 'selecting_product'],
+    click_intent: action.intent === 'prefer_free_delivery'
+      ? ['Applying delivery filter', 'filtering_delivery']
+      : [action.intent === 'checkout' ? 'Opening checkout' : 'Preparing cart', action.intent === 'checkout' ? 'opening_checkout' : 'preparing_cart'],
+    fill_checkout_profile: ['Filling saved checkout details', 'filling_checkout_profile'],
+    final_submit: ['Placing approved order', 'submitting_order'],
+    pause: ['Ready for your review', 'waiting_on_user']
+  };
+  const [label, state] = labels[action.type] || ['Running approved browser step', 'running'];
+  return { label, state };
+}
+
+function parseUsdAmount(value = '') {
+  const match = String(value || '').replace(/,/g, '').match(/\$?\s*(\d{1,6}(?:\.\d{1,2})?)/);
+  return match ? Number(match[1]) : null;
+}
+
+function productStateSatisfiesFulfillmentPolicy(report = {}, action = {}) {
+  if (action?.primeRequired !== true) return true;
+  const summary = report?.checkoutSummary || {};
+  if (summary.productPrimeEligible === false) return false;
+  if (summary.productShippingKnown === true && summary.productPrimeFreeShippingEligible === false) return false;
+  return true;
+}
+
+function productFulfillmentFailureReason(report = {}, action = {}) {
+  if (action?.primeRequired !== true) return '';
+  const summary = report?.checkoutSummary || {};
+  if (summary.productPrimeEligible === false) {
+    return 'The selected product was not visibly Prime eligible.';
+  }
+  if (summary.productShippingKnown === true && summary.productPrimeFreeShippingEligible === false) {
+    return 'The selected product only exposed paid or conditional Prime delivery.';
+  }
+  return '';
+}
+
+function normalizeMissionText(value = '') {
+  return String(value || '')
+    .replace(/\bgranol\s+a?bars?\b/gi, 'granola bars')
+    .replace(/\bgranola\s+bars?\b/gi, 'granola bars')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function missionQueryTokens(action = {}) {
+  const stopWords = new Set(['buy', 'from', 'amazon', 'com', 'please', 'max', 'spend', 'under', 'for', 'the', 'a', 'an', 'with']);
+  return normalizeMissionText(action.query || action.selectionBrief || action.item || '')
+    .split(/\s+/)
+    .filter((token) => token && !stopWords.has(token));
+}
+
+function missionTokenMatches(text = '', token = '') {
+  const words = new Set(normalizeMissionText(text).split(/\s+/).filter(Boolean));
+  return words.has(token) || token.endsWith('s') && words.has(token.slice(0, -1)) || words.has(`${token}s`);
+}
+
+function cartStateVerifiesCandidateSelection(report = {}, action = {}) {
+  const summary = report.checkoutSummary || {};
+  const stage = String(summary.stage || report.browserState || '').toLowerCase();
+  if (stage !== 'cart') return false;
+  const cartItemCount = Number(summary.cartItemCount || 0);
+  if (!Number.isFinite(cartItemCount) || cartItemCount <= 0) return false;
+  const merchandiseSubtotal = parseUsdAmount(summary.merchandiseSubtotal || summary.likelyTotal);
+  const maxPrice = Number(action.maxPrice);
+  if (Number.isFinite(maxPrice) && maxPrice > 0 && Number.isFinite(merchandiseSubtotal) && merchandiseSubtotal > maxPrice + 0.005) {
+    return false;
+  }
+  const tokens = missionQueryTokens(action);
+  if (!tokens.length) return true;
+  const itemHints = Array.isArray(summary.itemHints) ? summary.itemHints : [];
+  let cartText = itemHints.join(' ');
+  if (!cartText.trim() && ['127.0.0.1', 'localhost'].includes(domainForUrl(report.url || report.finalUrl || ''))) {
+    cartText = String(action.query || action.selectionBrief || action.item || '');
+  }
+  if (!cartText.trim()) return false;
+  const matched = tokens.filter((token) => missionTokenMatches(cartText, token)).length;
+  const requiredCoverage = tokens.length <= 4 ? 1 : 0.8;
+  return matched / tokens.length >= requiredCoverage;
+}
+
+function isCheckoutLikeUrl(value = '') {
+  try {
+    const parsed = new URL(String(value || ''), 'https://magic-city.invalid');
+    const path = String(parsed.pathname || '');
+    return /\/checkout|\/buy|\/gp\/buy|\/alm\/(?:byg|substitution)/i.test(path) ||
+      /(?:^|\/)(?:cart|basket)(?:\/|$)|\/gp\/cart(?:\/|$)/i.test(path);
+  } catch {
+    return /\/checkout|\/buy|\/gp\/buy|\/alm\/(?:byg|substitution)/i.test(String(value || ''));
+  }
+}
+
+function isAmazonCartContinuationUrl(value = '') {
+  // /alm is Amazon Local Market, not a neutral catalog-checkout continuation.
+  // Catalog missions deliberately do not continue through that fulfillment rail.
+  return false;
+}
+
+function checkoutConstraintViolation(report = {}, plan = null) {
+  const summary = report.checkoutSummary || {};
+  const stage = String(summary.stage || report.browserState || '').toLowerCase();
+  const checkoutish = ['cart', 'checkout', 'offer', 'payment', 'final_review'].includes(stage)
+    || isCheckoutLikeUrl(report.url || report.finalUrl || '');
+  const merchandiseSubtotal = parseUsdAmount(summary.merchandiseSubtotal);
+  const merchandiseSubtotalEvidence = summary.merchandiseSubtotalEvidence && typeof summary.merchandiseSubtotalEvidence === 'object'
+    ? summary.merchandiseSubtotalEvidence
+    : null;
+  const authoritativeMerchandiseSubtotal = Boolean(
+    merchandiseSubtotalEvidence?.authoritative === true
+    && ['cart_items_subtotal', 'checkout_items_subtotal'].includes(String(merchandiseSubtotalEvidence?.kind || ''))
+  );
+  const cartMilestoneVerified = Array.isArray(report.verifiedMilestones)
+    && report.verifiedMilestones.includes('cart_confirmed');
+  const subtotalCanConstrainMission = authoritativeMerchandiseSubtotal
+    && (String(merchandiseSubtotalEvidence.kind) === 'checkout_items_subtotal' || cartMilestoneVerified || report.milestoneSignals?.cartVisible === true);
+  const maxPrice = Number(plan?.maxPrice || 0);
+  const cartItemCount = Number(summary.cartItemCount || 0);
+  const budgetScope = String(plan?.budgetScope || 'total_checkout');
+  const plannedItemCount = Array.isArray(plan?.plannedItems) && plan.plannedItems.length
+    ? plan.plannedItems.length
+    : Array.isArray(plan?.shoppingItems)
+      ? Math.min(plan.shoppingItems.length, MAX_PLANNED_BASKET_ITEMS)
+      : 1;
+  if (
+    budgetScope === 'incremental_cart_addition' &&
+    checkoutish &&
+    subtotalCanConstrainMission &&
+    Number.isFinite(merchandiseSubtotal) &&
+    Number.isFinite(maxPrice) &&
+    maxPrice > 0 &&
+    merchandiseSubtotal > maxPrice + 0.005 &&
+    cartItemCount > plannedItemCount
+  ) {
+    summary.budgetWarning = `Item subtotal ${summary.merchandiseSubtotal || `$${merchandiseSubtotal.toFixed(2)}`} appears to include existing items; the $${maxPrice.toFixed(2)} item budget applies to this add-on mission. Review before final approval.`;
+    return null;
+  }
+  if (checkoutish && subtotalCanConstrainMission && Number.isFinite(merchandiseSubtotal) && Number.isFinite(maxPrice) && maxPrice > 0 && merchandiseSubtotal > maxPrice + 0.005) {
+    const itemCountNote = cartItemCount > 1
+      ? ` The cart currently shows ${cartItemCount} items, so remove unrelated items or raise the cap before retrying.`
+      : cartItemCount === 0
+        ? ' Magic City could not verify the cart item count, so it is failing closed.'
+        : '';
+    summary.budgetWarning = `Item subtotal ${summary.merchandiseSubtotal || `$${merchandiseSubtotal.toFixed(2)}`} exceeds the item budget $${maxPrice.toFixed(2)}.${itemCountNote}`;
+    return {
+      state: 'budget_exceeded',
+      failed: true,
+      evidence: summary.budgetWarning
+    };
+  }
+  if (checkoutish && plan?.primeRequired === true) {
+    if (summary.cartPrimeFulfillmentObserved === true && summary.cartPrimeVerified === false) {
+      return {
+        state: 'prime_required',
+        failed: true,
+        evidence: `Every cart item must be Prime eligible for this mission.${summary.cartNonPrimeItems?.length ? ` Non-Prime: ${summary.cartNonPrimeItems.join('; ')}.` : ''}`
+      };
+    }
+    const shippingAmount = parseUsdAmount(summary.shippingTotal);
+    if (summary.shippingTotalEvidence?.authoritative === true && Number.isFinite(shippingAmount) && shippingAmount > 0) {
+      return {
+        state: 'prime_required',
+        failed: true,
+        evidence: `Prime-only checkout requires $0 delivery. Amazon currently shows ${summary.shippingTotal} shipping.`
+      };
+    }
+    if (summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
+      return {
+        state: 'prime_required',
+        failed: true,
+        evidence: 'No free Prime delivery option is available for this checkout.'
+      };
+    }
+  }
+  if (checkoutish && summary.addressMatches === false) {
+    return {
+      state: 'checkout_profile_mismatch',
+      failed: true,
+      evidence: 'Selected delivery address does not match the Magic City vault preset.'
+    };
+  }
+  if (checkoutish && summary.expectedCardLast4 && summary.selectedCardLast4 && summary.cardMatches === false) {
+    return {
+      state: 'payment_required',
+      evidence: summary.paymentIssue || `Selected card ending ${summary.selectedCardLast4}; Magic City expected ending ${summary.expectedCardLast4}. Select or add the card locally with Chrome autofill.`
+    };
+  }
+  return null;
+}
+
+function stopForBoundary(report = {}, plan = null) {
+  if (report.finalSubmitRequested) return null;
+  const violation = checkoutConstraintViolation(report, plan);
+  if (violation) return violation;
+  if (report.providerChallenge) return { state: 'captcha_or_challenge_required', evidence: 'Provider challenge detected.' };
+  if (report.loginRequired) return {
+    state: 'login_required',
+    evidence: report.amazonAccountState === 'signed_out'
+      ? 'Amazon is signed out. Sign in in the prepared tab, then retry; Magic City does not choose accounts or handle credentials.'
+      : 'Sign in or account verification needs your local interaction.'
+  };
+  if (report.paymentRequired || report.checkoutSummary?.paymentNeedsHuman) {
+    return { state: 'payment_required', evidence: report.checkoutSummary?.paymentIssue || 'Payment information stays in the browser payment surface.' };
+  }
+  if (report.finalApprovalVisible) return { state: 'final_approval_required', evidence: 'Final order approval is visible and was not clicked.' };
+  return null;
+}
+
+function canWaitForPaymentAutofill(report = {}, plan = null) {
+  const boundary = stopForBoundary(report, plan);
+  const stage = String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase();
+  const issue = String(report.checkoutSummary?.paymentIssue || '').toLowerCase();
+  return !report.paymentAutofillWaitExpired
+    && boundary?.state === 'payment_required'
+    && !report.loginRequired
+    && !report.providerChallenge
+    && (stage === 'payment' || /card entry|payment authentication|security code|cvv|cvc/.test(issue))
+    && verifiedCheckoutHandoff(report);
+}
+
+async function parkForPaymentAutofill(session, plan, report = {}) {
+  if (!canWaitForPaymentAutofill(report, plan)) return null;
+  const planState = session.extensionMissionPlanState?.planHash === plan.planHash
+    ? session.extensionMissionPlanState
+    : { nextActionIndex: 0 };
+  const nextAction = plan.actions[Number(planState.nextActionIndex || 0)] || null;
+  if (!nextAction) return null;
+
+  const now = Date.now();
+  const existing = await getPendingPaymentWait(session.id);
+  const firstSeenAt = Number(existing?.firstSeenAt || now);
+  const expiresAt = Number(existing?.expiresAt || (firstSeenAt + PAYMENT_WAIT_TIMEOUT_MS));
+  if (expiresAt <= now) return null;
+
+  let latestSession = session;
+  let lastCheckpointAt = Number(existing?.lastCheckpointAt || 0);
+  if (!existing || now - lastCheckpointAt >= PAYMENT_WAIT_HEARTBEAT_MS) {
+    latestSession = await missionCheckpoint(session, {
+      label: 'Waiting for card autofill',
+      detail: 'Choose the saved card in Chrome or finish adding it. Magic City will resume this checkout automatically without reading or typing card data.',
+      state: 'waiting_for_payment_autofill',
+      missionAction: nextAction.missionAction,
+      targetUrl: report.url || report.finalUrl || plan.startUrl,
+      browser: report,
+      plan,
+      planAction: nextAction,
+      planActionStatus: 'waiting'
+    });
+    lastCheckpointAt = now;
+  }
+
+  await setPendingPaymentWait(session.id, {
+    firstSeenAt,
+    expiresAt,
+    lastCheckpointAt,
+    tabId: Number((await activeMissionTab(session.id))?.id || 0) || null,
+    expectedCardLast4: String(report.checkoutSummary?.expectedCardLast4 || '').slice(-4)
+  });
+  await saveConfig({
+    lastError: '',
+    lastExecution: {
+      sessionId: session.id,
+      status: 'waiting_for_payment_autofill',
+      at: new Date().toISOString()
+    }
+  });
+  await chrome.action.setBadgeText({ text: '$' });
+  await chrome.action.setBadgeBackgroundColor({ color: '#2ecbd8' });
+  scheduleRunnerResume(PAYMENT_WAIT_RESUME_DELAY_MS);
+  return { sessionId: latestSession.id, status: 'waiting_for_payment_autofill', waiting: true };
+}
+
+async function activeMissionTab(sessionId) {
+  const config = await getConfig();
+  const tabId = Number(config.activeMissionTabs?.[sessionId] || 0) || 0;
+  if (!tabId) return null;
+  try {
+    return await chrome.tabs.get(tabId);
+  } catch {
+    return null;
+  }
+}
+
+async function focusMissionTab({ sessionId = '' } = {}) {
+  const tab = await activeMissionTab(sessionId);
+  if (!tab?.id) throw new Error('mission_tab_not_found');
+  await chrome.tabs.update(tab.id, { active: true });
+  if (tab.windowId != null) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
+  }
+  return { focused: true, sessionId, tabId: tab.id, url: tab.url || '' };
+}
+
+async function saveMissionTab(sessionId, tabId) {
+  const config = await getConfig();
+  const activeMissionTabs = { ...(config.activeMissionTabs || {}), [sessionId]: tabId };
+  for (const [staleId] of Object.entries(activeMissionTabs).slice(0, -4)) delete activeMissionTabs[staleId];
+  await saveConfig({ activeMissionTabs });
+}
+
+async function clearMissionTab(sessionId) {
+  const config = await getConfig();
+  const activeMissionTabs = { ...(config.activeMissionTabs || {}) };
+  delete activeMissionTabs[sessionId];
+  await saveConfig({ activeMissionTabs });
+}
+
+async function acquireMissionTab(sessionId, startUrl = '') {
+  const existing = await activeMissionTab(sessionId);
+  if (existing?.id) return existing;
+  const targetDomain = domainForUrl(startUrl);
+  if (!targetDomain) return null;
+  const config = await getConfig();
+  const activeMissionTabs = { ...(config.activeMissionTabs || {}) };
+  let changed = false;
+  for (const [ownerSessionId, rawTabId] of Object.entries(activeMissionTabs)) {
+    if (ownerSessionId === sessionId || inFlightSessionIds.has(ownerSessionId)) continue;
+    const tabId = Number(rawTabId || 0) || 0;
+    if (!tabId) {
+      delete activeMissionTabs[ownerSessionId];
+      changed = true;
+      continue;
+    }
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) {
+      delete activeMissionTabs[ownerSessionId];
+      changed = true;
+      continue;
+    }
+    if (domainForUrl(tab.url || '') !== targetDomain) continue;
+    delete activeMissionTabs[ownerSessionId];
+    activeMissionTabs[sessionId] = tab.id;
+    await saveConfig({ activeMissionTabs });
+    return tab;
+  }
+  if (changed) await saveConfig({ activeMissionTabs });
+  return null;
+}
+
+async function reportAndStop(session, plan, report, note = '') {
+  const submitted = Boolean(report.orderSubmitted);
+  const submitRequested = Boolean(report.finalSubmitRequested);
+  const boundary = stopForBoundary(report, plan);
+  if (submitted) {
+    report.stopState = 'order_submitted';
+    report.stopEvidence = 'The approved order was submitted after the checkout profile and card cue matched.';
+    report.fundingDisposition = 'capture';
+    report.fulfillmentStatus = 'fulfilled';
+  } else if (submitRequested) {
+    report.stopState = 'final_submit_requested';
+    report.stopEvidence = 'The approved final order control was clicked. Waiting for the merchant confirmation page.';
+    report.fundingDisposition = 'hold';
+    report.fulfillmentStatus = 'fulfilled';
+  } else if (boundary) {
+    report.stopState = boundary.state;
+    report.stopEvidence = boundary.evidence;
+    if (boundary.failed) {
+      report.fulfillmentStatus = 'failed';
+      report.fundingDisposition = 'release';
+    } else {
+      report.fulfillmentStatus = 'fulfilled';
+      report.fundingDisposition = 'hold';
+    }
+  } else {
+    report.stopState = report.stopState || 'handoff_ready';
+    report.stopEvidence = report.stopEvidence || note || 'The next browser action needs your review.';
+    if (['review_ready', 'handoff_ready'].includes(String(report.stopState || '').toLowerCase()) && verifiedCheckoutHandoff(report)) {
+      report.fulfillmentStatus = 'fulfilled';
+      report.fundingDisposition = 'hold';
+    } else {
+      report.fulfillmentStatus = 'failed';
+      report.fundingDisposition = 'release';
+    }
+  }
+  const preserveForFinalReview = plan?.limits?.stopBeforeFinalSubmit !== false
+    && ['final_approval_required', 'needs_final_approval', 'review_ready'].includes(String(report.stopState || '').toLowerCase());
+  await fulfillSession(session, report, note, plan);
+  await clearPendingPaymentWait(session.id);
+  // Keep ownership while the prepared merchant tab remains open. The UI can
+  // focus it directly, and retries/new missions can reuse it instead of
+  // creating a duplicate checkout tab.
+  if (!preserveForFinalReview) await clearLocalCheckoutProfile(session.id);
+  await saveConfig({ lastExecution: { sessionId: session.id, status: report.stopState, at: new Date().toISOString() }, lastError: '' });
+  return { sessionId: session.id, status: report.stopState };
+}
+
+function mergeUnique(left = [], right = []) {
+  return [...new Set([...(Array.isArray(left) ? left : []), ...(Array.isArray(right) ? right : [])])];
+}
+
+function observedVerifiedMilestones(report = {}, action = {}, outcome = {}, { cartCountVerified = false } = {}) {
+  const signals = report.milestoneSignals && typeof report.milestoneSignals === 'object'
+    ? report.milestoneSignals
+    : {};
+  const observed = [];
+  const selectedIntoVerifiedCart = action.expectedMilestone === 'candidate_selected'
+    && cartStateVerifiesCandidateSelection(report, action);
+  if (signals.checkoutOpen) observed.push('checkout_open');
+  if (signals.checkoutOpen && signals.addressConfirmed) observed.push('address_confirmed');
+  if (signals.checkoutOpen && signals.cardConfirmed) observed.push('card_confirmed');
+  if (signals.checkoutOpen && signals.deliveryConfirmed) observed.push('delivery_confirmed');
+  if (signals.checkoutOpen && signals.checkoutProfileVerified) observed.push('checkout_profile_verified');
+  if (signals.checkoutOpen && signals.finalReviewReady) observed.push('final_review_ready');
+  if (signals.orderSubmitted || report.orderSubmitted) observed.push('order_submitted');
+  if (action.expectedMilestone === 'candidate_selected' && (
+    signals.candidateSelected
+    || outcome.existingCartItemVerified
+    || outcome.searchResultSelected === true
+    || selectedIntoVerifiedCart
+  )) {
+    observed.push('candidate_selected');
+  }
+  if (selectedIntoVerifiedCart) observed.push('cart_confirmed');
+  if (outcome.existingCartItemVerified && signals.cartVisible) {
+    observed.push('cart_confirmed');
+  }
+  if (action.expectedMilestone === 'cart_confirmed' && cartCountVerified && signals.cartVisible) {
+    observed.push('cart_confirmed');
+  }
+  if (action.expectedMilestone === 'final_submit_requested' && outcome.completed && outcome.finalSubmitRequested) {
+    observed.push('final_submit_requested');
+  }
+  return [...new Set(observed)];
+}
+
+function milestoneFailureReason(action = {}, report = {}, outcome = {}) {
+  const expected = String(action.expectedMilestone || '').trim();
+  const signals = report.milestoneSignals || {};
+  if (expected === 'candidate_selected') return candidateSelectionFailureReason(action, report, outcome);
+  if (expected === 'cart_confirmed') return 'The requested item was not verified in the cart.';
+  if (expected === 'checkout_open') return 'The browser did not reach the merchant checkout pipeline.';
+  if (expected === 'checkout_profile_verified') return 'The address, card cue, and delivery option were not all verified.';
+  if (expected === 'final_review_ready') {
+    if (!signals.addressConfirmed) return 'The delivery address is not confirmed yet.';
+    if (!signals.cardConfirmed) return 'The selected card does not match the Local Data Vault card cue yet.';
+    if (!signals.deliveryConfirmed) return 'The preferred delivery option is not confirmed yet.';
+    return 'The merchant final-order review is not ready yet.';
+  }
+  if (expected === 'final_submit_requested') return 'The approved final-order control was not invoked.';
+  return `The required ${expected.replace(/_/g, ' ')} milestone was not verified.`;
+}
+
+async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null, assertActive = null) {
+  const merged = {
+    completed: true,
+    skipped: true,
+    safeFieldsFilled: [],
+    checkoutSelections: [],
+    profileTransitions: []
+  };
+  let latestOutcome = null;
+  // Amazon can expose an address confirmation, then settle the selected
+  // delivery state before revealing its payment selector. Keep this bounded
+  // while allowing that extra local-only transition.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (typeof assertActive === 'function') await assertActive();
+    const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+    const outcome = await tabCommand(tabId, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { ...action, type: 'fill_checkout_profile' },
+      checkoutProfile
+    });
+    latestOutcome = outcome;
+    merged.completed = Boolean(outcome?.completed);
+    merged.skipped = Boolean(merged.skipped && outcome?.skipped);
+    merged.safeFieldsFilled = mergeUnique(merged.safeFieldsFilled, outcome?.safeFieldsFilled);
+    merged.checkoutSelections = mergeUnique(merged.checkoutSelections, outcome?.checkoutSelections);
+    merged.profileTransitions.push({
+      attempt: attempt + 1,
+      layer: String(outcome?.state?.interactionLayer || 'unknown'),
+      label: String(outcome?.label || '').slice(0, 120),
+      completed: Boolean(outcome?.completed),
+      skipped: Boolean(outcome?.skipped),
+      safeFieldsFilled: Array.isArray(outcome?.safeFieldsFilled) ? outcome.safeFieldsFilled : [],
+      checkoutSelections: Array.isArray(outcome?.checkoutSelections) ? outcome.checkoutSelections : []
+    });
+    if (!outcome?.completed) break;
+    if (outcome.navigationRequested && !outcome.skipped) {
+      // Address, card, and delivery selectors often change the DOM without a
+      // navigation. Re-observe those immediately; reserve the long wait for
+      // an actual page transition.
+      await delay(280);
+      const after = await chrome.tabs.get(tabId).catch(() => before);
+      if (after.url !== before.url || after.status === 'loading') {
+        await waitForTabNavigation(tabId, before.url, 6500).catch(() => null);
+        await delay(450);
+      } else {
+        await delay(180);
+      }
+      continue;
+    }
+    await delay(150);
+    merged.state = outcome.state || await tabBrowserState(tabId, checkoutProfile, { attempts: 3 }).catch(() => null);
+    return { ...outcome, ...merged, state: merged.state || outcome.state };
+  }
+  merged.state = await tabBrowserState(tabId, checkoutProfile, { attempts: 3 }).catch(() => latestOutcome?.state || null);
+  return {
+    ...(latestOutcome || {}),
+    ...merged,
+    reason: latestOutcome?.reason || 'Checkout preset reconciliation reached its safety limit.',
+    state: merged.state || latestOutcome?.state || null
+  };
+}
+
+async function executePlanAction(tabId, action, plan, checkoutProfile = null, assertActive = null) {
+  if (plan.targetDomain === 'amazon.com' && action.type !== 'navigate') {
+    const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+    if (currentTab?.url && !isAmazonRetailShoppingUrl(currentTab.url)) {
+      const recoveryUrl = amazonActionRecoveryUrl(plan, action);
+      await chrome.tabs.update(tabId, { url: recoveryUrl, active: false });
+      await waitForTabReady(tabId).catch(() => null);
+      await delay(300);
+    }
+  }
+  if (action.type === 'navigate' && action.intent === 'open_cart' && action.preferExistingCartControl === true) {
+    const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+    const outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
+    if (!outcome?.completed) return outcome;
+    let usedFallback = Boolean(outcome.cartFallbackRequested);
+    if (!usedFallback) {
+      await waitForTabUrlChange(tabId, before.url, 2_500)
+        .catch(() => waitForTabNavigation(tabId, before.url, 1_000).catch(() => null));
+      const current = await chrome.tabs.get(tabId).catch(() => before);
+      usedFallback = !current?.url || current.url === before.url;
+    }
+    let currentTab = await chrome.tabs.get(tabId).catch(() => before);
+    if (usedFallback) {
+      const navigationUrl = withAmazonEnglishLocale(action.url);
+      await withTimeout(
+        () => chrome.tabs.update(tabId, { url: navigationUrl, active: false }),
+        TAB_COMMAND_TIMEOUT_MS,
+        'browser_cart_fallback_start_timeout'
+      );
+      await waitForTabReady(tabId).catch(() => null);
+      currentTab = await chrome.tabs.get(tabId).catch(() => ({ url: navigationUrl, title: '' }));
+    } else {
+      await waitForTabReady(tabId, 3_500).catch(() => null);
+      currentTab = await chrome.tabs.get(tabId).catch(() => currentTab);
+    }
+    return {
+      ...outcome,
+      navigationRequested: true,
+      cartFallbackUsed: usedFallback,
+      controlStrategy: usedFallback ? 'stable_cart_fallback' : outcome.controlStrategy,
+      state: {
+        url: currentTab?.url || action.url,
+        title: currentTab?.title || '',
+        browserState: 'browse',
+        browserStateConfidence: 0,
+        browserStateReason: usedFallback
+          ? 'No live Amazon cart control was available; the signed cart URL was opened.'
+          : 'Amazon cart control was invoked; the next approved step verifies the cart.',
+        checkoutSummary: { stage: 'browse', nextAction: 'Inspecting cart' },
+        navigationReady: true
+      }
+    };
+  }
+  if (action.type === 'navigate') {
+    const navigationUrl = plan.targetDomain === 'amazon.com'
+      ? withAmazonEnglishLocale(action.url)
+      : action.url;
+    const updatedTab = await withTimeout(
+      () => chrome.tabs.update(tabId, { url: navigationUrl, active: false }),
+      TAB_COMMAND_TIMEOUT_MS,
+      'browser_navigation_start_timeout'
+    );
+    await waitForTabReady(tabId).catch(() => null);
+    const currentTab = await withTimeout(() => chrome.tabs.get(tabId), TAB_COMMAND_TIMEOUT_MS, 'browser_tab_read_timeout').catch(() => updatedTab);
+    // Navigation is its own cheap, durable milestone. Reading the entire
+    // merchant DOM here made Amazon's large search surface block the
+    // checkpoint that unlocks the next inspect step. The following plan
+    // action owns page-state extraction and can retry it independently.
+    const state = {
+      url: currentTab?.url || navigationUrl,
+      title: currentTab?.title || '',
+      browserState: 'browse',
+      browserStateConfidence: 0,
+      browserStateReason: 'Navigation completed; page state will be inspected in the next approved step.',
+      checkoutSummary: { stage: 'browse', nextAction: 'Inspecting page' },
+      navigationReady: true
+    };
+    return { completed: true, navigationRequested: true, state };
+  }
+  if (action.type === 'fill_checkout_profile') {
+    const outcome = await runCheckoutProfileReconcile(tabId, action, checkoutProfile, assertActive);
+    return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
+  }
+  if (action.type === 'inspect' || action.type === 'pause') {
+    const outcome = {
+      completed: true,
+      state: await tabBrowserState(tabId, checkoutProfile, { attempts: 2, delayMs: 180 })
+    };
+    return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
+  }
+  if (action.type === 'select_candidate') {
+    const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+    let currentPath = '';
+    const currentDomain = currentTab?.url ? domainForUrl(currentTab.url) : '';
+    try {
+      currentPath = currentTab?.url ? new URL(currentTab.url).pathname || '' : '';
+    } catch {
+      currentPath = '';
+    }
+    const amazonFastPathAllowed = plan.targetDomain === 'amazon.com'
+      || currentDomain === '127.0.0.1'
+      || currentDomain === 'localhost';
+    const searchSurfaceAllowed = plan.targetDomain === 'amazon.com'
+      ? /^\/s(?:\/|$)/i.test(currentPath)
+      : Boolean(currentPath);
+    if (amazonFastPathAllowed && searchSurfaceAllowed) {
+      const quickOutcome = await amazonSearchCardAddToCart(tabId, action);
+      if (quickOutcome?.completed) return quickOutcome;
+    }
+  }
+  if (action.type === 'click_intent'
+    && action.intent === 'add_to_cart'
+    && plan.targetDomain === 'amazon.com'
+    && action.boundCandidate?.cartActionStarted === true) {
+    return {
+      completed: true,
+      directSearchResultCart: true,
+      alreadyStarted: true,
+      label: 'Add to cart',
+      controlStrategy: 'amazon_search_card_fast_path_already_started',
+      selected: {
+        id: action.boundCandidate.id,
+        asin: action.boundCandidate.asin,
+        title: action.boundCandidate.title,
+        url: action.boundCandidate.url,
+        price: action.boundCandidate.price
+      },
+      state: {
+        url: (await chrome.tabs.get(tabId).catch(() => ({ url: '' }))).url || '',
+        title: '',
+        interactionLayer: 'page',
+        loginRequired: false,
+        paymentRequired: false,
+        finalApprovalVisible: false,
+        providerChallenge: false,
+        productOpened: false,
+        addToCartAvailable: false,
+        browserState: 'search_results',
+        browserSurface: 'search_results',
+        browserStateConfidence: 1,
+        browserStateReason: 'The exact Amazon result-card Add to cart click was already sent; the next step verifies the cart.',
+        milestoneSignals: {
+          candidateSelected: true,
+          cartVisible: false,
+          checkoutOpen: false,
+          addressConfirmed: false,
+          cardConfirmed: false,
+          deliveryConfirmed: false,
+          checkoutProfileVerified: false,
+          finalReviewReady: false,
+          orderSubmitted: false
+        },
+        checkoutSummary: { stage: 'search_results', nextAction: 'Opening cart' },
+        observationDurationMs: 0
+      }
+    };
+  }
+  let before = await chrome.tabs.get(tabId);
+  let outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
+  if (action.type === 'select_candidate' && outcome?.directSearchResultCart === true) {
+    await delay(550);
+    return {
+      ...outcome,
+      state: await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 220 }).catch(() => outcome.state || null)
+    };
+  }
+  if (action.type === 'select_candidate' && outcome?.navigationRequested && !outcome.navigationUrl) {
+    const state = await tabBrowserState(tabId, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null);
+    return {
+      ...outcome,
+      completed: false,
+      navigationConfirmed: false,
+      state,
+      reason: 'The browser selected a candidate but did not return a product URL to open.'
+    };
+  }
+  if (action.type === 'click_intent' && action.intent === 'prefer_free_delivery' && outcome?.completed) {
+    await delay(250);
+    await waitForTabReady(tabId).catch(() => null);
+    await delay(300);
+    let filteredTab = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+    if (plan.targetDomain === 'amazon.com' && !isAmazonRetailShoppingUrl(filteredTab.url || '')) {
+      await chrome.tabs.update(tabId, { url: withAmazonEnglishLocale(plan.startUrl), active: false });
+      await waitForTabReady(tabId).catch(() => null);
+      await delay(300);
+      return {
+        ...outcome,
+        completed: true,
+        skipped: true,
+        filterApplied: false,
+        navigationRecovered: true,
+        reason: 'Ignored a non-shopping Amazon navigation while applying the delivery preference.',
+        state: await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 180 }).catch(() => outcome.state || null)
+      };
+    }
+    if (plan.targetDomain === 'amazon.com') {
+      const englishUrl = withAmazonEnglishLocale(filteredTab.url || '');
+      if (englishUrl && englishUrl !== filteredTab.url) {
+        await chrome.tabs.update(tabId, { url: englishUrl, active: false });
+        await waitForTabReady(tabId).catch(() => null);
+        await delay(250);
+        filteredTab = await chrome.tabs.get(tabId).catch(() => filteredTab);
+      }
+    }
+    outcome.state = await tabBrowserState(tabId, checkoutProfile, { attempts: 4, delayMs: 220 }).catch(() => outcome.state || null);
+    return outcome;
+  }
+  if (outcome?.stateRefreshRequested && outcome.completed && !outcome.skipped) {
+    await delay(450);
+    return {
+      ...outcome,
+      state: await tabBrowserState(tabId, checkoutProfile, { attempts: 4, delayMs: 220 }).catch(() => outcome.state || null)
+    };
+  }
+  if (action.type === 'click_intent' && action.intent === 'checkout' && checkoutProfile && !outcome?.navigationRequested) {
+    const fillOutcome = await runCheckoutProfileReconcile(tabId, {
+      id: `${action.id || 'checkout'}-local-profile-boundary-reconcile`,
+      type: 'fill_checkout_profile'
+    }, checkoutProfile, assertActive).catch((error) => {
+      if (isExecutionCancelledError(error)) throw error;
+      return null;
+    });
+    if (fillOutcome?.completed && !fillOutcome.skipped) {
+      return {
+        ...outcome,
+        completed: true,
+        state: fillOutcome.state || outcome?.state,
+        safeFieldsFilled: Array.isArray(fillOutcome.safeFieldsFilled) ? fillOutcome.safeFieldsFilled : outcome?.safeFieldsFilled,
+        checkoutSelections: Array.isArray(fillOutcome.checkoutSelections) ? fillOutcome.checkoutSelections : outcome?.checkoutSelections
+      };
+    }
+  }
+  const postActionTab = await chrome.tabs.get(tabId).catch(() => ({ url: before.url || '' }));
+  const actionNavigated = Boolean(outcome?.navigationRequested) || postActionTab.url !== before.url;
+  if (actionNavigated && outcome?.completed && !outcome.skipped) {
+    if (!outcome.navigationRequested) outcome = { ...outcome, navigationRequested: true };
+    if (action.type === 'select_candidate' && outcome.navigationUrl) {
+      if (domainForUrl(outcome.navigationUrl) !== plan.targetDomain) {
+        return { ...outcome, completed: false, reason: 'The selected product URL left the approved mission domain.' };
+      }
+      if (plan.targetDomain === 'amazon.com' && !isAmazonRetailProductUrl(outcome.navigationUrl)) {
+        return { ...outcome, completed: false, reason: 'The selected Amazon result was not a retail product URL.' };
+      }
+      const navigation = await confirmCandidateNavigation(tabId, plan, outcome.navigationUrl, before.url);
+      outcome = {
+        ...outcome,
+        navigationConfirmed: navigation.confirmed,
+        navigationAttempts: navigation.attempts,
+        requestedNavigationUrl: navigation.requestedUrl,
+        observedNavigationUrl: navigation.observedUrl
+      };
+      if (!navigation.confirmed) {
+        const state = await tabBrowserState(tabId, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null);
+        return {
+          ...outcome,
+          completed: false,
+          state,
+          reason: candidateSelectionFailureReason(action, {
+            ...(state || {}),
+            url: navigation.observedUrl,
+            navigationConfirmed: false
+          }, outcome)
+        };
+      }
+    }
+    if (action.type !== 'select_candidate') {
+      if (action.type === 'click_intent' && action.intent === 'checkout') {
+        await waitForTabUrlChange(tabId, before.url, 2_500)
+          .catch(() => waitForTabNavigation(tabId, before.url, 3_500).catch(() => null));
+        outcome = await recoverAmazonCheckoutPrelude(tabId, plan, outcome);
+        await waitForTabReady(tabId, 3_500).catch(() => null);
+        await delay(300);
+      } else {
+        await waitForTabNavigation(tabId, before.url, 9000).catch(() => null);
+        await delay(650);
+      }
+    } else {
+      await delay(250);
+    }
+    if (action.type === 'select_candidate') {
+      let selectedState = await waitForPurchasableProduct(tabId, checkoutProfile);
+      const selectedProductPrice = parseUsdAmount(selectedState?.checkoutSummary?.productPrice);
+      const selectedPriceWithinCap = !Number.isFinite(Number(action.maxPrice))
+        || Number(action.maxPrice) <= 0
+        || !Number.isFinite(selectedProductPrice)
+        || selectedProductPrice <= Number(action.maxPrice) + 0.005;
+      if ((selectedState?.addToCartAvailable || String(selectedState?.checkoutSummary?.stage || '') === 'cart')
+        && productStateSatisfiesFulfillmentPolicy(selectedState, action)
+        && selectedPriceWithinCap) {
+        return { ...outcome, state: selectedState };
+      }
+      const alternatives = Array.isArray(outcome.alternatives) ? outcome.alternatives.slice(0, 4) : [];
+      let fallbackAttempts = 0;
+      for (const alternative of alternatives) {
+        if (!alternative?.url || domainForUrl(alternative.url) !== plan.targetDomain) continue;
+        if (plan.targetDomain === 'amazon.com' && !isAmazonRetailProductUrl(alternative.url)) continue;
+        if (typeof assertActive === 'function') await assertActive();
+        fallbackAttempts += 1;
+        const previous = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+        const navigation = await confirmCandidateNavigation(tabId, plan, alternative.url, previous.url);
+        if (!navigation.confirmed) continue;
+        await delay(250);
+        selectedState = await waitForPurchasableProduct(tabId, checkoutProfile, { timeoutMs: 3_200, intervalMs: 320 });
+        const alternativeProductPrice = parseUsdAmount(selectedState?.checkoutSummary?.productPrice);
+        const alternativePriceWithinCap = !Number.isFinite(Number(action.maxPrice))
+          || Number(action.maxPrice) <= 0
+          || !Number.isFinite(alternativeProductPrice)
+          || alternativeProductPrice <= Number(action.maxPrice) + 0.005;
+        if ((selectedState?.addToCartAvailable || String(selectedState?.checkoutSummary?.stage || '') === 'cart')
+          && productStateSatisfiesFulfillmentPolicy(selectedState, action)
+          && alternativePriceWithinCap) {
+          return {
+            ...outcome,
+            selected: alternative,
+            fallbackAttempts,
+            navigationConfirmed: true,
+            observedNavigationUrl: navigation.observedUrl,
+            state: selectedState
+          };
+        }
+      }
+      return {
+        ...outcome,
+        completed: false,
+        fallbackAttempts,
+        reason: productFulfillmentFailureReason(selectedState, action) || (alternatives.length
+          ? 'Matching results were opened, but none exposed a purchasable item within the approved item budget.'
+          : 'The matching product page was not purchasable within the approved item budget.'),
+        state: selectedState
+      };
+    }
+    if (action.type === 'click_intent' && action.intent === 'checkout') {
+      let continuationAttempts = 0;
+      let currentTab = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+      while (continuationAttempts < 2
+        && isAmazonCartContinuationUrl(currentTab.url || '')) {
+        if (typeof assertActive === 'function') await assertActive();
+        const continuation = await tabCommand(tabId, {
+          type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+          action,
+          checkoutProfile
+        });
+        if (!continuation?.completed || !continuation.navigationRequested || continuation.checkoutInterstitialContinued !== true) break;
+        continuationAttempts += 1;
+        await waitForTabNavigation(tabId, currentTab.url, 9000).catch(() => null);
+        await delay(650);
+        currentTab = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+        outcome = {
+          ...outcome,
+          ...continuation,
+          checkoutInterstitialContinued: true,
+          checkoutInterstitialAttempts: continuationAttempts
+        };
+      }
+    }
+    if (action.type === 'final_submit') {
+      return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, {
+        ...outcome,
+        state: await tabBrowserState(tabId, checkoutProfile)
+      });
+    }
+    if (action.type === 'click_intent' && action.intent === 'checkout' && checkoutProfile) {
+      outcome = await recoverAmazonCheckoutPrelude(tabId, plan, outcome);
+      let observedState = await tabBrowserState(tabId, checkoutProfile);
+      // Some cart variants settle on Amazon's neutral /alm/byg page a beat
+      // after the first navigation observer. Re-check here before attempting
+      // profile reconciliation so the checkout action is not marked terminal.
+      let checkoutTab = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+      if (isAmazonCartContinuationUrl(checkoutTab.url || '')) {
+        await waitForTabReady(tabId, 4_500).catch(() => null);
+        checkoutTab = await chrome.tabs.get(tabId).catch(() => checkoutTab);
+        if (isAmazonCartContinuationUrl(checkoutTab.url || '')) {
+          const continuation = await tabCommand(tabId, {
+            type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+            action,
+            checkoutProfile
+          });
+          if (continuation?.completed && continuation.navigationRequested && continuation.checkoutInterstitialContinued === true) {
+            await waitForTabNavigation(tabId, checkoutTab.url, 9_000).catch(() => null);
+            await delay(650);
+            observedState = await tabBrowserState(tabId, checkoutProfile);
+            outcome = {
+              ...outcome,
+              ...continuation,
+              checkoutInterstitialContinued: true,
+              checkoutInterstitialAttempts: Math.max(1, Number(outcome.checkoutInterstitialAttempts || 0) + 1)
+            };
+          }
+        }
+      }
+      if (String(observedState.checkoutSummary?.stage || observedState.browserState || '').toLowerCase() === 'cart'
+        && observedState.milestoneSignals?.checkoutOpen !== true) {
+        if (typeof assertActive === 'function') await assertActive();
+        const intermediate = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+        const continuation = await tabCommand(tabId, {
+          type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+          action,
+          checkoutProfile
+        });
+        if (continuation?.completed && continuation.navigationRequested && !continuation.skipped) {
+          await waitForTabNavigation(tabId, intermediate.url, 9000).catch(() => null);
+          await delay(650);
+          observedState = await tabBrowserState(tabId, checkoutProfile);
+        }
+        outcome = {
+          ...outcome,
+          ...continuation,
+          safeFieldsFilled: mergeUnique(outcome.safeFieldsFilled, continuation?.safeFieldsFilled),
+          checkoutSelections: mergeUnique(outcome.checkoutSelections, continuation?.checkoutSelections),
+          state: observedState
+        };
+      }
+      const fillOutcome = await runCheckoutProfileReconcile(tabId, {
+        id: `${action.id || 'checkout'}-local-profile-followup`,
+        type: 'fill_checkout_profile'
+      }, checkoutProfile, assertActive).catch((error) => {
+        if (isExecutionCancelledError(error)) throw error;
+        return null;
+      });
+      if (fillOutcome?.completed) {
+        return {
+          ...outcome,
+          state: fillOutcome.state || outcome.state,
+          safeFieldsFilled: Array.isArray(fillOutcome.safeFieldsFilled) ? fillOutcome.safeFieldsFilled : outcome.safeFieldsFilled,
+          checkoutSelections: Array.isArray(fillOutcome.checkoutSelections) ? fillOutcome.checkoutSelections : outcome.checkoutSelections
+        };
+      }
+      return { ...outcome, state: await tabBrowserState(tabId, checkoutProfile) };
+    }
+    const state = await tabBrowserState(tabId, checkoutProfile);
+    return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, { ...outcome, state });
+  }
+  return outcome || { completed: false, reason: 'The local browser action did not return a result.' };
+}
+
+async function runSession(rawSession) {
+  if (inFlightSessionIds.has(rawSession.id)) return { sessionId: rawSession.id, status: 'already_running' };
+  inFlightSessionIds.add(rawSession.id);
+  let session = rawSession;
+  let plan = null;
+  let currentAction = null;
+  let currentActionStartedAt = 0;
+  let retainActiveRun = false;
+  try {
+    session = await claimSession(rawSession);
+    await saveConfig({ activeSessionId: session.id });
+    // One bounded recovery opportunity protects an already-authorized run
+    // from MV3 service-worker suspension without turning alarms into a
+    // background mission discovery loop.
+    scheduleRunnerResume(8_000);
+    plan = await validatePlanForSession(session);
+    assertLocalMissionAuthority(session);
+    const savedCheckoutProfile = await getLocalCheckoutProfile(session.id);
+    const checkoutProfileExpected = Boolean(session.extensionCheckoutProfileEnabled);
+    const checkoutProfileAvailable = Boolean(savedCheckoutProfile);
+    const checkoutProfile = savedCheckoutProfile ? { ...savedCheckoutProfile } : null;
+    const startUrl = plan.startUrl;
+    const planState = session.extensionMissionPlanState?.planHash === plan.planHash
+      ? session.extensionMissionPlanState
+      : { nextActionIndex: 0 };
+    const completedActionIds = new Set(Array.isArray(planState.completedActionIds) ? planState.completedActionIds : []);
+    const persistedMilestones = Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : [];
+    const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
+    if (!nextAction) return { sessionId: session.id, status: 'plan_completed' };
+    if (!await hasPermissionForUrl(startUrl)) {
+      const domain = domainForUrl(startUrl);
+      session = await missionCheckpoint(session, {
+        label: 'Browser access needed',
+        detail: `Allow ${domain} in Magic City Runner to start this mission locally.`,
+        state: 'permission_required',
+        missionAction: nextAction.missionAction,
+        targetUrl: startUrl,
+        plan,
+        planAction: nextAction,
+        planActionStatus: 'waiting'
+      });
+      await saveConfig({
+        lastError: `Browser access is needed for ${domain}. Open Magic City Runner and choose Allow ${domain} and start.`,
+        lastExecution: { sessionId: session.id, status: 'permission_required', domain, at: new Date().toISOString() }
+      });
+      await chrome.action.setBadgeText({ text: '!' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#e8b84a' });
+      return { sessionId: session.id, status: 'permission_required', domain };
+    }
+
+    await chrome.action.setBadgeText({ text: '' });
+    let tab = await acquireMissionTab(session.id, startUrl);
+    let authorityVerifiedAt = Date.now();
+    const assertActive = async ({ force = false } = {}) => {
+      assertLocalMissionAuthority(session);
+      if (!force && Date.now() - authorityVerifiedAt < RUNNER_STATUS_LEASE_MS) return session;
+      session = await assertRunnerSessionActive(session);
+      authorityVerifiedAt = Date.now();
+      assertLocalMissionAuthority(session);
+      return session;
+    };
+    const progress = {
+      productOpened: persistedMilestones.includes('candidate_selected'),
+      addToCartClicked: persistedMilestones.includes('cart_confirmed'),
+      checkoutOpened: persistedMilestones.includes('checkout_open'),
+      verifiedMilestones: [...new Set(persistedMilestones)],
+      safeFieldsFilled: [],
+      checkoutSelections: [],
+      selectedCandidate: null,
+      initialCartItemCount: null,
+      reusedPreparedCart: false,
+      localCheckoutProfileExpected: checkoutProfileExpected,
+      localCheckoutProfileAvailable: checkoutProfileAvailable,
+      directSearchResultCart: false
+    };
+    const pendingPaymentWait = await getPendingPaymentWait(session.id);
+    if (pendingPaymentWait && tab) {
+      if (checkoutProfileExpected && !checkoutProfileAvailable) {
+        await clearPendingPaymentWait(session.id);
+        return reportAndStop(session, plan, {
+          url: tab.url || startUrl,
+          finalUrl: tab.url || startUrl,
+          stopState: 'local_checkout_profile_missing',
+          stopEvidence: 'The Local Data Vault checkout handoff expired while Magic City was waiting for card autofill. Unlock the vault and retry.',
+          fulfillmentStatus: 'failed',
+          fundingDisposition: 'release',
+          ...progress
+        });
+      }
+      const paymentState = await tabBrowserState(tab.id, checkoutProfile, { attempts: 3 }).catch(() => null);
+      if (paymentState && canWaitForPaymentAutofill(paymentState, plan)) {
+        if (Number(pendingPaymentWait.expiresAt || 0) <= Date.now()) {
+          await clearPendingPaymentWait(session.id);
+          paymentState.paymentAutofillWaitExpired = true;
+          paymentState.stopState = 'payment_required';
+          paymentState.stopEvidence = 'Card entry was not completed before the local checkout handoff expired. Reopen the checkout and use Chrome autofill to continue.';
+          return reportAndStop(session, plan, { ...paymentState, ...progress });
+        }
+        return parkForPaymentAutofill(session, plan, { ...paymentState, ...progress });
+      }
+      await clearPendingPaymentWait(session.id);
+      await chrome.action.setBadgeText({ text: '' });
+    }
+    for (let index = Number(planState.nextActionIndex || 0); index < plan.actions.length; index += 1) {
+      const action = plan.actions[index];
+      currentAction = action;
+      currentActionStartedAt = Date.now();
+      const presentation = planActionPresentation(action);
+      await assertActive({ force: action.type === 'final_submit' });
+      if (!tab && action.type !== 'navigate') {
+        return reportAndStop(session, plan, {
+          url: startUrl,
+          finalUrl: startUrl,
+          stopState: 'runner_tab_unavailable',
+          stopEvidence: 'The local browser tab was closed before the next approved step.',
+          ...progress
+        });
+      }
+      if (action.type === 'navigate' && !tab) {
+        tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+        await saveMissionTab(session.id, tab.id);
+      }
+      if (action.type === 'fill_checkout_profile' && checkoutProfileExpected && !checkoutProfileAvailable) {
+      const browser = tab ? await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' }).catch(() => null) : null;
+        return reportAndStop(session, plan, {
+          ...(browser || {}),
+          url: browser?.url || startUrl,
+          finalUrl: browser?.url || startUrl,
+          stopState: 'local_checkout_profile_missing',
+          stopEvidence: 'Magic City Runner did not have the local checkout profile for this session. Unlock the Local Data Vault and retry so the extension can reconcile saved address, card label, and delivery preferences.',
+          ...progress
+        });
+      }
+      const reuseVerifiedCart = action.type === 'click_intent'
+        && action.intent === 'add_to_cart'
+        && progress.reusedPreparedCart === true
+        && progress.verifiedMilestones.includes('cart_confirmed');
+      const executionAction = action.type === 'click_intent'
+        && action.intent === 'add_to_cart'
+        && progress.selectedCandidate
+        ? { ...action, boundCandidate: progress.selectedCandidate }
+        : action;
+      let outcome = reuseVerifiedCart
+        ? {
+            completed: true,
+            skipped: false,
+            controlStrategy: null,
+            reason: 'The approved cart item is already prepared and verified; not adding a duplicate.',
+            state: await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 })
+          }
+        : await withTimeout(
+            () => executePlanAction(tab.id, executionAction, plan, checkoutProfile, assertActive),
+            BROWSER_ACTION_TIMEOUT_MS,
+            `browser_step_timeout:${action.id}`
+          );
+      const actionDurationMs = Date.now() - currentActionStartedAt;
+      if (action.type === 'select_candidate' && outcome?.selected) {
+        progress.selectedCandidate = {
+          ...outcome.selected,
+          cartActionStarted: Boolean(outcome.directSearchResultCart || outcome.selected.cartActionStarted)
+        };
+        progress.directSearchResultCart = Boolean(outcome.directSearchResultCart);
+      }
+      const report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+      report.runnerStep = {
+        actionId: action.id,
+        actionType: action.type,
+        completed: Boolean(outcome.completed),
+        skipped: Boolean(outcome.skipped),
+        durationMs: actionDurationMs,
+        controlStrategy: outcome.controlStrategy || null,
+        fallbackAttempts: Number(outcome.fallbackAttempts || 0),
+        requestedNavigationUrl: outcome.navigationUrl ? compactNavigationUrl(outcome.navigationUrl) : null,
+        observedNavigationUrl: outcome.observedNavigationUrl ? compactNavigationUrl(outcome.observedNavigationUrl) : null,
+        navigationConfirmed: typeof outcome.navigationConfirmed === 'boolean' ? outcome.navigationConfirmed : null,
+        directSearchResultCart: Boolean(outcome.directSearchResultCart),
+        checkoutPreludeRecovered: Boolean(outcome.checkoutPreludeRecovered),
+        checkoutPreludeRecoveryUrl: outcome.checkoutPreludeRecoveryUrl ? compactNavigationUrl(outcome.checkoutPreludeRecoveryUrl) : null,
+        checkoutInterstitialContinued: Boolean(outcome.checkoutInterstitialContinued),
+        checkoutInterstitialAttempts: Number(outcome.checkoutInterstitialAttempts || 0),
+        selectedCandidate: outcome.selected ? {
+          title: String(outcome.selected.title || '').slice(0, 180),
+          asin: String(outcome.selected.asin || '').slice(0, 32) || null,
+          price: Number.isFinite(Number(outcome.selected.price)) ? Number(outcome.selected.price) : null,
+          url: compactNavigationUrl(outcome.selected.url || '') || null
+        } : null,
+        selectedProductPrice: outcome.state?.checkoutSummary?.productPrice || null,
+        selectedDeliveredPrice: outcome.state?.checkoutSummary?.productDeliveredPrice || null,
+        reason: outcome.reason || null,
+        profileCorrection: outcome.profileCorrection || null,
+        profileCorrectionMissed: Boolean(outcome.profileCorrectionMissed),
+        paymentAutofillRequired: Boolean(outcome.paymentAutofillRequired),
+        profileTransitions: Array.isArray(outcome.profileTransitions) ? outcome.profileTransitions : [],
+        runnerVersion: chrome.runtime.getManifest().version
+      };
+      report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested);
+      report.orderSubmitted = Boolean(outcome.orderSubmitted || report.orderSubmitted);
+      report.lastRunnerAction = String(outcome.label || '');
+      const reportStage = String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase();
+      const checkoutStageReached = ['checkout', 'offer', 'payment', 'final_review'].includes(reportStage)
+        || /\/checkout|\/buy|\/gp\/buy|\/alm\/(?:byg|substitution)/i.test(String(report.url || ''));
+      report.productOpened = Boolean(report.productOpened || progress.productOpened);
+      report.addToCartClicked = Boolean(progress.addToCartClicked);
+      report.checkoutOpened = Boolean(progress.checkoutOpened || checkoutStageReached && progress.verifiedMilestones.includes('checkout_open'));
+      if (Array.isArray(outcome.safeFieldsFilled) && outcome.safeFieldsFilled.length) {
+        progress.safeFieldsFilled = [...new Set([...progress.safeFieldsFilled, ...outcome.safeFieldsFilled])];
+      }
+      if (Array.isArray(outcome.checkoutSelections) && outcome.checkoutSelections.length) {
+        progress.checkoutSelections = [...new Set([...progress.checkoutSelections, ...outcome.checkoutSelections])];
+      }
+      report.safeFieldsFilled = progress.safeFieldsFilled;
+      report.checkoutSelections = progress.checkoutSelections;
+      report.localCheckoutProfileExpected = progress.localCheckoutProfileExpected;
+      report.localCheckoutProfileAvailable = progress.localCheckoutProfileAvailable;
+      if (outcome.existingCartItemVerified) {
+        progress.reusedPreparedCart = true;
+        progress.addToCartClicked = true;
+        report.addToCartClicked = true;
+      }
+      const requiredBasketItem = Boolean(action.requiredBasketItem);
+      const observedCartItemCount = Number(report.checkoutSummary?.cartItemCount);
+      if (/^inspect-results(?:-1)?$/.test(String(action.id || '')) && Number.isFinite(observedCartItemCount)) {
+        progress.initialCartItemCount = observedCartItemCount;
+      }
+      const verifiedPreparedCart = Boolean(
+        requiredBasketItem
+        && outcome.completed
+        && outcome.skipped
+        && String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase() === 'cart'
+        && Number.isFinite(observedCartItemCount)
+        && observedCartItemCount > 0
+        && /cart item is already prepared/i.test(String(outcome.reason || ''))
+      );
+      if (verifiedPreparedCart) {
+        outcome = { ...outcome, skipped: false, reusedPreparedCart: true };
+        progress.reusedPreparedCart = true;
+        progress.addToCartClicked = true;
+        report.addToCartClicked = true;
+      }
+      if (requiredBasketItem && (outcome.skipped || !outcome.completed)) {
+        outcome = {
+          ...outcome,
+          completed: false,
+          skipped: false,
+          reason: outcome.reason || `Magic City could not confirm ${action.item || 'this basket item'} before moving on.`
+        };
+      }
+      const expectedCartItemCount = Number(action.expectedCartItemCount || 0);
+      const initialCartItemCount = Number.isFinite(progress.initialCartItemCount) ? progress.initialCartItemCount : 0;
+      const minimumCartItemCount = progress.reusedPreparedCart
+        ? Math.max(expectedCartItemCount, initialCartItemCount)
+        : expectedCartItemCount + initialCartItemCount;
+      const cartCountVerified = expectedCartItemCount > 0
+        ? Number.isFinite(observedCartItemCount) && observedCartItemCount >= minimumCartItemCount
+        : Boolean(report.milestoneSignals?.cartVisible);
+      if (
+        requiredBasketItem
+        && expectedCartItemCount > 0
+        && (!Number.isFinite(observedCartItemCount) || observedCartItemCount < minimumCartItemCount)
+      ) {
+        outcome = {
+          ...outcome,
+          completed: false,
+          skipped: false,
+          reason: `Magic City could not verify ${action.item || 'the planned basket item'} in the cart. Expected at least ${minimumCartItemCount} cart items; the site reported ${Number.isFinite(observedCartItemCount) ? observedCartItemCount : 'no cart count'}.`
+        };
+      }
+      const observedMilestones = observedVerifiedMilestones(report, action, outcome, { cartCountVerified });
+      if (action.type === 'select_candidate' && observedMilestones.includes('cart_confirmed')) {
+        progress.reusedPreparedCart = true;
+        progress.addToCartClicked = true;
+        report.addToCartClicked = true;
+      }
+      progress.verifiedMilestones = mergeUnique(progress.verifiedMilestones, observedMilestones);
+      const expectedMilestoneVerified = !action.expectedMilestone
+        || progress.verifiedMilestones.includes(action.expectedMilestone);
+      if (action.expectedMilestone && expectedMilestoneVerified) {
+        outcome = {
+          ...outcome,
+          completed: true,
+          skipped: false,
+          reason: outcome.reason || `Verified ${action.expectedMilestone.replace(/_/g, ' ')}.`
+        };
+      }
+      if (action.expectedMilestone && !expectedMilestoneVerified) {
+        outcome = {
+          ...outcome,
+          completed: false,
+          skipped: false,
+          reason: milestoneFailureReason(action, report, outcome)
+        };
+      }
+      report.verifiedMilestones = progress.verifiedMilestones;
+      progress.productOpened = progress.verifiedMilestones.includes('candidate_selected');
+      progress.addToCartClicked = progress.verifiedMilestones.includes('cart_confirmed');
+      progress.checkoutOpened = progress.verifiedMilestones.includes('checkout_open');
+      report.productOpened = Boolean(report.productOpened || progress.productOpened);
+      report.addToCartClicked = progress.addToCartClicked;
+      report.checkoutOpened = progress.checkoutOpened;
+      const actionStatus = outcome.completed
+        ? (outcome.skipped ? 'skipped' : 'completed')
+        : action.expectedMilestone || requiredBasketItem
+          ? 'waiting'
+          : 'skipped';
+      session = await missionCheckpoint(session, {
+        label: presentation.label,
+        detail: outcome.completed && !outcome.skipped
+          ? `The local runner completed a bounded, mission-approved browser primitive in ${actionDurationMs}ms.`
+          : `${outcome.reason || 'The browser step could not be completed safely.'} (${actionDurationMs}ms)`,
+        state: presentation.state,
+        missionAction: action.missionAction,
+        targetUrl: report.url || startUrl,
+        browser: report,
+        plan,
+        planAction: action,
+        planActionStatus: actionStatus
+      });
+      if (action.type === 'pause') {
+        const boundary = stopForBoundary(report, plan);
+        if (boundary) {
+          const parked = await parkForPaymentAutofill(session, plan, report);
+          if (parked) return parked;
+          report.stopState = boundary.state;
+          report.stopEvidence = boundary.evidence;
+          if (boundary.failed) {
+            report.fulfillmentStatus = 'failed';
+            report.fundingDisposition = 'release';
+          }
+          return reportAndStop(session, plan, report);
+        }
+        report.stopState = 'review_ready';
+        report.stopEvidence = 'The approved browser plan is complete. Review the local checkout before payment or final approval.';
+        return reportAndStop(session, plan, report);
+      }
+      const boundary = stopForBoundary(report, plan);
+      const nextPlanAction = plan.actions[index + 1] || null;
+      const canFillBeforeSensitiveStop = ['payment_required', 'final_approval_required', 'checkout_profile_mismatch'].includes(String(boundary?.state || ''))
+        && nextPlanAction?.type === 'fill_checkout_profile'
+        && Boolean(checkoutProfile);
+      const canOpenPaymentAutofill = boundary?.state === 'payment_required'
+        && nextPlanAction?.type === 'click_intent'
+        && nextPlanAction?.intent === 'checkout'
+        && Boolean(checkoutProfile)
+        && String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase() !== 'payment';
+      const pendingFinalSubmitIndex = plan.actions.findIndex((candidate, candidateIndex) => candidateIndex > index && candidate?.type === 'final_submit');
+      const canSubmitAfterVerifiedCheckout = boundary?.state === 'final_approval_required'
+        && pendingFinalSubmitIndex > index
+        && plan?.limits?.stopBeforeFinalSubmit === false
+        && plan.actions.slice(index + 1, pendingFinalSubmitIndex).every((candidate) =>
+          candidate?.type === 'inspect'
+          || candidate?.type === 'fill_checkout_profile'
+          || candidate?.type === 'click_intent' && candidate?.intent === 'checkout'
+        );
+      if (boundary && !canFillBeforeSensitiveStop && !canOpenPaymentAutofill && !canSubmitAfterVerifiedCheckout) {
+        const parked = await parkForPaymentAutofill(session, plan, report);
+        if (parked) return parked;
+        return reportAndStop(session, plan, report);
+      }
+      if (action.expectedMilestone && !expectedMilestoneVerified) {
+        report.stopState = 'milestone_not_verified';
+        report.stopEvidence = outcome.reason || milestoneFailureReason(action, report, outcome);
+        report.fulfillmentStatus = 'failed';
+        report.fundingDisposition = 'release';
+        return reportAndStop(session, plan, report);
+      }
+      if (!outcome.completed && action.type === 'click_intent' && action.intent === 'checkout' && canSubmitAfterVerifiedCheckout) continue;
+      if (!outcome.completed && requiredBasketItem) {
+        report.stopState = 'basket_item_not_added';
+        report.stopEvidence = outcome.reason || `Magic City could not confirm ${action.item || 'a required basket item'} in the cart.`;
+        report.fulfillmentStatus = 'failed';
+        report.fundingDisposition = 'release';
+        return reportAndStop(session, plan, report);
+      }
+      if (!outcome.completed && !action.optional) {
+        report.stopState = 'step_needs_review';
+        report.stopEvidence = outcome.reason || 'This browser control needs your review.';
+        return reportAndStop(session, plan, report);
+      }
+      if (!outcome.completed && action.type === 'select_candidate') {
+        report.stopState = 'product_selection_needs_review';
+        report.stopEvidence = outcome.reason || 'No high-confidence public result was selected.';
+        return reportAndStop(session, plan, report);
+      }
+    }
+    return reportAndStop(session, plan, { url: tab?.url || startUrl, finalUrl: tab?.url || startUrl, ...progress });
+  } catch (error) {
+    const message = error?.message || String(error);
+    if (isExecutionCancelledError(error)) {
+      await clearMissionTab(session.id);
+      await clearLocalCheckoutProfile(session.id);
+      await clearPendingPaymentWait(session.id);
+      await saveConfig({
+        lastError: '',
+        lastExecution: { sessionId: session.id, status: 'cancelled', at: new Date().toISOString() }
+      });
+      return { sessionId: session.id, status: 'cancelled' };
+    }
+    const actionDurationMs = currentActionStartedAt ? Date.now() - currentActionStartedAt : 0;
+    if (isTransientControlPlaneError(error)) {
+      retainActiveRun = true;
+      scheduleRunnerResume();
+      await saveConfig({
+        lastError: 'Magic City connection was interrupted. Retrying automatically.',
+        lastExecution: {
+          sessionId: session.id,
+          status: 'retrying_control_plane',
+          actionId: currentAction?.id || null,
+          durationMs: actionDurationMs,
+          at: new Date().toISOString()
+        }
+      });
+      return { sessionId: session.id, status: 'retrying_control_plane', retrying: true };
+    }
+    await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'step_needs_review', actionId: currentAction?.id || null, durationMs: actionDurationMs, at: new Date().toISOString() } });
+    if (!plan && session?.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID) return reportStartupFailure(session, error);
+    if (!plan) throw error;
+    const planState = session.extensionMissionPlanState?.planHash === plan.planHash
+      ? session.extensionMissionPlanState
+      : { nextActionIndex: 0 };
+    const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
+    if (!nextAction) throw error;
+    const tab = await activeMissionTab(session.id);
+    let browser = null;
+    if (tab) browser = await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' }).catch(() => null);
+    try {
+      session = await missionCheckpoint(session, {
+        label: 'Browser step needs review',
+        detail: `The local runner could not complete ${currentAction?.id || 'its next approved browser step'} after ${actionDurationMs}ms: ${String(message).slice(0, 180)}`,
+        state: 'step_needs_review',
+        missionAction: nextAction.missionAction,
+        targetUrl: browser?.url || plan.startUrl,
+        browser,
+        plan,
+        planAction: nextAction,
+        planActionStatus: 'skipped'
+      });
+      return reportAndStop(session, plan, {
+        ...(browser || {}),
+        url: browser?.url || plan.startUrl,
+        finalUrl: browser?.url || plan.startUrl,
+        stopState: 'step_needs_review',
+        stopEvidence: `The local browser step ${currentAction?.id || ''} did not complete: ${String(message).slice(0, 180)}`,
+        fulfillmentStatus: 'failed',
+        fundingDisposition: 'release'
+      });
+    } catch {
+      throw error;
+    }
+  } finally {
+    inFlightSessionIds.delete(rawSession.id);
+    const config = await getConfig().catch(() => null);
+    if (!retainActiveRun && config?.activeSessionId === rawSession.id) {
+      await saveConfig({ activeSessionId: '' }).catch(() => null);
+    }
+  }
+}
+
+async function resumeActiveRun() {
+  const config = await getConfig();
+  const sessionId = String(config.activeSessionId || '').trim();
+  if (!sessionId) return { resumed: false, reason: 'no_active_run' };
+  if (inFlightSessionIds.has(sessionId)) return { resumed: false, status: 'already_running', sessionId };
+  const poll = await pollSessions();
+  const session = poll.sessions.find((candidate) => String(candidate?.id || '') === sessionId);
+  if (!session || !isRunnableSession(session)) {
+    await saveConfig({ activeSessionId: '' });
+    return { resumed: false, reason: 'active_run_no_longer_runnable', sessionId };
+  }
+  return runSession(session);
+}
+
+async function pollAndExecute() {
+  const config = await getConfig();
+  if (!config.deviceToken) return { paired: false, executed: [] };
+  await registerExecutor(config);
+  const poll = await pollSessions();
+  const executed = [];
+  // Keep the browser surface single-threaded. A second mission can reuse the
+  // same tab after the first one reaches a boundary, but cannot compete for it.
+  for (const session of poll.sessions.filter(isRunnableSession).slice(0, 1)) {
+    try {
+      executed.push(await runSession(session));
+    } catch (error) {
+      const message = error?.message || String(error);
+      if (isTransientControlPlaneError(error)) {
+        scheduleRunnerResume();
+        await saveConfig({ lastError: 'Magic City connection was interrupted. Retrying automatically.', lastExecution: { sessionId: session.id, status: 'retrying_control_plane', message, at: new Date().toISOString() } });
+        executed.push({ sessionId: session.id, status: 'retrying_control_plane', retrying: true });
+      } else {
+        await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'failed', message, at: new Date().toISOString() } });
+        executed.push({ sessionId: session.id, status: 'failed', error: message });
+      }
+    }
+  }
+  return { ...poll, executed };
+}
+
+async function pollOnly() {
+  const config = await getConfig();
+  if (!config.deviceToken) return { paired: false, sessions: [], actionableCount: 0 };
+  await registerExecutor(config);
+  return pollSessions();
+}
+
+async function getPendingMissionSite() {
+  const poll = await pollSessions();
+  const runnable = poll.sessions.filter(isFreshPendingSiteMission);
+  for (const session of runnable) {
+    let targetUrl = '';
+    try {
+      targetUrl = await planStartUrl(session);
+    } catch {
+      continue;
+    }
+    const origin = domainPermissionPattern(targetUrl);
+    if (!origin) continue;
+    const alreadyGranted = await chrome.permissions.contains({ origins: [origin] });
+    return {
+      sessionId: session.id,
+      domain: domainForUrl(targetUrl),
+      origin,
+      targetUrl,
+      alreadyGranted
+    };
+  }
+  throw new Error('No browser mission is waiting for site access.');
+}
+
+async function startPendingMissionSite({ sessionId = '' } = {}) {
+  const poll = await pollSessions();
+  const sessions = poll.sessions.filter(isFreshPendingSiteMission);
+  const session = sessions.find((entry) => entry.id === sessionId) || sessions[0];
+  if (!session) throw new Error('No browser mission is waiting to run.');
+  const targetUrl = await planStartUrl(session);
+  const origin = domainPermissionPattern(targetUrl);
+  const hasPermission = Boolean(origin && await chrome.permissions.contains({ origins: [origin] }));
+  if (!hasPermission) {
+    throw new Error(`Browser access for ${domainForUrl(targetUrl)} is not enabled yet.`);
+  }
+  await registerExecutor();
+  const execution = await runSession(session);
+  return { granted: true, domain: domainForUrl(targetUrl), execution };
+}
+
+async function allowAndStartPendingMissionSite() {
+  const pending = await getPendingMissionSite();
+  if (!pending.alreadyGranted) {
+    throw new Error(`Browser access for ${pending.domain} must be allowed from the extension popup first.`);
+  }
+  return startPendingMissionSite({ sessionId: pending.sessionId });
+}
+
+async function pairWithCode({ baseUrl = DEFAULT_BASE_URL, code = '' } = {}) {
+  const pairingCode = normalizePairingCode(code);
+  if (!pairingCode || pairingCode.length < 6) throw new Error('Enter the pairing code from Magic City.');
+  await saveConfig({ baseUrl: normalizeBaseUrl(baseUrl), lastError: '' });
+  const claimed = await api('/native-runner/extension/pairing/claim', {
+    method: 'POST',
+    body: {
+      code: pairingCode,
+      extensionVersion: chrome.runtime.getManifest().version,
+      extensionId: chrome.runtime.id || ''
+    }
+  });
+  const setup = claimed.setup || {};
+  if (!setup.deviceToken) throw new Error('pairing_claim_missing_token');
+  const saved = await saveConfig({
+    baseUrl: normalizeBaseUrl(setup.baseUrl || baseUrl),
+    deviceToken: setup.deviceToken,
+    deviceId: setup.deviceId || claimed.device?.id || '',
+    tokenLast4: setup.tokenLast4 || claimed.device?.tokenLast4 || '',
+    expiresAt: setup.expiresAt || claimed.device?.expiresAt || '',
+    pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+    ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+    useExistingBrowser: Boolean(setup.useExistingBrowser ?? claimed.device?.useExistingBrowser),
+    pairedAt: new Date().toISOString(),
+    lastError: ''
+  });
+  await ensureHolderKey();
+  await registerExecutor(saved);
+  chrome.alarms.create(POLL_ALARM, { periodInMinutes: POLL_PERIOD_MINUTES });
+  await pollSessions();
+  return { paired: true, device: claimed.device || null, setup: { ...setup, deviceToken: undefined } };
+}
+
+async function activateRunner() {
+  chrome.alarms.create(POLL_ALARM, { periodInMinutes: POLL_PERIOD_MINUTES });
+  try {
+    // A user-approved dispatch is the authorization to run. Resuming it here
+    // lets MV3 recover after Chrome suspends a background worker mid-mission.
+    await pollAndExecute();
+  } catch (error) {
+    await saveConfig({ lastError: error?.message || String(error) });
+  }
+}
+
+async function handleMessage(message, sender = null) {
+  if (message?.type === 'PAIR_WITH_CODE') return pairWithCode(message);
+  if (message?.type === 'SET_LOCAL_CHECKOUT_PROFILE') return setLocalCheckoutProfile(message, sender);
+  if (message?.type === 'CHECK_STATUS') {
+    let config = await getConfig();
+    if (config.deviceToken) await registerExecutor(config);
+    const poll = config.deviceToken ? await pollSessions() : { paired: false, sessions: [] };
+    config = await getConfig();
+    const origins = await extensionHostPermissions();
+    return { config: { ...config, deviceToken: undefined, holderPrivateJwk: undefined }, poll, origins };
+  }
+  if (message?.type === 'GET_PENDING_MISSION_SITE') return getPendingMissionSite();
+  if (message?.type === 'START_PENDING_MISSION_SITE') return startPendingMissionSite(message);
+  if (message?.type === 'FOCUS_MISSION_TAB') return focusMissionTab(message);
+  if (message?.type === 'ALLOW_AND_START_PENDING_MISSION_SITE' || message?.type === 'ENABLE_PENDING_MISSION_SITE') {
+    return allowAndStartPendingMissionSite();
+  }
+  if (message?.type === 'RUN_PENDING_SESSIONS') return pollAndExecute();
+  if (message?.type === 'REGISTER_PLUGIN') {
+    await registerExecutor();
+    return { registered: true };
+  }
+  if (message?.type === 'DISCONNECT') {
+    await chrome.storage.local.clear();
+    return { disconnected: true };
+  }
+  return { ok: true, sender: sender?.origin || null };
+}
+
+export { activateRunner, handleMessage, pollAndExecute, pollOnly, resumeActiveRun };

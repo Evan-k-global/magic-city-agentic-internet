@@ -1,0 +1,28 @@
+{
+  "protocol": "acp-v0.1",
+  "marketplace": "agent-verification",
+  "provider": {
+    "name": "agent-verification-registry",
+    "endpoint": "http://127.0.0.1:4411"
+  },
+  "actions": ["positive", "negative", "neutral"],
+  "paymentModes": ["credits", "pay_per_request"],
+  "features": {
+    "agentPassport": true,
+    "intentRouting": true,
+    "capabilityLanes": true,
+    "bondTierRouting": true,
+    "verifiableReceipts": true,
+    "privacyStrictMode": true,
+    "creditEscrow": true,
+    "payoutRails": ["card", "bank", "stablecoin"],
+    "stripeBilling": true,
+    "stripeConnectOnboarding": true,
+    "integerCreditUnits": true,
+    "protocolFeeBpsDefault": 100,
+    "reputation": "dual_track_performance_assurance",
+    "micropayments": true,
+    "faucetBootstrap": true,
+    "stakeSlashHooks": true
+  }
+}

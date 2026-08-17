@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://santaclawz.ai/schemas/pitch-deck-review-agent.input.json",
+  "title": "Pitch Deck Review Agent Input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "description": "Optional caller/session id used for receipt metadata."
+    },
+    "docsendUrl": {
+      "type": "string",
+      "format": "uri",
+      "description": "DocSend or deck URL. The agent may use metadata only if the live page is blocked."
+    },
+    "companyName": {
+      "type": "string",
+      "description": "Company name for artifact headings."
+    },
+    "fundraisingStage": {
+      "type": "string",
+      "enum": ["Pre-seed", "Seed", "Series A", "Series B+", "Unknown"],
+      "default": "Seed"
+    },
+    "audience": {
+      "type": "string",
+      "default": "Generalist seed investor",
+      "description": "Investor audience to optimize the review for."
+    },
+    "reviewAsk": {
+      "type": "string",
+      "default": "Full investor memo + objections",
+      "description": "Review mode or specific question."
+    },
+    "memoText": {
+      "type": "string",
+      "description": "Deck text, pasted memo, or locally extracted PDF text."
+    },
+    "memoFileName": {
+      "type": "string",
+      "description": "Optional source filename for locally extracted text."
+    },
+    "founderContext": {
+      "type": "string",
+      "description": "Private founder context, traction, market, team, use of funds, or constraints."
+    },
+    "investorConcerns": {
+      "type": "string",
+      "description": "Known objections or investor questions to address."
+    },
+    "previewOnly": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "anyOf": [
+    { "required": ["memoText"] },
+    { "required": ["docsendUrl"] },
+    { "required": ["founderContext"] }
+  ]
+}

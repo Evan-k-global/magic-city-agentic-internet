@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="refresh" content="0; url=/explore" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Redirecting to Magic City Explore</title>
+  <script>
+    window.location.replace('/explore');
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, sans-serif;
+      background: #090814;
+      color: #f5f7ff;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at top, rgba(108, 92, 231, 0.22), transparent 50%), #090814;
+    }
+
+    .card {
+      max-width: 32rem;
+      margin: 1.5rem;
+      padding: 1.25rem 1.5rem;
+      border-radius: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(16, 18, 32, 0.92);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    }
+
+    a {
+      color: #8fd8ff;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <strong>Magic City Explore moved.</strong>
+    <p>Agent registry and discovery now live at <a href="/explore">/explore</a>.</p>
+  </div>
+</body>
+</html>

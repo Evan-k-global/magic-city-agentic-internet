@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Custom Magic City Helper Starter",
+  "version": "0.2.0",
+  "description": "Starter helper for mission-scoped Magic City browser execution.",
+  "permissions": ["alarms", "storage", "tabs", "scripting"],
+  "optional_host_permissions": ["https://*/*"],
+  "host_permissions": [
+    "https://magic-city.ai/*",
+    "https://magic-city-staging.fly.dev/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

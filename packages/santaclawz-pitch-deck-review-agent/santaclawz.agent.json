@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "santaclawz-agent-package-v1",
+  "agentId": "pitch-deck-review-agent",
+  "displayName": "Pitch Deck Review Agent",
+  "status": "handoff_ready",
+  "source": "magic_city_extraction",
+  "summary": "Reviews DocSend links, uploaded deck text, or pasted pitch memos into an investor-readiness memo, objections list, rewrite advice, and next-step checklist.",
+  "capabilities": [
+    "pitch-deck-review-agent",
+    "pitch.fetch_docsend",
+    "pitch.review_story",
+    "pitch.build_memo"
+  ],
+  "helperAgents": [
+    "deck-reader",
+    "story-critic",
+    "investor-memo-writer"
+  ],
+  "pricing": {
+    "suggestedCredits": 10,
+    "suggestedUsd": 0.1,
+    "rails": [
+      "magic_city_credits",
+      "base_usdc_x402"
+    ]
+  },
+  "privacy": {
+    "default": "DocSend URL and lightweight metadata can be processed by the hosted agent. Uploaded deck text, unreleased numbers, founder notes, and investor concerns should be treated as private execution inputs.",
+    "claims": [
+      "The agent must clearly label whether it reviewed uploaded/pasted deck text, DocSend metadata only, or founder context only.",
+      "The agent must not claim it read a live DocSend deck when it only received metadata or a bot-check page.",
+      "Raw private deck text should not be published in marketplace metadata."
+    ]
+  },
+  "inputs": {
+    "schema": "./input-schema.json",
+    "required": [
+      "memoText"
+    ],
+    "optional": [
+      "docsendUrl",
+      "companyName",
+      "fundraisingStage",
+      "audience",
+      "reviewAsk",
+      "founderContext",
+      "investorConcerns",
+      "memoFileName"
+    ]
+  },
+  "outputs": [
+    "investor_memo.md",
+    "investor_objections.md",
+    "narrative_rewrite_advice.md",
+    "next_step_checklist.md",
+    "receipt.json"
+  ],
+  "runtime": {
+    "entrypoint": "src/worker.mjs",
+    "node": ">=20",
+    "network": "optional_docsend_metadata_fetch"
+  },
+  "magicCityProvenance": {
+    "originalWorker": "magic-city-source/localPitchDeckPlugin.original.js",
+    "originalPluginId": "local-pitch-plugin",
+    "originalOwnerAgentId": "pitch-deck-review-agent"
+  },
+  "registrationNotes": [
+    "SantaClawz should replace deterministic review sections with an LLM-backed review pass before production listing.",
+    "Keep the explicit read-mode disclosure in every result.",
+    "Expose only the input fields in input-schema.json."
+  ]
+}

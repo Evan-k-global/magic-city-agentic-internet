@@ -1,0 +1,22 @@
+# Local environment and secrets
+.env
+env/*.env
+.magic-city-secrets/
+
+# Dependencies
+node_modules/
+
+# Build/runtime outputs
+dist/
+data/
+tmp/
+.DS_Store
+**/.DS_Store
+*.log
+coverage/
+
+# Confidential IP materials; do not publish without counsel review.
+private-ip/
+
+# Loose source media; deployable assets live under public/assets.
+708061_Cloud Rotate Neon 3d_By_Bruno_Tornielli_Artlist_4K.mp4

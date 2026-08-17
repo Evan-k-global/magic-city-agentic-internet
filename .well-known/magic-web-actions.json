@@ -1,0 +1,38 @@
+{
+  "schema": "magic-web-actions-v0",
+  "site": "https://magic-city.ai",
+  "name": "Magic City",
+  "capabilities": {
+    "missions": {
+      "method": "POST",
+      "endpoint": "/agent-sdk/v1/missions",
+      "requiresMissionAuth": true
+    },
+    "browserWorker": {
+      "method": "POST",
+      "endpoint": "/agent-sdk/v1/missions/{missionId}/browser-worker/request",
+      "requiresMissionAuth": true,
+      "supportsLocalAuthenticatedRunner": true
+    },
+    "artifacts": {
+      "method": "POST",
+      "endpoint": "/agent-sdk/v1/missions/{missionId}/artifacts",
+      "requiresMissionAuth": true
+    },
+    "receipts": {
+      "method": "GET",
+      "endpoint": "/proofs/receipt/{receiptId}",
+      "hashFields": ["missionId", "agentId", "status", "resultHash", "createdAt"]
+    }
+  },
+  "auth": {
+    "accepts": ["mission-bound-auth"],
+    "audience": "magic_city_execution",
+    "requiredClaims": ["mission_id", "agent_id", "allowed_actions", "expires_at"]
+  },
+  "proofs": {
+    "receiptHash": true,
+    "screenshots": "optional",
+    "zekoAnchor": "optional"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "sessionId": "example-pitch-001",
+  "docsendUrl": "https://docsend.com/view/example",
+  "companyName": "ExampleCo",
+  "fundraisingStage": "Seed",
+  "audience": "Generalist seed investor",
+  "reviewAsk": "Full investor memo + objections",
+  "memoText": "ExampleCo helps finance teams close books faster with AI-assisted reconciliation. Early users include five design partners. The team has deep accounting and infrastructure experience. The deck needs sharper proof, clearer GTM, and a more specific fundraising ask.",
+  "founderContext": "Raising $2.5M seed to reach 20 paid customers and launch SOC2-ready integrations.",
+  "investorConcerns": "Investors may worry this is a feature inside an incumbent accounting platform.",
+  "previewOnly": false
+}

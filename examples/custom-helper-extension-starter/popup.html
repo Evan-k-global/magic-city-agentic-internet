@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Magic City Helper</title>
+    <style>
+      body { width: 330px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; background: #0d1118; color: #eef6ff; }
+      label { display: block; margin: 10px 0 5px; color: #aeb8c7; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+      input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #354052; background: #070b12; color: #fff; }
+      button { width: 100%; margin-top: 10px; padding: 10px; border: 0; border-radius: 9px; font-weight: 700; cursor: pointer; background: linear-gradient(135deg, #35d5ee, #76efc7); color: #061018; }
+      #status { margin-top: 12px; padding: 10px; border: 1px solid #354052; border-radius: 9px; color: #c5cfdd; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <strong>Custom Magic City Helper</strong>
+    <label for="baseUrl">Magic City URL</label>
+    <input id="baseUrl" value="https://magic-city.ai">
+    <label for="pairingCode">Pairing code</label>
+    <input id="pairingCode" placeholder="ABCD-2345">
+    <button id="pairBtn">Pair helper</button>
+    <button id="registerBtn">Register helper</button>
+    <button id="pollBtn">Poll once</button>
+    <div id="status">Not paired.</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

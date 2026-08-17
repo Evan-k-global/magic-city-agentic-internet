@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "magic-city": {
+      "command": "node",
+      "args": [
+        "/Users/evankereiakes/Documents/Codex/agent-verification/src/magicCityMcpServer.js"
+      ],
+      "env": {
+        "MAGIC_CITY_BASE_URL": "https://magic-city-staging.fly.dev",
+        "MAGIC_CITY_APP_URL": "https://magic-city-staging.fly.dev",
+        "MAGIC_CITY_REQUESTER_ID": "you@example.com"
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "magic-city-local",
+  "interface": {
+    "displayName": "Magic City Local"
+  },
+  "plugins": [
+    {
+      "name": "magic-city",
+      "source": {
+        "source": "local",
+        "path": "./plugins/magic-city"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

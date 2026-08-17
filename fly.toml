@@ -1,0 +1,85 @@
+app = "magic-city-staging"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "4411"
+  NODE_ENV = "production"
+  PRIVACY_MODE = "strict"
+  STORE_ENCRYPTED_PAYLOADS = "false"
+  AUTO_START_LOCAL_EXECUTION_AGENTS = "false"
+  MAGIC_CITY_FILE_PERSIST_MODE = "async"
+  MAGIC_CITY_FILE_PERSIST_DELAY_MS = "150"
+  MAGIC_CITY_POSTGRES_SINGLE_WRITER = "true"
+  MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE = "true"
+  MAGIC_CITY_REQUIRE_STATE_ENCRYPTION = "true"
+  MAGIC_CITY_REQUIRE_ARTIFACT_ENCRYPTION = "true"
+  MAGIC_CITY_MIGRATE_LEGACY_ARTIFACT_ENCRYPTION = "true"
+  AUTO_DRAIN_SPONSORED_PROOF_QUEUE = "true"
+  AUTO_RECOVER_SPONSORED_PROOF_QUEUE = "false"
+  SPONSORED_PROOF_QUEUE_BATCH_SIZE = "1"
+  SPONSORED_PROOF_QUEUE_WINDOW_MS = "2500"
+  SPONSORED_PROOF_QUEUE_SAFE_START_DELAY_MS = "12000"
+  SPONSORED_PROOF_QUEUE_RECOVER_FAILED = "false"
+  SPONSORED_PROOF_QUEUE_FAILED_RECOVERY_LIMIT = "0"
+  SPONSORED_PROOF_QUEUE_RECOVERY_LIMIT = "0"
+  ZEKO_PROOF_WORKER_URL = "http://127.0.0.1:4413"
+  ZEKO_PROOF_WORKER_PRIORITY = "19"
+  ZEKO_RELAYER_JOB_PRIORITY = "19"
+  ZEKO_PROOF_CACHE_DIR = "/app/data/zeko-proof-cache"
+  ZEKO_PROOF_WORKER_TIMEOUT_MS = "1800000"
+  MAGIC_CITY_BROWSER_SCHEMA_EXTRACTOR_ENABLED = "true"
+  MAGIC_CITY_BROWSER_SCHEMA_EXTRACTOR_TIMEOUT_MS = "1500"
+  MAGIC_CITY_BROWSER_SCHEMA_MODEL = "openai/gpt-oss-20b:floor"
+  SANTACLAWZ_API_BASE = "https://api.santaclawz.ai"
+  AUTO_TOPUP_LOCAL_FREE = "false"
+  DAILY_FREE_CREDITS = "50"
+  FREE_TEST_CREDITS = "50"
+  FREE_AGENT_EXECUTION_CREDITS = "10"
+  SANTACLAWZ_DEFAULT_PAID_AGENT_CREDITS = "10"
+  CREDITS_PER_USD = "100"
+  CREDIT_VALUE_USD_CENTS = "1"
+  ALPHA_FLAT_WORKFLOW_CREDITS = "10"
+  DEFAULT_TOPUP_CREDITS = "2500"
+  STRIPE_MIN_TOPUP_USD_CENTS = "50"
+  EVM_WALLET_DEFAULT_CHAIN_ID = "8453"
+  EVM_WALLET_REQUIRED_SIGNIN_CHAIN_ID = "8453"
+  EVM_BASE_RPC_URL = "https://mainnet.base.org"
+  BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+  SANTACLAWZ_BASE_PROTOCOL_TREASURY_ADDRESS = "0xF787fF44c5e80c8165e1B4FB156411e2d42c91B2"
+  SANTACLAWZ_PROOF_NETWORK = "zeko:testnet"
+  MAGIC_CITY_EVM_BASE_TREASURY_ADDRESS = "0xF787fF44c5e80c8165e1B4FB156411e2d42c91B2"
+  ZEKO_SUBMIT_MODE = "relay"
+  MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:testnet"
+  ZEKO_NETWORK_ID = "zeko:testnet"
+  ZEKO_O1JS_NETWORK_ID = "testnet"
+  ZEKO_GRAPHQL = "https://testnet.zeko.io/graphql"
+  ZEKO_ARCHIVE = "https://archive.testnet.zeko.io/graphql"
+  ZEKO_EXPLORER_TX_BASE = "https://zekoscan.io/testnet/tx/{tx}?type=zk-tx"
+  ZEKO_RELAYER_URL = "http://127.0.0.1:4412/submit"
+  ZEKO_RELAYER_HOST = "127.0.0.1"
+  ZEKO_RELAYER_MODE = "mission_auth_registry"
+  TX_FEE = "100000000"
+
+[http_service]
+  internal_port = 4411
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[deploy]
+  strategy = "immediate"
+
+[[mounts]]
+  source = "magic_city_data"
+  destination = "/app/data"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

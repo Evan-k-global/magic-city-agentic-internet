@@ -1,0 +1,13 @@
+node_modules
+npm-debug.log
+.DS_Store
+data
+data/backups
+data/execution-artifacts
+dist/native-runner-macos
+public/assets/magic-city-bg.mp4
+public/assets/708062_Shape Cloud Rotate Neon_By_Bruno_Tornielli_Artlist_4K.mp4
+public/assets/708063_Square Rotate Cloud 3d_By_Bruno_Tornielli_Artlist_4K.mp4
+
+# Confidential IP materials; do not package or deploy.
+private-ip

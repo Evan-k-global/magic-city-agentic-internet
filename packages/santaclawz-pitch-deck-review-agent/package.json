@@ -1,0 +1,13 @@
+{
+  "name": "@magic-city/santaclawz-pitch-deck-review-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SantaClawz handoff package for the Magic City pitch deck review agent.",
+  "scripts": {
+    "smoke": "node src/worker.mjs examples/request.json"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

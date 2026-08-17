@@ -1,0 +1,16 @@
+Zeko
+Copyright (c) Zeko Labs, Inc. All rights reserved.
+
+This repository includes Magic City components licensed under BUSL-1.1 with
+the Zeko Additional Use Grant, permissively licensed adoption-layer materials,
+and third-party or upstream-derived components under their original licenses.
+
+Magic City is a retail-facing internet-agent execution and commerce platform.
+Its protected implementation includes chat-to-execution routing, agent
+selection, credits, x402 and stablecoin payment facilitation, execution
+receipts, proof artifacts, privacy controls, and agent reputation.
+
+Protected names and marks may include Magic City, SantaClawz, Zeko, AgentLayer,
+and related product names, service names, logos, user-interface trade dress,
+slogans, and branding. No trademark rights are granted except as separately
+authorized in writing.

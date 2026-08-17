@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_verification
+      POSTGRES_USER: agentlayer
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentlayer -d agent_verification"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4411:4411"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4411
+      DATABASE_URL: postgresql://agentlayer:change-me@postgres:5432/agent_verification
+      DATABASE_SSL: disable
+      FAUCET_CREDIT_AMOUNT: 25
+      FREE_TEST_CREDITS: 25
+      QUICKSTART_STAKE_CREDITS: 50
+      PROTOCOL_FEE_BPS: 100
+      PRIVACY_MODE: strict
+      STORE_ENCRYPTED_PAYLOADS: "false"
+      PRIVACY_SALT: change-me-before-public-hosting
+      ADMIN_TOKEN: change-me
+      RELAYER_TOKEN: change-me
+      PUBLIC_API_KEYS: alpha-key-1,alpha-key-2
+      ALLOW_INSECURE_ADMIN: "false"
+    volumes:
+      - app_data:/app/data
+
+volumes:
+  postgres_data:
+  app_data:

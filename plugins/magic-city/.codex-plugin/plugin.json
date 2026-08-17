@@ -1,0 +1,40 @@
+{
+  "name": "magic-city",
+  "version": "0.1.0",
+  "description": "Use Magic City agent workflows directly inside Codex through MCP.",
+  "author": {
+    "name": "Magic City",
+    "email": "founders@magic.city",
+    "url": "https://magic-city-staging.fly.dev"
+  },
+  "homepage": "https://magic-city-staging.fly.dev",
+  "repository": "https://magic-city-staging.fly.dev",
+  "license": "Proprietary",
+  "keywords": [
+    "agents",
+    "payments",
+    "execution",
+    "workflow"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Magic City",
+    "shortDescription": "Private agent execution and checkout inside Codex.",
+    "longDescription": "Magic City lets Codex route tasks into credit-backed, account-scoped agent workflows for chat, approvals, execution, wallet actions, and connector sessions.",
+    "developerName": "Magic City",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://magic-city-staging.fly.dev",
+    "privacyPolicyURL": "https://magic-city-staging.fly.dev",
+    "termsOfServiceURL": "https://magic-city-staging.fly.dev",
+    "defaultPrompt": [
+      "Route this task through Magic City.",
+      "Show my Magic City wallet and recent runs.",
+      "Approve this Magic City action and start execution."
+    ],
+    "brandColor": "#17D7FF"
+  }
+}

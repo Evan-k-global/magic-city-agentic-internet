@@ -1,0 +1,24 @@
+Business Source License 1.1
+
+Licensor: Zeko Labs, Inc.
+
+Licensed Work: Zeko Agent Protocol Bundle protected product/protocol components
+in this repository, including Magic City source code, services, scripts,
+verifier components, authorization components, payment components, settlement
+components, coordination components, orchestration components, tests, and
+related artifacts, except any file, package, directory, SDK, specification,
+example, interface, ABI, documentation, test vector, template, or third-party
+component that contains an express different license notice.
+
+Additional Use Grant: The Zeko Additional Use Grant published in
+LICENSES/ZEKO-ADDITIONAL-USE-GRANT.md.
+
+Change Date: 2030-07-17
+
+Change License: Apache License, Version 2.0.
+
+The Business Source License 1.1 terms are published in
+LICENSES/BUSL-1.1.txt and are incorporated into this License by reference.
+
+For payment, billing, commercial licensing, ecosystem agreements, or other
+inquiries, contact partnerships@zeko.io.
