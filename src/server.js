@@ -19681,7 +19681,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/claim$/.test(urlPath)) {
       const sessionId = urlPath.split('/')[3];
-      return withExtensionClaimLock(sessionId, async () => {
+      return await withExtensionClaimLock(sessionId, async () => {
         const session = getConnectorSession(sessionId);
         if (!session) return notFound(res);
         const body = await readBody(req);

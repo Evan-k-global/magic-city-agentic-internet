@@ -1441,9 +1441,12 @@ function isAmazonCartContinuationUrl(value = '') {
   return false;
 }
 
-function checkoutConstraintViolation(report = {}, plan = null) {
+function checkoutConstraintViolation(report = {}, plan = null, action = null) {
   const summary = report.checkoutSummary || {};
   const stage = String(summary.stage || report.browserState || '').toLowerCase();
+  const boundaryAction = action && typeof action === 'object' ? action : (report.runnerStep || {});
+  const boundaryActionType = String(boundaryAction.type || boundaryAction.actionType || '');
+  const boundaryActionId = String(boundaryAction.id || boundaryAction.actionId || '');
   const checkoutish = ['cart', 'checkout', 'offer', 'payment', 'final_review'].includes(stage)
     || isCheckoutLikeUrl(report.url || report.finalUrl || '');
   const merchandiseSubtotal = parseUsdAmount(summary.merchandiseSubtotal);
@@ -1496,6 +1499,9 @@ function checkoutConstraintViolation(report = {}, plan = null) {
   // navigation, but it is not the delivery decision. Let the plan decline
   // that offer before enforcing the final shipping policy.
   const deliveryPolicyStage = ['cart', 'checkout', 'payment', 'final_review'].includes(stage);
+  const deliveryVerificationStep = boundaryActionType === 'fill_checkout_profile'
+    || boundaryActionType === 'final_submit'
+    || /(?:inspect-review|reconcile|verify-reviewed-checkout|submit-final-order|pause-for-user)/i.test(boundaryActionId);
   if (deliveryPolicyStage && plan?.primeRequired === true) {
     if (summary.cartPrimeFulfillmentObserved === true && summary.cartPrimeVerified === false) {
       return {
@@ -1512,7 +1518,7 @@ function checkoutConstraintViolation(report = {}, plan = null) {
         evidence: `Prime-only checkout requires $0 delivery. Amazon currently shows ${summary.shippingTotal} shipping.`
       };
     }
-    if (summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
+    if (deliveryVerificationStep && summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
       return {
         state: 'prime_required',
         failed: true,
@@ -1536,9 +1542,9 @@ function checkoutConstraintViolation(report = {}, plan = null) {
   return null;
 }
 
-function stopForBoundary(report = {}, plan = null) {
+function stopForBoundary(report = {}, plan = null, action = null) {
   if (report.finalSubmitRequested) return null;
-  const violation = checkoutConstraintViolation(report, plan);
+  const violation = checkoutConstraintViolation(report, plan, action);
   if (violation) return violation;
   if (report.providerChallenge) return { state: 'captcha_or_challenge_required', evidence: 'Provider challenge detected.' };
   if (report.loginRequired) return {
@@ -1800,14 +1806,15 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
   // Amazon can expose an address confirmation, then settle the selected
   // delivery state before revealing its payment selector. Keep this bounded
   // while allowing that extra local-only transition.
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  const reconcileDeadline = Date.now() + 26_000;
+  for (let attempt = 0; attempt < 6 && Date.now() < reconcileDeadline; attempt += 1) {
     if (typeof assertActive === 'function') await assertActive();
     const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
     const outcome = await tabCommand(tabId, {
       type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
       action: { ...action, type: 'fill_checkout_profile' },
       checkoutProfile
-    });
+    }, { injectionTimeoutMs: 9_000, responseTimeoutMs: 9_000 });
     latestOutcome = outcome;
     merged.completed = Boolean(outcome?.completed);
     merged.skipped = Boolean(merged.skipped && outcome?.skipped);
@@ -1823,6 +1830,20 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       checkoutSelections: Array.isArray(outcome?.checkoutSelections) ? outcome.checkoutSelections : []
     });
     if (!outcome?.completed) break;
+    const observedSummary = outcome?.state?.checkoutSummary || {};
+    const cardSelectionNeedsReobserve = Array.isArray(outcome?.checkoutSelections)
+      && outcome.checkoutSelections.includes('matching payment card')
+      && (observedSummary.cardMatches !== true || observedSummary.paymentMethodConfirmationRequired === true);
+    const addressSelectionNeedsReobserve = Array.isArray(outcome?.checkoutSelections)
+      && outcome.checkoutSelections.includes('matching delivery address')
+      && (observedSummary.addressMatches !== true || observedSummary.addressConfirmationRequired === true);
+    if (!outcome.navigationRequested && !outcome.skipped && (cardSelectionNeedsReobserve || addressSelectionNeedsReobserve)) {
+      // Amazon updates the checked option and summary after the content-script
+      // response. Re-enter the same bounded primitive from the background
+      // worker instead of awaiting inside the page message channel.
+      await delay(320);
+      continue;
+    }
     if (outcome.navigationRequested && !outcome.skipped) {
       // Address, card, and delivery selectors often change the DOM without a
       // navigation. Re-observe those immediately; reserve the long wait for
@@ -1845,7 +1866,9 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
   return {
     ...(latestOutcome || {}),
     ...merged,
-    reason: latestOutcome?.reason || 'Checkout preset reconciliation reached its safety limit.',
+    reason: latestOutcome?.reason || (Date.now() >= reconcileDeadline
+      ? 'Checkout preset reconciliation timed out before the next verified state.'
+      : 'Checkout preset reconciliation reached its safety limit.'),
     state: merged.state || latestOutcome?.state || null
   };
 }
@@ -2072,24 +2095,6 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
       ...outcome,
       state: await tabBrowserState(tabId, checkoutProfile, { attempts: 4, delayMs: 220 }).catch(() => outcome.state || null)
     };
-  }
-  if (action.type === 'click_intent' && action.intent === 'checkout' && checkoutProfile && !outcome?.navigationRequested) {
-    const fillOutcome = await runCheckoutProfileReconcile(tabId, {
-      id: `${action.id || 'checkout'}-local-profile-boundary-reconcile`,
-      type: 'fill_checkout_profile'
-    }, checkoutProfile, assertActive).catch((error) => {
-      if (isExecutionCancelledError(error)) throw error;
-      return null;
-    });
-    if (fillOutcome?.completed && !fillOutcome.skipped) {
-      return {
-        ...outcome,
-        completed: true,
-        state: fillOutcome.state || outcome?.state,
-        safeFieldsFilled: Array.isArray(fillOutcome.safeFieldsFilled) ? fillOutcome.safeFieldsFilled : outcome?.safeFieldsFilled,
-        checkoutSelections: Array.isArray(fillOutcome.checkoutSelections) ? fillOutcome.checkoutSelections : outcome?.checkoutSelections
-      };
-    }
   }
   const postActionTab = await chrome.tabs.get(tabId).catch(() => ({ url: before.url || '' }));
   const actionNavigated = Boolean(outcome?.navigationRequested) || postActionTab.url !== before.url;
@@ -2615,7 +2620,7 @@ async function runSession(rawSession) {
         planActionStatus: actionStatus
       });
       if (action.type === 'pause') {
-        const boundary = stopForBoundary(report, plan);
+        const boundary = stopForBoundary(report, plan, action);
         if (boundary) {
           const parked = await parkForPaymentAutofill(session, plan, report);
           if (parked) return parked;
@@ -2631,7 +2636,7 @@ async function runSession(rawSession) {
         report.stopEvidence = 'The approved browser plan is complete. Review the local checkout before payment or final approval.';
         return reportAndStop(session, plan, report);
       }
-      const boundary = stopForBoundary(report, plan);
+      const boundary = stopForBoundary(report, plan, action);
       const nextPlanAction = plan.actions[index + 1] || null;
       const canFillBeforeSensitiveStop = ['payment_required', 'final_approval_required', 'checkout_profile_mismatch'].includes(String(boundary?.state || ''))
         && nextPlanAction?.type === 'fill_checkout_profile'

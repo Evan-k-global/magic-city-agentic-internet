@@ -37,6 +37,7 @@
     "test:retail-checkout-receipts": "node scripts/test-retail-checkout-receipt-profile.mjs",
     "test:zk-network-split": "node scripts/test-zk-network-split.mjs",
     "test:native-runner-security": "node scripts/test-native-runner-security.mjs",
+    "test:native-runner-card-reconciliation": "node scripts/test-native-runner-card-reconciliation.mjs",
     "test:native-runner-extension-pairing": "node scripts/test-native-runner-extension-pairing.mjs",
     "test:browser-affiliate-safety": "node scripts/test-browser-affiliate-safety.mjs",
     "test:execution-artifact-privacy": "node scripts/test-execution-artifact-privacy.mjs",

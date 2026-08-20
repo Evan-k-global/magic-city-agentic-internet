@@ -1666,6 +1666,8 @@
     const label = textFor(element);
     if (FINAL_ACTION_PATTERN.test(label)) return false;
     element.scrollIntoView({ block: 'center', inline: 'center' });
+    // Let the runtime serialize the signed response before a merchant
+    // navigation can unload this content-script message channel.
     setTimeout(() => {
       if (!visible(element) || element.disabled) return;
       try {
@@ -1673,7 +1675,7 @@
       } catch {
         // The next inspection step reports a safe handoff when navigation fails.
       }
-    }, 0);
+    }, 80);
     return true;
   }
 
@@ -2070,7 +2072,7 @@
       const text = compactText(container?.innerText || '', 1000);
       if (expectedLast4 && !input.checked && /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && last4FromText(text) === expectedLast4) {
         const target = paymentChoiceClickTarget(input);
-        if (immediateSafeClick(target) && input.checked) {
+        if (immediateSafeClick(target)) {
           selected.push('matching payment card');
         }
         continue;
@@ -2112,11 +2114,11 @@
     if (expectedLast4 && !selectedKinds.has('matching payment card')) {
       const matchingPaymentChoice = findMatchingStoredPaymentChoice(profile);
       if (matchingPaymentChoice && immediateSafeClick(matchingPaymentChoice.target)) {
-        const selectedLast4 = selectedCardLast4();
-        if (selectedLast4 === expectedLast4) {
-          selected.push('matching payment card');
-          selectedKinds.add('matching payment card');
-        }
+        // Amazon often updates the checked radio and summary asynchronously.
+        // Record the safe click now; fillCheckoutProfile re-observes before it
+        // confirms the card or decides that the mismatch remains.
+        selected.push('matching payment card');
+        selectedKinds.add('matching payment card');
       }
     }
     return [...new Set(selected)];
@@ -2214,16 +2216,23 @@
   function findPaymentMethodConfirmControl() {
     const entries = interactiveControls()
       .map((control, index) => {
+        const directLabel = compactText([
+          control?.innerText,
+          control?.textContent,
+          control?.value,
+          control?.getAttribute?.('aria-label'),
+          ariaLabelledText(control)
+        ].filter(Boolean).join(' '), 180);
         const visibleLabel = visibleControlLabel(control, 180);
         const descriptor = controlDescriptor(control);
-        const label = visibleLabel || compactText(textFor(control), 180).replace(/\s+/g, ' ').trim();
-        const exactConfirmation = /^use this payment method$/i.test(visibleLabel)
-          || /^continue with (?:this|selected) payment method$/i.test(visibleLabel);
-        const containsConfirmation = /\buse this payment method\b/i.test(visibleLabel)
-          || /\bcontinue with (?:this|selected) payment method\b/i.test(visibleLabel);
-        const unsafeLabel = /\b(add (?:a )?(?:new )?(?:credit|debit|payment)|gift card|promo code|prime|trial|subscribe)\b/i.test(visibleLabel);
+        const label = directLabel || visibleLabel || compactText(textFor(control), 180).replace(/\s+/g, ' ').trim();
+        const exactConfirmation = /^use this payment method$/i.test(directLabel)
+          || /^continue with (?:this|selected) payment method$/i.test(directLabel);
+        const containsConfirmation = /\buse this payment method\b/i.test(directLabel)
+          || /\bcontinue with (?:this|selected) payment method\b/i.test(directLabel);
+        const unsafeLabel = /\b(add (?:a )?(?:new )?(?:credit|debit|payment)|gift card|promo code|prime|trial|subscribe)\b/i.test(directLabel);
         const unsafeDescriptor = /\b(gift card|promo code|prime|trial|subscribe)\b/i.test(descriptor);
-        const unsafe = FINAL_ACTION_PATTERN.test(visibleLabel || label) || unsafeLabel || unsafeDescriptor;
+        const unsafe = FINAL_ACTION_PATTERN.test(directLabel || label) || unsafeLabel || unsafeDescriptor;
         return { control, label, score: (exactConfirmation ? 280 : containsConfirmation ? 240 : 0) - (unsafe ? 500 : 0), index };
       })
       .filter((entry) => entry.score >= 220)
@@ -2867,7 +2876,7 @@
     }
     if (intent === 'checkout' && browserState.state === 'offer') {
       const decline = findDeclineOfferControl();
-      if (decline && immediateSafeClick(decline.control)) {
+      if (decline && scheduleSafeClick(decline.control)) {
         return {
           completed: true,
           navigationRequested: true,
@@ -3002,7 +3011,7 @@
     const controlText = interactiveControls().map(textFor).join('\n');
     if (isOptionalOfferPage(rawPageText, controlText)) {
       const decline = findDeclineOfferControl();
-      if (decline && immediateSafeClick(decline.control)) {
+      if (decline && scheduleSafeClick(decline.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3053,7 +3062,7 @@
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     if (expectedLast4 && selectedLast4 === expectedLast4) {
       const confirmPayment = findPaymentMethodConfirmControl();
-      if (confirmPayment && immediateSafeClick(confirmPayment.control)) {
+      if (confirmPayment && scheduleSafeClick(confirmPayment.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3083,7 +3092,7 @@
       && visibleShippingFieldsMatchProfile(profile, checkoutFields);
     if (addressFormMatchesProfile) {
       const confirmAddress = findAddressConfirmControl();
-      if (confirmAddress && immediateSafeClick(confirmAddress.control)) {
+      if (confirmAddress && scheduleSafeClick(confirmAddress.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3101,7 +3110,7 @@
     // the non-sensitive "Deliver to this address" confirmation.
     if (addressMatches === true || selectedMatchingAddress) {
       const confirmAddress = findAddressConfirmControl();
-      if (confirmAddress && immediateSafeClick(confirmAddress.control)) {
+      if (confirmAddress && scheduleSafeClick(confirmAddress.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3146,7 +3155,7 @@
           };
         }
         const confirmAddress = findAddressConfirmControl();
-        if (confirmAddress && immediateSafeClick(confirmAddress.control)) {
+        if (confirmAddress && scheduleSafeClick(confirmAddress.control)) {
           return {
             completed: true,
             skipped: false,
@@ -3167,7 +3176,7 @@
       }
 
       const addAddress = completeShippingProfile ? findAddressAddControl() : null;
-      if (addAddress && immediateSafeClick(addAddress.control)) {
+      if (addAddress && scheduleSafeClick(addAddress.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3181,7 +3190,7 @@
       }
 
       const openAddressPicker = findCheckoutCorrectionControl('address', summary);
-      if (openAddressPicker && immediateSafeClick(openAddressPicker.control)) {
+      if (openAddressPicker && scheduleSafeClick(openAddressPicker.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3214,7 +3223,7 @@
       && !selectedOptions.includes('matching payment card')
     ) {
       const addPaymentCard = findPaymentAddControl();
-      if (addPaymentCard && immediateSafeClick(addPaymentCard.control)) {
+      if (addPaymentCard && scheduleSafeClick(addPaymentCard.control)) {
         return {
           completed: true,
           skipped: false,
@@ -3231,7 +3240,7 @@
     }
     if (correctionKind) {
       const correction = findCheckoutCorrectionControl(correctionKind, state.checkoutSummary || {});
-      if (correction && immediateSafeClick(correction.control)) {
+      if (correction && scheduleSafeClick(correction.control)) {
         return {
           completed: true,
           skipped: false,
