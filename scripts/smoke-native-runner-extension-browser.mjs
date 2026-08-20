@@ -29,6 +29,25 @@ function buildExtensionPlan(session = {}) {
     extensionFinalSubmitEnabled
   });
 }
+
+function stableValue(value) {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value)
+      .filter(([, nested]) => nested !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, stableValue(nested)]));
+  }
+  return value;
+}
+
+function rehashExtensionPlan(plan) {
+  const { planHash: _ignored, ...unsignedPlan } = plan;
+  return {
+    ...unsignedPlan,
+    planHash: `0x${crypto.createHash('sha256').update(JSON.stringify(stableValue(unsignedPlan))).digest('hex')}`
+  };
+}
 let checkoutFixture = {
   total: '$4.15',
   merchandiseSubtotal: '$3.50',
@@ -135,13 +154,31 @@ function createCertificate(directory) {
   return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
 }
 
-function copyTestExtension(directory) {
+function copyTestExtension(directory, externalOrigin = '') {
   const destination = path.join(directory, 'extension');
   fs.cpSync(extensionSource, destination, { recursive: true });
   const manifestPath = path.join(destination, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   manifest.host_permissions = [...new Set([...(manifest.host_permissions || []), 'https://127.0.0.1/*'])];
+  manifest.externally_connectable = {
+    ...(manifest.externally_connectable || {}),
+    matches: [...new Set([
+      ...(manifest.externally_connectable?.matches || []),
+      'https://127.0.0.1/*'
+    ])]
+  };
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  if (externalOrigin) {
+    const backgroundPath = path.join(destination, 'background.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const origin = new URL(externalOrigin).origin;
+    const marker = "  'https://magic-city-staging.fly.dev'\n]);";
+    if (!background.includes(marker)) fail('test_extension_external_origin_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      marker,
+      `  'https://magic-city-staging.fly.dev',\n  '${origin}'\n]);`
+    ));
+  }
   return destination;
 }
 
@@ -400,6 +437,19 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '</main>'
     ].join('');
   }
+  if (pathname === '/post-add-confirmation') {
+    return [
+      '<main data-testid="added-to-cart-confirmation">',
+      '<nav><span id="nav-link-accountList-nav-line-1">Hello, Test Shopper</span><a id="nav-cart" href="/cart?source=post-add-header"><span id="nav-cart-count">1</span> Cart</a></nav>',
+      '<h1>Added to cart</h1>',
+      '<section><p>Nature Valley Crunchy Granola Bars</p><p>Cart Subtotal: $3.50</p>',
+      '<div id="sw-ptc"><button onclick="location.href=\'/checkout/from-post-add\'">Proceed to checkout (1 item)</button></div>',
+      '<div id="sw-gtc"><a href="/cart?source=post-add-confirmation">Go to Cart</a></div>',
+      '</section>',
+      '<aside aria-label="Cart preview"><p>Subtotal $3.50</p><a href="/cart?source=post-add-side">Go to Cart</a></aside>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/cart' || pathname === '/gp/cart/view.html') {
     if (searchParams.get('brand') === 'nature-valley-valid') brandCartItem = 'nature-valley-valid';
     if (searchParams.get('late') === 'paid') {
@@ -625,7 +675,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     '<div data-component-type="s-search-result" data-asin="BROWSER-SMOKE-ASIN">',
     '<h2><a href="/dp/test-gadget">Test gadget collection</a></h2>',
     '<span class="a-price">$3.50</span><span>4.7 out of 5 stars</span><span>1,240 ratings</span><span aria-label="Amazon Prime">Prime delivery</span>',
-    '<button id="browser-smoke-search-add" onclick="document.querySelector(\'#nav-cart-count\').textContent=\'1\'; document.querySelector(\'#browser-smoke-sidecart\').hidden=false; this.textContent=\'Added to cart\';">Add to cart</button>',
+    '<button id="browser-smoke-search-add" onclick="location.href=\'/post-add-confirmation\'">Add to cart</button>',
     '</div>',
     '<aside id="browser-smoke-sidecart" aria-label="Cart preview" hidden><p>Subtotal $3.50</p><button onclick="location.href=\'/cart?source=browser-smoke-sidecart\'">Go to Cart</button></aside>',
     '<a id="nav-cart" href="/cart?source=browser-smoke-header"><span id="nav-cart-count">0</span> Cart</a>',
@@ -640,8 +690,10 @@ async function main() {
   try {
     const certificate = createCertificate(tmpDir);
     const checkpoints = [];
+    const claimedSessionIds = [];
     let fulfillment = null;
     let session = null;
+    let distractorSession = null;
     let slowInitialSearchResponse = true;
     // Exhaust the in-action retries once. The runner must preserve the plan
     // cursor, schedule a resume, and finish instead of posting a failed receipt.
@@ -665,12 +717,24 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/plugins/register') return json(res, 201, { registered: true });
       if (req.method === 'GET' && url.pathname === '/connectors/sessions') {
-        const active = ['fulfilled', 'failed'].includes(session.status) ? [] : [session];
+        const active = [distractorSession, session]
+          .filter(Boolean)
+          .filter((candidate) => !['fulfilled', 'failed'].includes(candidate.status));
         return json(res, 200, { sessions: active, actionableCount: active.length });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/claim')) {
-        session = { ...session, status: 'claimed', claimedByPluginId: body.pluginId };
-        return json(res, 200, { claimed: true, session });
+        const matched = url.pathname.match(/^\/connectors\/sessions\/([^/]+)\/claim$/);
+        const claimedSessionId = decodeURIComponent(matched?.[1] || '');
+        claimedSessionIds.push(claimedSessionId);
+        if (claimedSessionId === session?.id) {
+          session = { ...session, status: 'claimed', claimedByPluginId: body.pluginId };
+          return json(res, 200, { claimed: true, session });
+        }
+        if (claimedSessionId === distractorSession?.id) {
+          distractorSession = { ...distractorSession, status: 'claimed', claimedByPluginId: body.pluginId };
+          return json(res, 200, { claimed: true, session: distractorSession });
+        }
+        return json(res, 404, { error: 'test_claim_session_not_found' });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/runner-status')) {
         if (transientRunnerStatusFailures > 0) {
@@ -765,15 +829,26 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
+    distractorSession = {
+      ...session,
+      id: 'browser-smoke-distractor-session',
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        capabilityId: 'browser-smoke-distractor-capability',
+        subject: { sessionId: 'browser-smoke-distractor-session' }
+      }
+    };
 
-    const extensionDir = copyTestExtension(tmpDir);
-    context = await chromium.launchPersistentContext(path.join(tmpDir, 'profile'), {
+    const extensionDir = copyTestExtension(tmpDir, baseUrl);
+    const profileDir = path.join(tmpDir, 'profile');
+    const launchOptions = {
       headless: false,
       args: ['--ignore-certificate-errors', `--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`]
-    });
-    const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    };
+    context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    let worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
-    const popup = await context.newPage();
+    let popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
     await popup.locator('#baseUrl').fill(baseUrl);
     await popup.locator('#pairingCode').fill('BROWSER-SMOKE');
@@ -901,6 +976,62 @@ async function main() {
     });
     await headerCartPage.close();
 
+    const postAddConfirmationPage = await context.newPage();
+    await postAddConfirmationPage.goto(`${baseUrl}/post-add-confirmation`);
+    const postAddCartAction = await commandPage(postAddConfirmationPage, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true }
+    });
+    await postAddConfirmationPage.waitForURL(/\/cart\?source=post-add-confirmation/, { timeout: 5_000 }).catch(() => null);
+    if (!postAddCartAction?.completed
+      || postAddCartAction?.controlStrategy !== 'amazon_post_add_go_to_cart'
+      || !/\/cart\?source=post-add-confirmation/.test(postAddConfirmationPage.url())
+      || postAddConfirmationPage.url().includes('/checkout/')) {
+      fail(`browser_extension_post_add_confirmation_transition_failed:${JSON.stringify({
+        action: postAddCartAction,
+        url: postAddConfirmationPage.url()
+      })}`);
+    }
+    recordPurchaseScenario('Full-page Added to cart confirmation enters the cart before checkout', {
+      strategy: postAddCartAction.controlStrategy,
+      url: postAddConfirmationPage.url()
+    });
+    await postAddConfirmationPage.close();
+
+    const cartProceedPage = await context.newPage();
+    await cartProceedPage.goto(`${baseUrl}/gp/cart/view.html`);
+    const cartProceedState = await commandPage(cartProceedPage, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (cartProceedState?.browserState !== 'cart'
+      || Number(cartProceedState.checkoutSummary?.cartItemCount || 0) !== 1
+      || !cartProceedState.checkoutSummary?.availableActions?.some((label) => /proceed to checkout/i.test(String(label)))) {
+      fail(`browser_extension_cart_fast_state_not_ready_for_checkout:${JSON.stringify(cartProceedState)}`);
+    }
+    const cartProceedAction = await commandPage(cartProceedPage, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: {
+        type: 'click_intent',
+        intent: 'checkout',
+        fulfillmentPolicy: 'amazon_free_shipping_preferred',
+        primeRequired: true,
+        expectedMilestone: 'checkout_open'
+      }
+    });
+    await cartProceedPage.waitForURL(/\/checkout\//, { timeout: 5_000 }).catch(() => null);
+    if (!cartProceedAction?.completed
+      || cartProceedAction.cartCheckoutStarted !== true
+      || !/proceed to checkout/i.test(String(cartProceedAction.label || ''))
+      || !cartProceedPage.url().includes('/checkout/')) {
+      fail(`browser_extension_cart_proceed_to_checkout_failed:${JSON.stringify({
+        action: cartProceedAction,
+        url: cartProceedPage.url()
+      })}`);
+    }
+    recordPurchaseScenario('Cart page clicks Proceed to checkout directly', {
+      strategy: cartProceedAction.controlStrategy,
+      url: cartProceedPage.url()
+    });
+    await cartProceedPage.close();
+
     const checkoutInterstitialPage = await context.newPage();
     await checkoutInterstitialPage.goto(`${baseUrl}/alm/byg?pipelineType=Chewbacca&referrer=cart`);
     const checkoutInterstitialAction = await commandPage(checkoutInterstitialPage, {
@@ -979,16 +1110,151 @@ async function main() {
     });
     await paymentConfirmPage.close();
 
-    const startResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
-    if (!startResponse?.ok) fail(`browser_extension_start_failed:${startResponse?.error || 'no_response'}`);
+    await popup.close();
+    const externalWakePage = await context.newPage();
+    await externalWakePage.goto(`${baseUrl}/external-wake`);
+    const cdp = await context.newCDPSession(externalWakePage);
+    await cdp.send('ServiceWorker.enable');
+    await cdp.send('ServiceWorker.stopAllWorkers');
+    const externalWakePromise = externalWakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+      const startedAt = performance.now();
+      chrome.runtime.sendMessage(targetExtensionId, {
+        type: 'RUN_PENDING_SESSIONS',
+        sessionId
+      }, (response) => {
+        resolve({
+          response,
+          error: chrome.runtime.lastError?.message || '',
+          elapsedMs: performance.now() - startedAt
+        });
+      });
+    }), { extensionId, sessionId: session.id });
+    const initialWakeState = await Promise.race([
+      externalWakePromise,
+      new Promise((resolve) => setTimeout(() => resolve({ pending: true }), 2_000))
+    ]);
+    // The extension must keep the MV3 external event alive until it has
+    // claimed the exact mission. An early accepted response followed by a
+    // detached promise is the production regression this test protects.
+    if (!initialWakeState?.pending) {
+      fail(`browser_extension_external_wake_replied_before_claim:${JSON.stringify(initialWakeState)}`);
+    }
+    await waitFor(() => claimedSessionIds.length > 0, 5_000);
+    if (claimedSessionIds[0] !== session.id) {
+      fail(`browser_extension_claimed_wrong_queued_session:${JSON.stringify(claimedSessionIds)}`);
+    }
     try {
-      await waitFor(() => Boolean(fulfillment));
+      await waitFor(() => Boolean(fulfillment), 40_000);
     } catch (error) {
-      const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution'], resolve)));
+      const diagnosticPage = await context.newPage();
+      await diagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
+      const runnerState = await diagnosticPage.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'explicitWakeSessionId'], resolve);
+      }));
+      await diagnosticPage.close();
       fail(`browser_extension_smoke_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}`);
     }
+    const externalWake = await externalWakePromise;
+    if (externalWake.error || !externalWake.response?.ok || !externalWake.response?.result?.requestedSessionFound) {
+      fail(`browser_extension_external_wake_failed:${JSON.stringify(externalWake)}`);
+    }
+    if (externalWake.response.result.requestedSessionId !== session.id) {
+      fail(`browser_extension_external_wake_wrong_session:${JSON.stringify(externalWake)}`);
+    }
+    recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
+      sessionId: session.id,
+      queuedSessions: 2,
+      completionMs: Math.round(externalWake.elapsedMs)
+    });
+
+    popup = await context.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+    // The service worker was deliberately stopped above. Use a fresh extension
+    // page to wake the worker and expose Chrome APIs for the retained-tab test.
+    worker = popup;
+
+    // A retained Amazon tab is allowed to already be on the approved target.
+    // This guards the production failure where open-site reloaded the same URL
+    // and then waited for an event that Chrome had already emitted.
+    const retainedTargetPage = await context.newPage();
+    await retainedTargetPage.goto(`${baseUrl}/search`);
+    const retainedTargetTab = await worker.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+      tabs.find((candidate) => candidate.url === url) || null), retainedTargetPage.url());
+    if (!retainedTargetTab?.id) fail(`browser_extension_same_url_tab_missing:${retainedTargetPage.url()}`);
+    const sameUrlSessionId = 'browser-smoke-same-url-session';
+    const sameUrlPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-same-url-session',
+      startUrl: retainedTargetPage.url(),
+      actions: [{
+        ...plan.actions[0],
+        id: 'open-site',
+        url: retainedTargetPage.url(),
+        missionAction: 'browser_open'
+      }]
+    });
+    const primaryCheckpoints = checkpoints.slice();
+    const primaryFulfillment = fulfillment;
+    const primarySession = session;
+    const primaryDistractorSession = distractorSession;
+    checkpoints.length = 0;
+    fulfillment = null;
+    session = {
+      ...session,
+      id: sameUrlSessionId,
+      status: 'queued',
+      claimedByPluginId: null,
+      fulfillment: null,
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        subject: { sessionId: sameUrlSessionId }
+      },
+      extensionMissionPlan: sameUrlPlan,
+      extensionMissionPlanState: { planHash: sameUrlPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    await worker.evaluate(({ sessionId, tabId }) => new Promise((resolve) => {
+      chrome.storage.local.get(['activeMissionTabs'], (stored) => {
+        chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+        }, resolve);
+      });
+    }), { sessionId: sameUrlSessionId, tabId: retainedTargetTab.id });
+    const sameUrlWake = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), sameUrlSessionId);
+    if (!sameUrlWake?.ok) fail(`browser_extension_same_url_wake_failed:${sameUrlWake?.error || 'no_response'}`);
+    try {
+      await waitFor(() => Boolean(fulfillment), 15_000);
+    } catch {
+      const diagnosticPage = await context.newPage();
+      await diagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
+      const runnerState = await diagnosticPage.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'explicitWakeSessionId'], resolve);
+      }));
+      await diagnosticPage.close();
+      fail(`browser_extension_same_url_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}:active=${runnerState.activeSessionId || 'none'}:wake=${runnerState.explicitWakeSessionId || 'none'}`);
+    }
+    // This fixture intentionally contains only the open-site action. The
+    // runner must record that action and then stop at the normal handoff
+    // boundary; it should not pretend a one-step plan placed an order.
+    if (fulfillment.status !== 'failed'
+      || fulfillment.result?.browserExecution?.stopState !== 'handoff_ready'
+      || checkpoints[0]?.planActionId !== 'open-site') {
+      fail(`browser_extension_same_url_not_idempotent:${JSON.stringify({ fulfillment, checkpoints })}`);
+    }
+    recordPurchaseScenario('Retained tab on the approved URL completes open-site idempotently', {
+      url: retainedTargetPage.url(),
+      steps: checkpoints.map((checkpoint) => checkpoint.planActionId),
+      stopState: fulfillment.result?.browserExecution?.stopState
+    });
+    await retainedTargetPage.close();
+    await externalWakePage.close();
+    checkpoints.splice(0, checkpoints.length, ...primaryCheckpoints);
+    fulfillment = primaryFulfillment;
+    session = primarySession;
+    distractorSession = primaryDistractorSession;
 
     const completedIds = checkpoints
       .filter((checkpoint) => checkpoint.planActionStatus !== 'waiting')
@@ -1059,6 +1325,10 @@ async function main() {
         requestedNavigationUrl: selectedMatchCheckpoint?.browser?.runnerStep?.requestedNavigationUrl || null,
         observedNavigationUrl: selectedMatchCheckpoint?.browser?.runnerStep?.observedNavigationUrl || null
       })}`);
+    }
+    if (selectedMatchCheckpoint?.browser?.runnerStep?.postAddCartOpened !== true
+      || !selectedMatchCheckpoint?.browser?.runnerStep?.cartOpenControlStrategy) {
+      fail(`browser_extension_post_add_cart_not_atomic:${JSON.stringify(selectedMatchCheckpoint?.browser?.runnerStep || {})}`);
     }
     if (fulfillment.result?.browserExecution?.checkoutProgress?.addToCartClicked !== true
       || fulfillment.result?.browserExecution?.checkoutProgress?.checkoutOpened !== true
@@ -1276,9 +1546,9 @@ async function main() {
         }
       }
     }));
-    const brandFallbackStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const brandFallbackStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!brandFallbackStartResponse?.ok) fail(`browser_extension_brand_fallback_start_failed:${brandFallbackStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -1330,7 +1600,7 @@ async function main() {
     if (!retainedBrandTab) fail('browser_extension_terminal_handoff_lost_tab_ownership');
     const brandPrepareCart = checkpoints.find((checkpoint) => checkpoint.planActionId === 'prepare-cart');
     const brandOpenCheckout = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-checkout');
-    const reusedPreparedCart = brandPrepareCart?.browser?.runnerStep?.skipped === true
+    const reusedPreparedCart = brandPrepareCart?.browser?.runnerStep?.completed === true
       && /already prepared|not adding a duplicate/i.test(String(brandPrepareCart?.browser?.runnerStep?.reason || brandPrepareCart?.detail || ''));
     if (!reusedPreparedCart
       || brandOpenCheckout?.planActionStatus !== 'completed') {
@@ -1399,9 +1669,9 @@ async function main() {
         }
       }
     }));
-    const conditionalShippingStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const conditionalShippingStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!conditionalShippingStartResponse?.ok) fail(`browser_extension_conditional_shipping_start_failed:${conditionalShippingStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -1487,9 +1757,9 @@ async function main() {
         }
       }
     }));
-    const multiItemStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const multiItemStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!multiItemStartResponse?.ok) fail(`browser_extension_multi_item_start_failed:${multiItemStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -1580,9 +1850,9 @@ async function main() {
         }
       }
     }));
-    const incompleteBasketStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const incompleteBasketStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!incompleteBasketStartResponse?.ok) fail(`browser_extension_incomplete_basket_start_failed:${incompleteBasketStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -1652,9 +1922,9 @@ async function main() {
         }
       }
     }));
-    const sideCartStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const sideCartStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!sideCartStartResponse?.ok) fail(`browser_extension_sidecart_start_failed:${sideCartStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -1741,9 +2011,9 @@ async function main() {
         }
       }
     }));
-    const overBudgetStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const overBudgetStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!overBudgetStartResponse?.ok) fail(`browser_extension_overbudget_start_failed:${overBudgetStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -1826,9 +2096,9 @@ async function main() {
         }
       }
     }));
-    const paidDeliveryStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const paidDeliveryStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!paidDeliveryStartResponse?.ok) fail(`browser_extension_paid_delivery_start_failed:${paidDeliveryStartResponse?.error || 'no_response'}`);
     await waitFor(() => Boolean(fulfillment));
     if (fulfillment.status !== 'failed'
@@ -1915,9 +2185,9 @@ async function main() {
         }
       }
     }));
-    const mismatchStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const mismatchStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!mismatchStartResponse?.ok) fail(`browser_extension_mismatch_start_failed:${mismatchStartResponse?.error || 'no_response'}`);
     let mismatchPage = null;
     const mismatchPageDeadline = Date.now() + 20_000;
@@ -1987,9 +2257,9 @@ async function main() {
     await mismatchPage.locator('input[aria-label="Card number"]').fill('5555555555559999');
     await mismatchPage.locator('input[aria-label="Name on card"]').fill('Test User');
     await mismatchPage.getByRole('button', { name: 'Add your card' }).click();
-    const mismatchResumeResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const mismatchResumeResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!mismatchResumeResponse?.ok) fail(`browser_extension_mismatch_resume_failed:${mismatchResumeResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -2071,9 +2341,9 @@ async function main() {
         }
       }
     }));
-    const manualReviewStartResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const manualReviewStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!manualReviewStartResponse?.ok) fail(`browser_extension_final_review_start_failed:${manualReviewStartResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -2131,9 +2401,9 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    const resumeFinalSubmitResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const resumeFinalSubmitResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!resumeFinalSubmitResponse?.ok) fail(`browser_extension_final_review_resume_failed:${resumeFinalSubmitResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));
@@ -2181,9 +2451,9 @@ async function main() {
       missionBoundaryEventCount: 0
     };
     await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {}, localCheckoutProfiles: {} }));
-    const invalidStartupResponse = await popup.evaluate(() => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS' }, resolve);
-    }));
+    const invalidStartupResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+    }), session.id);
     if (!invalidStartupResponse?.ok) fail(`browser_extension_invalid_startup_failed_to_return:${invalidStartupResponse?.error || 'no_response'}`);
     try {
       await waitFor(() => Boolean(fulfillment));

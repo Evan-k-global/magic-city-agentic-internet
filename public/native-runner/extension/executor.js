@@ -744,6 +744,17 @@
       return { control, strategy };
     };
     const roots = [interactionRoot(), document].filter((root, index, values) => root && values.indexOf(root) === index);
+    for (const root of roots) {
+      for (const selector of [
+        '#sw-gtc a',
+        '#sw-gtc button',
+        '#sw-gtc input[type="submit"]',
+        '#sw-gtc'
+      ]) {
+        const candidate = add(root.querySelector(selector), 'amazon_post_add_go_to_cart');
+        if (candidate) return candidate;
+      }
+    }
     const previewRoots = roots.flatMap((root) => Array.from(root.querySelectorAll([
       '#attach-sidesheet-view-cart-button',
       '[id*="sidecart" i]',
@@ -754,8 +765,8 @@
       .filter((root) => visible(root) && /\b(?:subtotal|cart|basket)\b/i.test(compactText(root.innerText || root.textContent || '', 1000)));
     for (const root of previewRoots) {
       const control = interactiveControls(root).find((candidate) =>
-        /^(?:go to cart|view cart|view shopping cart|proceed to checkout)$/i.test(compactText(textFor(candidate), 120))
-        || /\b(?:go to cart|view cart|view shopping cart|proceed to checkout)\b/i.test(compactText(visibleControlLabel(candidate), 180))
+        /^(?:go to cart|view cart|view shopping cart)$/i.test(compactText(textFor(candidate), 120))
+        || /\b(?:go to cart|view cart|view shopping cart)\b/i.test(compactText(visibleControlLabel(candidate), 180))
       );
       const candidate = add(control, 'amazon_side_cart');
       if (candidate) return candidate;
@@ -890,6 +901,10 @@
 
   function isCartPath(path = '') {
     return /(?:^|\/)(?:cart|basket)(?:\/|$)|\/gp\/cart(?:\/|$)/i.test(String(path || ''));
+  }
+
+  function isAmazonShoppingCartPath(path = '') {
+    return /^(?:\/cart(?:\/|$)|\/basket(?:\/|$)|\/gp\/cart(?:\/|$))/i.test(String(path || ''));
   }
 
   function isCartSurface(rawPageText = '', controlText = '') {
@@ -1171,6 +1186,177 @@
     };
   }
 
+  function amazonCartTextSnapshot() {
+    const roots = [
+      '#activeCartViewForm',
+      '[data-name="Active Items"]',
+      '#sc-active-cart',
+      '[data-testid="active-cart"]',
+      '#sc-buy-box',
+      '#sc-subtotal-label-buybox',
+      '#sc-subtotal-amount-buybox',
+      '#sc-subtotal-label-activecart',
+      '#sc-subtotal-amount-activecart',
+      '[data-feature-id*="proceed-to-checkout" i]'
+    ].map((selector) => document.querySelector(selector)).filter(visible);
+    const main = document.querySelector('main');
+    const uniqueRoots = [...new Set([...roots, main].filter(visible))];
+    const text = uniqueRoots.map((root) => root.innerText || root.textContent || '').join('\n');
+    return compactText(text, 8000);
+  }
+
+  function cartItemCountFromText(rawText = '') {
+    const text = String(rawText || '');
+    const explicit = text.match(/\bsubtotal\s*\(\s*(\d+)\s+items?\s*\)/i)
+      || text.match(/\b(\d+)\s+items?\s+in\s+(?:your\s+)?(?:cart|basket)\b/i);
+    if (explicit) return Number(explicit[1]);
+    const navCount = compactText(
+      document.querySelector('#nav-cart-count, [data-testid*="cart-count" i], [data-a-selector*="cart-count" i]')?.textContent || '',
+      24
+    ).match(/\d+/)?.[0];
+    if (navCount) return Number(navCount);
+    const rowCount = activeCartFulfillmentRows().length;
+    return rowCount || null;
+  }
+
+  function activeCartItemHints() {
+    return activeCartFulfillmentRows().slice(0, 4).map((row) => {
+      const rowText = compactText(row.innerText || row.textContent || '', 1800);
+      const title = compactText(row.querySelector('a[href*="/dp/"], h2, h3, [data-testid*="title" i]')?.textContent || rowText, 180);
+      const price = priceFromText(rowText);
+      return [title, Number.isFinite(price) && price > 0 ? `$${price.toFixed(2)}` : ''].filter(Boolean).join(' · ');
+    }).filter(Boolean);
+  }
+
+  function findAmazonProceedToCheckoutControl() {
+    const selectors = [
+      '#sc-buy-box-ptc-button input[name="proceedToRetailCheckout"]',
+      '#sc-buy-box-ptc-button input[type="submit"]',
+      '#sc-buy-box-ptc-button button',
+      'input[name="proceedToRetailCheckout"]',
+      'button[name="proceedToRetailCheckout"]',
+      'input[name*="proceedToCheckout" i]',
+      'button[name*="proceedToCheckout" i]',
+      '[data-testid="proceed-to-checkout"]',
+      '[data-feature-id*="proceed-to-checkout" i] input[type="submit"]',
+      '[data-feature-id*="proceed-to-checkout" i] button',
+      'input[value*="Proceed to checkout" i]'
+    ];
+    for (const selector of selectors) {
+      const control = Array.from(document.querySelectorAll(selector)).find((candidate) => {
+        const label = compactText(visibleControlLabel(candidate), 220);
+        return visible(candidate)
+          && !candidate.disabled
+          && !FINAL_ACTION_PATTERN.test(label)
+          && /\bproceed\s+to\s+checkout\b/i.test(label || selector);
+      });
+      if (control) return { control, strategy: 'amazon_cart_proceed_to_checkout_selector' };
+    }
+    const control = interactiveControls().find((candidate) => {
+      const label = compactText(visibleControlLabel(candidate), 220);
+      const descriptor = controlDescriptor(candidate);
+      return /\bproceed\s+to\s+checkout\b/i.test(`${label}\n${descriptor}`)
+        && !FINAL_ACTION_PATTERN.test(label)
+        && !POSITIVE_OFFER_PATTERN.test(descriptor);
+    });
+    return control ? { control, strategy: 'amazon_cart_proceed_to_checkout_label' } : null;
+  }
+
+  function fastAmazonCartState(profile = {}) {
+    const observationStartedAt = performance.now();
+    const rawPageText = amazonCartTextSnapshot();
+    const cartCount = cartItemCountFromText(rawPageText);
+    const cartFulfillment = cartPrimeFulfillmentEvidence(rawPageText);
+    const subtotal = visibleCartSubtotal(rawPageText);
+    const merchandiseSubtotalEvidence = Number.isFinite(subtotal) && subtotal > 0
+      ? { kind: 'cart_items_subtotal', amount: subtotal, authoritative: true }
+      : { kind: 'none', amount: null, authoritative: false };
+    const totalEvidence = Number.isFinite(subtotal) && subtotal > 0
+      ? { kind: 'cart_total', amount: subtotal, authoritative: true }
+      : { kind: 'none', amount: null, authoritative: false };
+    const proceed = findAmazonProceedToCheckoutControl();
+    const accountLabel = document.querySelector('#nav-link-accountList-nav-line-1, [data-nav-role="signin"], [aria-label*="sign in" i]');
+    const accountText = compactText(accountLabel?.textContent || '', 120);
+    const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
+    const cartVisible = Number.isFinite(cartCount) ? cartCount > 0 : activeCartFulfillmentRows().length > 0;
+    return {
+      url: location.href,
+      title: compactText(document.title, 180),
+      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      loginRequired: hasVisibleLoginField() || /hello\s*,?\s*sign in|sign in/i.test(accountText),
+      amazonAccountState: /hello\s*,?\s*sign in|sign in/i.test(accountText) ? 'signed_out' : 'signed_in',
+      amazonFulfillmentFilterAvailable: false,
+      amazonFulfillmentFilterSelected: '',
+      paymentRequired: false,
+      finalApprovalVisible: false,
+      providerChallenge: CHALLENGE_PATTERN.test(`${document.title}\n${rawPageText}`),
+      searchAvailable: false,
+      safeAddressFieldsAvailable: false,
+      productOpened: false,
+      addToCartAvailable: false,
+      candidates: [],
+      optionalOfferVisible: false,
+      orderSubmitted: false,
+      milestoneSignals: {
+        candidateSelected: false,
+        cartVisible,
+        checkoutOpen: false,
+        addressConfirmed: false,
+        cardConfirmed: false,
+        deliveryConfirmed: false,
+        checkoutProfileVerified: false,
+        finalReviewReady: false,
+        orderSubmitted: false
+      },
+      browserState: 'cart',
+      browserSurface: 'cart',
+      browserOverlays: [],
+      browserStateConfidence: 1,
+      browserStateReason: 'Amazon cart page detected with a direct checkout control.',
+      observationDurationMs: Math.round(performance.now() - observationStartedAt),
+      checkoutSummary: {
+        stage: 'cart',
+        surface: 'cart',
+        overlays: [],
+        confidence: 1,
+        likelyTotal: totalEvidence.authoritative ? `$${totalEvidence.amount.toFixed(2)}` : '',
+        merchandiseSubtotal: merchandiseSubtotalEvidence.authoritative ? `$${merchandiseSubtotalEvidence.amount.toFixed(2)}` : '',
+        merchandiseSubtotalEvidence,
+        shippingTotal: '',
+        shippingTotalEvidence: { kind: 'none', amount: null, authoritative: false },
+        productPrice: '',
+        cartPrimeFulfillmentObserved: cartFulfillment.observed,
+        cartPrimeFreeShippingVerified: cartFulfillment.allPrimeFreeEligible,
+        cartPrimeVerified: cartFulfillment.allPrimeEligible,
+        cartPrimeIneligibleItems: cartFulfillment.ineligibleItems,
+        cartNonPrimeItems: cartFulfillment.nonPrimeItems,
+        totalEvidence,
+        cartItemCount: Number.isFinite(cartCount) ? cartCount : null,
+        itemHints: activeCartItemHints(),
+        nextAction: proceed ? 'Opening checkout' : 'Find checkout button',
+        optionalOfferVisible: false,
+        selectedCardLast4: '',
+        expectedCardLast4: expectedLast4,
+        cardMatches: false,
+        addressMatches: null,
+        addressConfirmationRequired: false,
+        paymentMethodConfirmationRequired: false,
+        addressConfirmed: false,
+        cardConfirmed: false,
+        deliveryConfirmed: false,
+        deliverySelectionRequired: false,
+        deliveryFreeAvailable: null,
+        selectedDeliveryPrice: null,
+        checkoutOpen: false,
+        checkoutProfileVerified: false,
+        finalReviewReady: false,
+        paymentNeedsHuman: false,
+        paymentIssue: '',
+        availableActions: proceed ? ['Proceed to checkout'] : []
+      }
+    };
+  }
+
   function totalEvidenceForSurface(rawPageText = '', classification = {}) {
     const bodyText = String(rawPageText || '');
     const surface = String(classification.surface || classification.state || 'browse');
@@ -1208,6 +1394,9 @@
   }
 
   function pageState(profile = {}) {
+    if (isAmazonShoppingCartPath(location.pathname || '')) {
+      return fastAmazonCartState(profile);
+    }
     const observationStartedAt = performance.now();
     const rawPageText = pagePlainText(30000);
     const pageText = normalized(rawPageText);
@@ -2496,9 +2685,18 @@
     }) || null;
   }
 
-  function clickIntent(intent = '', action = {}) {
+  function clickIntent(intent = '', action = {}, profile = {}) {
     if (intent === 'prefer_free_delivery') return applyAmazonFulfillmentPreference(action);
     if (intent === 'open_cart') {
+      if (isAmazonShoppingCartPath(location.pathname || '')) {
+        return {
+          completed: true,
+          skipped: true,
+          alreadyInCart: true,
+          label: 'Cart open',
+          controlStrategy: 'amazon_cart_already_open'
+        };
+      }
       const target = findAmazonCartOpenControl();
       if (target && immediateSafeClick(target.control)) {
         return {
@@ -2566,6 +2764,27 @@
         completed: false,
         localMarketBlocked: true,
         reason: 'Amazon redirected this cart to Local Market. This mission is restricted to Amazon catalog fulfillment, so Magic City did not continue into that third-party delivery flow.'
+      };
+    }
+    if (intent === 'checkout' && isAmazonShoppingCartPath(location.pathname || '')) {
+      const proceed = findAmazonProceedToCheckoutControl();
+      const state = fastAmazonCartState(profile || {});
+      if (proceed?.control && immediateSafeClick(proceed.control)) {
+        return {
+          completed: true,
+          navigationRequested: true,
+          cartCheckoutStarted: true,
+          label: compactText(visibleControlLabel(proceed.control), 140) || 'Proceed to checkout',
+          browserState: 'cart',
+          controlStrategy: proceed.strategy,
+          state
+        };
+      }
+      return {
+        completed: false,
+        browserState: 'cart',
+        reason: 'No visible Proceed to checkout control was found on the Amazon cart page.',
+        state
       };
     }
     const rawPageText = pagePlainText(30000);
@@ -3056,13 +3275,16 @@
       return { ...outcome, state: pageState(checkoutProfile || {}) };
     }
     if (action.type === 'navigate' && action.intent === 'open_cart') {
-      const outcome = clickIntent('open_cart', action);
+      const outcome = clickIntent('open_cart', action, checkoutProfile || {});
       return { ...outcome, state: compactPlanStepState({ cartOpenStarted: true }) };
     }
     if (action.type === 'click_intent') {
-      const outcome = clickIntent(action.intent, action);
+      const outcome = clickIntent(action.intent, action, checkoutProfile || {});
       if (action.intent === 'add_to_cart' && outcome.completed && outcome.directSearchResultCart === true) {
         return { ...outcome, state: compactPlanStepState({ cartActionStarted: true }) };
+      }
+      if (action.intent === 'checkout' && outcome.completed && outcome.cartCheckoutStarted === true) {
+        return outcome;
       }
       return { ...outcome, state: pageState(checkoutProfile || {}) };
     }

@@ -174,7 +174,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.2.32-test',
+        extensionVersion: '0.3.15-test',
         extensionId: 'test-extension-id'
       }
     });
@@ -389,6 +389,16 @@ async function main() {
     if (!completionMode.response.ok) {
       throw new Error(`extension_completion_mode_failed:${completionMode.response.status}:${JSON.stringify(completionMode.data)}`);
     }
+    const undispatchedClaim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/claim`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: { pluginId: 'magic-city-runner-extension' }
+    });
+    if (undispatchedClaim.response.status !== 409 || undispatchedClaim.data?.error !== 'extension_run_dispatch_required') {
+      throw new Error(`undispatched_extension_claim_not_rejected:${undispatchedClaim.response.status}:${JSON.stringify(undispatchedClaim.data)}`);
+    }
     const executionStart = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/start-execution`, {
       method: 'POST',
       cookie: auth.cookie,
@@ -404,6 +414,9 @@ async function main() {
     if (!dispatchedSessions.response.ok) throw new Error(`dispatched_session_poll_failed:${dispatchedSessions.response.status}:${JSON.stringify(dispatchedSessions.data)}`);
     const extensionSession = (dispatchedSessions.data.sessions || []).find((entry) => entry.id === sessionId);
     if (!extensionSession?.missionBoundAuth?.token) throw new Error('extension_poll_missing_mission_capability_token');
+    if (!extensionSession?.extensionRunDispatch?.expiresAt) {
+      throw new Error('extension_poll_missing_explicit_user_dispatch');
+    }
     const extensionPayload = JSON.stringify(extensionSession);
     if (extensionPayload.includes('private-runner-test@example.com') || extensionPayload.includes('Private runner test card')) {
       throw new Error('extension_poll_leaked_private_runner_data');
@@ -438,7 +451,8 @@ async function main() {
       runnerProtocol: 'declarative-v1',
       body: {
         pluginId: 'magic-city-runner-extension',
-        holderPublicKeyJwk: holderKey.publicKey.export({ format: 'jwk' })
+        holderPublicKeyJwk: holderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: extensionSession.extensionRunDispatch.nonce
       }
     });
     if (!claimedSession.response.ok) {
@@ -800,7 +814,8 @@ async function main() {
       runnerSurface: 'chrome-extension',
       body: {
         pluginId: 'magic-city-runner-extension',
-        holderPublicKeyJwk: legacyHolderKey.publicKey.export({ format: 'jwk' })
+        holderPublicKeyJwk: legacyHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: legacySession.extensionRunDispatch?.nonce
       }
     });
     if (!legacyClaim.response.ok || !legacyClaim.data.session?.missionBoundAuth?.token) {
@@ -901,7 +916,8 @@ async function main() {
       runnerProtocol: 'declarative-v1',
       body: {
         pluginId: 'magic-city-runner-extension',
-        holderPublicKeyJwk: retryHolderKey.publicKey.export({ format: 'jwk' })
+        holderPublicKeyJwk: retryHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: retryExtensionSession?.extensionRunDispatch?.nonce
       }
     });
     if (!retryClaim.response.ok

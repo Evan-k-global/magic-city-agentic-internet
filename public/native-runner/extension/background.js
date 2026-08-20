@@ -63,8 +63,8 @@ async function dispatchAlarm(alarm = null) {
     // already-authorized session; ordinary heartbeats remain poll-only.
     return legacyController.resumeActiveRun();
   }
-  // A heartbeat may discover work, but it never starts browser actions.
-  // Explicit RUN_PENDING_SESSIONS is the only fresh execution entry point.
+  // A heartbeat may resume only a short-lived, user-authorized dispatch.
+  // It is recovery for a missed website wake, never open-ended discovery.
   await legacyController.pollOnly();
 }
 
@@ -113,6 +113,10 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
       origin = '';
     }
     if (!ALLOWED_EXTERNAL_ORIGINS.has(origin)) throw new Error('origin_not_allowed');
+    // Keep the external message open through the exact-session claim. MV3
+    // can suspend detached promises after sendResponse, so a fire-and-forget
+    // wake is not a valid execution boundary. The page handles its brief
+    // pending state while this user-authorized run starts.
     return dispatch(message, { origin });
   })()
     .then((result) => sendResponse({ ok: true, result }))

@@ -119,9 +119,10 @@ assert.ok(campingAddOnExtensionPlan.actions.some((action) => action.query === 'g
 assert.deepEqual(campingAddOnExtensionPlan.actions
   .filter((action) => /-(?:1|2)$/.test(action.id))
   .map((action) => action.id), [
-    'search-item-1', 'inspect-results-1', 'prefer-delivery-filter-1', 'select-match-1', 'prepare-cart-1', 'verify-cart-1',
-    'search-item-2', 'inspect-results-2', 'prefer-delivery-filter-2', 'select-match-2', 'prepare-cart-2', 'verify-cart-2'
+    'search-item-1', 'select-match-1', 'prepare-cart-1', 'verify-cart-1',
+    'search-item-2', 'select-match-2', 'prepare-cart-2', 'verify-cart-2'
   ]);
+assert.equal(campingAddOnExtensionPlan.actions.some((action) => /^(?:inspect-results|prefer-delivery-filter)-\d+$/.test(action.id)), false);
 assert.ok(campingAddOnExtensionPlan.actions
   .filter((action) => /^(?:select-match|prepare-cart)-\d+$/.test(action.id))
   .every((action) => action.requiredBasketItem === true && action.optional !== true));

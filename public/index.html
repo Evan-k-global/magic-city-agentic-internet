@@ -6066,7 +6066,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.2.32';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.3.15';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -6161,6 +6161,9 @@
 	    const executionProtocolPollingSessions = new Set();
 	    const executionDismissedSessions = new Set();
 	    const executionCancellingSessions = new Set();
+	    const NATIVE_RUNNER_CHECK_TIMEOUT_MS = 6000;
+	    const NATIVE_RUNNER_CHECK_INTERVAL_MS = 1000;
+	    let nativeRunnerCheckInFlight = false;
 	    let adminAccess = false;
     let vaultSecurityDbPromise = null;
     let localMemorySettings = { ...DEFAULT_LOCAL_MEMORY_SETTINGS };
@@ -10573,21 +10576,15 @@
 	      });
 	    }
 
-    async function requestNativeRunnerMissionWake(sessionId = '', attempt = 0) {
+    async function requestNativeRunnerMissionWake(sessionId = '') {
       const timeoutResult = { ok: true, pending: true, reason: 'extension_wake_pending' };
       const wake = await Promise.race([
-        sendNativeRunnerExtensionMessage({ type: 'RUN_PENDING_SESSIONS' }),
-        new Promise((resolve) => setTimeout(() => resolve(timeoutResult), 1200))
+        sendNativeRunnerExtensionMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }),
+        new Promise((resolve) => setTimeout(() => resolve(timeoutResult), 2000))
       ]);
       const statusEl = getExecutionSheetScrollElement(sessionId)?.querySelector('#executionStatusText') || $('executionStatusText');
       if (!wake?.ok) {
         const reason = wake?.reason || 'extension_not_reachable';
-        const transient = /failed to fetch|network|timeout|temporarily unavailable|load failed/i.test(String(reason));
-        if (transient && attempt < 2) {
-          if (statusEl) statusEl.textContent = `Session ${sessionId} · runner connection retrying`;
-          await new Promise((resolve) => setTimeout(resolve, 450 * (attempt + 1)));
-          return requestNativeRunnerMissionWake(sessionId, attempt + 1);
-        }
         const message = `Chrome did not wake the Magic City Runner extension: ${reason}. Open the extension and click Run waiting mission.`;
         if (statusEl) statusEl.textContent = `Session ${sessionId} · ${message}`;
         executionLocalErrors.set(sessionId, {
@@ -10598,7 +10595,9 @@
         return wake;
       }
       if (wake.pending && statusEl) {
-        statusEl.textContent = `Session ${sessionId} · runner wake sent · waiting for extension pickup`;
+        statusEl.textContent = `Session ${sessionId} · runner wake is pending; Chrome will pick up this exact mission shortly`;
+      } else if (statusEl) {
+        statusEl.textContent = `Session ${sessionId} · runner accepted the mission`;
       }
       return wake;
     }
@@ -10820,7 +10819,10 @@
         let statusSettings = nativeRunnerSettings;
         let data = null;
         let extensionCheck = null;
-        if (wakeExtension && statusSettings.deviceId) {
+        if (wakeExtension) {
+          // Do not depend on stale local settings to wake the paired runner.
+          // The extension's own credential is authoritative and its status
+          // check refreshes the server heartbeat before a mission is reserved.
           extensionCheck = await sendNativeRunnerExtensionMessage({ type: 'CHECK_STATUS' }).catch(() => null);
         }
         if (nativeRunnerSettings.pairingId && nativeRunnerSettings.pairingStatus !== 'claimed') {
@@ -10851,7 +10853,11 @@
         data = await requestNativeRunnerStatus(statusSettings);
         nativeRunnerDevices = Array.isArray(data.devices) ? data.devices : (data.device ? [data.device] : []);
         nativeRunnerActivity = Array.isArray(data.activity) ? data.activity : [];
-        const saved = saveNativeRunnerSettings(mergeNativeRunnerDeviceStatus(statusSettings, data.device || null, data.checkoutReadiness || data.readiness || null));
+        const extensionPollAt = String(extensionCheck?.result?.config?.lastPollAt || '').trim();
+        const heartbeatSettings = extensionPollAt
+          ? { ...statusSettings, lastPollAt: extensionPollAt }
+          : statusSettings;
+        const saved = saveNativeRunnerSettings(mergeNativeRunnerDeviceStatus(heartbeatSettings, data.device || null, data.checkoutReadiness || data.readiness || null));
         applyNativeRunnerSettingsUi(saved);
         if (!silent && $('nativeRunnerStatus')) {
           const extensionError = String(extensionCheck?.result?.config?.lastError || '').trim();
@@ -10875,6 +10881,55 @@
       } catch (e) {
         if (!silent && $('nativeRunnerStatus')) $('nativeRunnerStatus').textContent = e.message;
         throw e;
+      }
+    }
+
+    async function checkNativeRunnerWithPolling() {
+      if (nativeRunnerCheckInFlight) return nativeRunnerSettings;
+      nativeRunnerCheckInFlight = true;
+      const button = $('nativeRunnerRefreshBtn');
+      const status = $('nativeRunnerStatus');
+      const baselinePollAt = String(nativeRunnerSettings.lastPollAt || '').trim();
+      const startedAt = Date.now();
+      let lastError = null;
+      const setCheckingUi = () => {
+        if (button) {
+          button.disabled = true;
+          button.hidden = false;
+          button.textContent = 'Checking...';
+          button.setAttribute('aria-busy', 'true');
+        }
+        if (status) status.textContent = 'Checking the Magic City Runner extension...';
+      };
+
+      setCheckingUi();
+      try {
+        while (Date.now() - startedAt < NATIVE_RUNNER_CHECK_TIMEOUT_MS) {
+          try {
+            const latest = await refreshNativeRunnerStatus({ silent: true, wakeExtension: true });
+            const currentPollAt = String(latest?.lastPollAt || '').trim();
+            if (currentPollAt && currentPollAt !== baselinePollAt) return latest;
+          } catch (error) {
+            lastError = error;
+          }
+          setCheckingUi();
+          const remainingMs = NATIVE_RUNNER_CHECK_TIMEOUT_MS - (Date.now() - startedAt);
+          if (remainingMs <= 0) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(NATIVE_RUNNER_CHECK_INTERVAL_MS, remainingMs)));
+        }
+        if (status) {
+          status.textContent = lastError
+            ? `Check timed out: ${lastError.message || 'no fresh extension response'}`
+            : 'Check timed out. No fresh extension response yet.';
+        }
+        return nativeRunnerSettings;
+      } finally {
+        nativeRunnerCheckInFlight = false;
+        if (button) {
+          button.disabled = false;
+          button.textContent = 'Check';
+          button.removeAttribute('aria-busy');
+        }
       }
     }
 
@@ -18536,8 +18591,11 @@
 	                  expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
 	                });
 	              }
+	              // Claim the renewed mission before redrawing the execution sheet.
+	              // Rendering can issue several authenticated requests and must not
+	              // consume the runner's short claim window.
+                void requestNativeRunnerMissionWake(executionSession.id);
 	              await renderExecutionSheet(executionSession.id, { focus: false });
-                await requestNativeRunnerMissionWake(executionSession.id);
 	              ensureExecutionPolling();
 	              return;
             }
@@ -18583,8 +18641,6 @@
 	            });
 	            syncSantaClawzActionResultForPolling(session.id, data);
 	          }
-	          await refreshCreditsBalance().catch(() => null);
-	          clearExecutionStatusError(session.id);
 	          if (isBrowserRun && (data.session?.preferredExecutionAgentId === RUNNER_EXTENSION_PLUGIN_ID || data.executionAgent?.pluginId === RUNNER_EXTENSION_PLUGIN_ID)) {
 	            if (extensionCheckoutProfileEnabled) {
 	              await sendNativeRunnerExtensionMessage({
@@ -18594,15 +18650,17 @@
 	                expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
 	              });
 	            }
-		          }
+	            // Send the exact wake before any UI or balance refresh. A fresh
+	            // heartbeat only proves liveness; this call is what claims work.
+                void requestNativeRunnerMissionWake(data.session?.id || session.id);
+	          }
+	          await refreshCreditsBalance().catch(() => null);
+	          clearExecutionStatusError(session.id);
 		          setExecutionHtml('executionAgentText', data.executionAgent
 		            ? renderExecutionAgentSummary(data.executionAgent, { handed: true })
 		            : renderExecutionAgentSummary(null));
 	          if (data.session) executionSessionCache.set(session.id, data.session);
 	          await renderExecutionSheet(session.id, { focus: false });
-            if (isBrowserRun && (data.session?.preferredExecutionAgentId === RUNNER_EXTENSION_PLUGIN_ID || data.executionAgent?.pluginId === RUNNER_EXTENSION_PLUGIN_ID)) {
-              await requestNativeRunnerMissionWake(data.session?.id || session.id);
-            }
 	          ensureExecutionPolling();
         } catch (error) {
           executionPendingSessions.delete(session.id);
@@ -18654,11 +18712,13 @@
               userAgentProfile: getPersonalAgentProfile().enabled ? getPersonalAgentProfile() : null
             })
           });
-          await refreshCreditsBalance().catch(() => null);
-          clearExecutionStatusError(currentSession.id);
-          if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
+	          if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
+	          // Do not wait for the execution widget to re-render before the
+	          // runner claims this narrow, already-approved continuation.
+          void requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
+	          await refreshCreditsBalance().catch(() => null);
+	          clearExecutionStatusError(currentSession.id);
           await renderExecutionSheet(currentSession.id, { focus: false });
-          await requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
           ensureExecutionPolling();
         } catch (error) {
           executionPendingSessions.delete(currentSession.id);
@@ -18738,11 +18798,13 @@
               userAgentProfile: getPersonalAgentProfile().enabled ? getPersonalAgentProfile() : null
             })
           });
-          await refreshCreditsBalance().catch(() => null);
-          clearExecutionStatusError(currentSession.id);
           if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
+	          // Final submission uses the same immediate wake path as the
+	          // initial run; rendering must never spend its claim window.
+          void requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
+	          await refreshCreditsBalance().catch(() => null);
+	          clearExecutionStatusError(currentSession.id);
           await renderExecutionSheet(currentSession.id, { focus: false });
-          await requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
           ensureExecutionPolling();
         } catch (error) {
           executionPendingSessions.delete(currentSession.id);
@@ -19831,9 +19893,9 @@
 
     $('nativeRunnerRefreshBtn')?.addEventListener('click', async () => {
       try {
-        await refreshNativeRunnerStatus({ silent: false, wakeExtension: true });
+        await checkNativeRunnerWithPolling();
       } catch {
-        // Status text is set inside refreshNativeRunnerStatus.
+        // Status text is set inside checkNativeRunnerWithPolling.
       }
     });
 

@@ -188,8 +188,7 @@ async function enforceAmazonRetailLane(tabId, action = {}, plan = {}, checkoutPr
   const currentTab = await chrome.tabs.get(tabId).catch(() => ({ url: outcome?.state?.url || '' }));
   if (isAmazonRetailShoppingUrl(currentTab.url || outcome?.state?.url || '')) return outcome;
   const recoveryUrl = amazonActionRecoveryUrl(plan, action);
-  await chrome.tabs.update(tabId, { url: recoveryUrl, active: false });
-  await waitForTabReady(tabId).catch(() => null);
+  await navigateMissionTab(tabId, recoveryUrl, { timeoutMs: 5_000 }).catch(() => null);
   await delay(300);
   const localMarketRoute = /^\/alm(?:\/|$)/i.test(String(new URL(currentTab.url || outcome?.state?.url || 'https://www.amazon.com/').pathname || ''));
   return {
@@ -559,6 +558,11 @@ function isTransientControlPlaneError(error) {
     || /failed to fetch|networkerror|network error|load failed|runner_api_timeout|request_failed_(?:408|425|429|500|502|503|504)/.test(message);
 }
 
+function isRetryableBrowserRuntimeError(error) {
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  return /browser_(?:navigation|content_script|tab_read|tab_unavailable|url_change)_|execution context was destroyed|failed to fetch|message channel closed|receiving end does not exist/.test(message);
+}
+
 async function retryTransientControlPlane(task) {
   let lastError = null;
   for (let attempt = 0; attempt <= TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS.length; attempt += 1) {
@@ -712,25 +716,100 @@ async function waitForTabReady(tabId, timeoutMs = 8000) {
   });
 }
 
-async function waitForTabNavigation(tabId, previousUrl = '', timeoutMs = 3500) {
-  const current = await chrome.tabs.get(tabId);
-  if (current.url !== previousUrl && current.status === 'complete') return current;
-  return new Promise((resolve, reject) => {
-    let navigationStarted = current.status === 'loading' || current.url !== previousUrl;
-    const timer = setTimeout(() => {
+function waitForTabNavigation(tabId, previousUrl = '', timeoutMs = 3500) {
+  let cancel;
+  const promise = new Promise((resolve, reject) => {
+    let settled = false;
+    let navigationStarted = false;
+    const finish = (error, tab = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(onUpdate);
-      reject(new Error('browser_navigation_timeout'));
-    }, timeoutMs);
+      if (error) reject(error);
+      else resolve(tab);
+    };
+    const timer = setTimeout(() => finish(new Error('browser_navigation_timeout')), timeoutMs);
+    cancel = () => finish(new Error('browser_navigation_cancelled'));
     function onUpdate(updatedTabId, changeInfo, tab) {
       if (updatedTabId !== tabId) return;
       if (changeInfo.status === 'loading' || changeInfo.url || tab.url !== previousUrl) navigationStarted = true;
       if (!navigationStarted || changeInfo.status !== 'complete') return;
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdate);
-      resolve(tab);
+      finish(null, tab);
     }
+
+    // Register before the tab update. Chrome can emit loading and complete in
+    // the same task for warm/cached pages, and missing that window creates a
+    // false browser_navigation_timeout.
     chrome.tabs.onUpdated.addListener(onUpdate);
+    void chrome.tabs.get(tabId).then((current) => {
+      if (settled) return;
+      if (current.url !== previousUrl) navigationStarted = true;
+      if (navigationStarted && current.status === 'complete') finish(null, current);
+    }).catch((error) => finish(error));
   });
+  promise.cancel = () => cancel?.();
+  return promise;
+}
+
+function normalizeNavigationUrl(rawUrl = '') {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    parsed.hash = '';
+    parsed.pathname = parsed.pathname.replace(/\/{2,}/g, '/').replace(/\/$/, '') || '/';
+    parsed.searchParams.sort();
+    return parsed.toString();
+  } catch {
+    return String(rawUrl || '').trim();
+  }
+}
+
+function navigationTargetMatches(currentUrl = '', targetUrl = '') {
+  const current = normalizeNavigationUrl(currentUrl);
+  const target = normalizeNavigationUrl(targetUrl);
+  return Boolean(current && target && current === target);
+}
+
+function isRetryableNavigationError(error = null) {
+  return /browser_navigation_(?:start_timeout|timeout|unconfirmed)/i.test(String(error?.message || error || ''));
+}
+
+async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeoutLabel = 'browser_navigation_timeout' } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const before = await chrome.tabs.get(tabId);
+    const beforeUrl = String(before?.url || '');
+    // Reusing a mission tab is normal. Opening the already-approved target is
+    // an idempotent success, not a navigation failure.
+    if (navigationTargetMatches(beforeUrl, targetUrl)) return before;
+
+    const navigation = waitForTabNavigation(tabId, beforeUrl, timeoutMs);
+    try {
+      const updatedTab = await withTimeout(
+        () => chrome.tabs.update(tabId, { url: targetUrl, active: false }),
+        TAB_COMMAND_TIMEOUT_MS,
+        'browser_navigation_start_timeout'
+      );
+      let current = await navigation;
+      current = await chrome.tabs.get(tabId).catch(() => current || updatedTab);
+      const currentUrl = String(current?.url || '');
+      if (!currentUrl || currentUrl === 'about:blank') throw new Error('browser_navigation_unconfirmed');
+      return current;
+    } catch (error) {
+      lastError = error;
+      navigation.cancel?.();
+      const observed = await chrome.tabs.get(tabId).catch(() => null);
+      if (observed?.url && observed.url !== 'about:blank' && navigationTargetMatches(observed.url, targetUrl)) {
+        return observed;
+      }
+      if (attempt === 0 && isRetryableNavigationError(error)) {
+        await delay(120);
+        continue;
+      }
+      break;
+    }
+  }
+  throw new Error(lastError?.message || timeoutLabel || 'browser_navigation_timeout');
 }
 
 async function waitForTabUrlChange(tabId, previousUrl = '', timeoutMs = 2500) {
@@ -954,6 +1033,44 @@ async function amazonSearchCardAddToCart(tabId, action = {}) {
   return result?.[0]?.result || null;
 }
 
+async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null) {
+  // Keep the result-card click and cart entry inside one local browser turn.
+  // Amazon may render either an inline side cart or a full-page "Added to
+  // cart" confirmation. Crossing a signed checkpoint between those two
+  // controls lets MV3 suspend the worker while the obvious Go to Cart button
+  // is already visible.
+  await delay(300);
+  let before = await chrome.tabs.get(tabId).catch(() => ({ url: '', status: '' }));
+  if (before.status === 'loading') {
+    await waitForTabReady(tabId, 3_500).catch(() => null);
+    before = await chrome.tabs.get(tabId).catch(() => before);
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const outcome = await tabCommand(tabId, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true },
+      checkoutProfile
+    }, { injectionTimeoutMs: 4_000, responseTimeoutMs: 4_000 }).catch(() => null);
+    if (outcome?.completed && !outcome.cartFallbackRequested) {
+      if (outcome.navigationRequested && !outcome.skipped) {
+        await waitForTabUrlChange(tabId, before.url, 2_500)
+          .catch(() => waitForTabNavigation(tabId, before.url, 1_500).catch(() => null));
+        await waitForTabReady(tabId, 3_500).catch(() => null);
+      }
+      const state = await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 180 }).catch(() => outcome.state || null);
+      return {
+        advanced: true,
+        outcome,
+        state,
+        attempts: attempt + 1
+      };
+    }
+    await delay(300);
+    before = await chrome.tabs.get(tabId).catch(() => before);
+  }
+  return { advanced: false, outcome: null, state: null, attempts: 3 };
+}
+
 async function tabBrowserState(tabId, checkoutProfile = null, { attempts = 5, delayMs = 350 } = {}) {
   let lastError = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -996,8 +1113,7 @@ async function confirmCandidateNavigation(tabId, plan = {}, candidateUrl = '', p
     if (isExpectedUrl(observed.url || '')) {
       return { confirmed: true, attempts: attempt, requestedUrl, observedUrl: observed.url || requestedUrl };
     }
-    await chrome.tabs.update(tabId, { url: requestedUrl, active: false });
-    await waitForTabNavigation(tabId, observed.url || previousUrl, 9_000).catch(() => null);
+    await navigateMissionTab(tabId, requestedUrl, { timeoutMs: 9_000 }).catch(() => null);
     await delay(450);
     observed = await chrome.tabs.get(tabId).catch(() => observed);
   }
@@ -1014,8 +1130,7 @@ async function recoverAmazonCheckoutPrelude(tabId, plan = {}, outcome = {}) {
   const currentTab = await chrome.tabs.get(tabId).catch(() => null);
   if (!isAmazonCheckoutPreludeUrl(currentTab?.url || '', plan)) return outcome;
   const recoveryUrl = amazonCheckoutPreludeRecoveryUrl(currentTab.url);
-  await chrome.tabs.update(tabId, { url: recoveryUrl, active: false });
-  await waitForTabReady(tabId, 5_000).catch(() => null);
+  await navigateMissionTab(tabId, recoveryUrl, { timeoutMs: 5_000 }).catch(() => null);
   await delay(300);
   return {
     ...(outcome || {}),
@@ -1089,7 +1204,8 @@ async function claimSession(session) {
     bearer: config.deviceToken,
     body: {
       pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-      holderPublicKeyJwk: config.holderPublicJwk
+      holderPublicKeyJwk: config.holderPublicJwk,
+      extensionDispatchNonce: session.extensionRunDispatch?.nonce || ''
     }
   });
   return data.session || session;
@@ -1376,7 +1492,11 @@ function checkoutConstraintViolation(report = {}, plan = null) {
       evidence: summary.budgetWarning
     };
   }
-  if (checkoutish && plan?.primeRequired === true) {
+  // Amazon's optional-offer interstitial is still part of checkout
+  // navigation, but it is not the delivery decision. Let the plan decline
+  // that offer before enforcing the final shipping policy.
+  const deliveryPolicyStage = ['cart', 'checkout', 'payment', 'final_review'].includes(stage);
+  if (deliveryPolicyStage && plan?.primeRequired === true) {
     if (summary.cartPrimeFulfillmentObserved === true && summary.cartPrimeVerified === false) {
       return {
         state: 'prime_required',
@@ -1735,8 +1855,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     const currentTab = await chrome.tabs.get(tabId).catch(() => null);
     if (currentTab?.url && !isAmazonRetailShoppingUrl(currentTab.url)) {
       const recoveryUrl = amazonActionRecoveryUrl(plan, action);
-      await chrome.tabs.update(tabId, { url: recoveryUrl, active: false });
-      await waitForTabReady(tabId).catch(() => null);
+      await navigateMissionTab(tabId, recoveryUrl, { timeoutMs: 5_000 }).catch(() => null);
       await delay(300);
     }
   }
@@ -1754,13 +1873,9 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     let currentTab = await chrome.tabs.get(tabId).catch(() => before);
     if (usedFallback) {
       const navigationUrl = withAmazonEnglishLocale(action.url);
-      await withTimeout(
-        () => chrome.tabs.update(tabId, { url: navigationUrl, active: false }),
-        TAB_COMMAND_TIMEOUT_MS,
-        'browser_cart_fallback_start_timeout'
-      );
-      await waitForTabReady(tabId).catch(() => null);
-      currentTab = await chrome.tabs.get(tabId).catch(() => ({ url: navigationUrl, title: '' }));
+      currentTab = await navigateMissionTab(tabId, navigationUrl, {
+        timeoutLabel: 'browser_cart_fallback_navigation_timeout'
+      }).catch(() => ({ url: navigationUrl, title: '' }));
     } else {
       await waitForTabReady(tabId, 3_500).catch(() => null);
       currentTab = await chrome.tabs.get(tabId).catch(() => currentTab);
@@ -1787,13 +1902,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     const navigationUrl = plan.targetDomain === 'amazon.com'
       ? withAmazonEnglishLocale(action.url)
       : action.url;
-    const updatedTab = await withTimeout(
-      () => chrome.tabs.update(tabId, { url: navigationUrl, active: false }),
-      TAB_COMMAND_TIMEOUT_MS,
-      'browser_navigation_start_timeout'
-    );
-    await waitForTabReady(tabId).catch(() => null);
-    const currentTab = await withTimeout(() => chrome.tabs.get(tabId), TAB_COMMAND_TIMEOUT_MS, 'browser_tab_read_timeout').catch(() => updatedTab);
+    const currentTab = await navigateMissionTab(tabId, navigationUrl);
     // Navigation is its own cheap, durable milestone. Reading the entire
     // merchant DOM here made Amazon's large search surface block the
     // checkpoint that unlocks the next inspect step. The following plan
@@ -1837,7 +1946,19 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
       : Boolean(currentPath);
     if (amazonFastPathAllowed && searchSurfaceAllowed) {
       const quickOutcome = await amazonSearchCardAddToCart(tabId, action);
-      if (quickOutcome?.completed) return quickOutcome;
+      if (quickOutcome?.completed) {
+        const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile);
+        if (cartAdvance.advanced) {
+          return {
+            ...quickOutcome,
+            postAddCartOpened: true,
+            cartOpenControlStrategy: cartAdvance.outcome?.controlStrategy || null,
+            cartOpenAttempts: cartAdvance.attempts,
+            state: cartAdvance.state || quickOutcome.state
+          };
+        }
+        return quickOutcome;
+      }
     }
   }
   if (action.type === 'click_intent'
@@ -1890,7 +2011,17 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
   let before = await chrome.tabs.get(tabId);
   let outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
   if (action.type === 'select_candidate' && outcome?.directSearchResultCart === true) {
-    await delay(550);
+    const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile);
+    if (cartAdvance.advanced) {
+      return {
+        ...outcome,
+        postAddCartOpened: true,
+        cartOpenControlStrategy: cartAdvance.outcome?.controlStrategy || null,
+        cartOpenAttempts: cartAdvance.attempts,
+        state: cartAdvance.state || outcome.state || null
+      };
+    }
+    await delay(250);
     return {
       ...outcome,
       state: await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 220 }).catch(() => outcome.state || null)
@@ -1912,8 +2043,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     await delay(300);
     let filteredTab = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
     if (plan.targetDomain === 'amazon.com' && !isAmazonRetailShoppingUrl(filteredTab.url || '')) {
-      await chrome.tabs.update(tabId, { url: withAmazonEnglishLocale(plan.startUrl), active: false });
-      await waitForTabReady(tabId).catch(() => null);
+      await navigateMissionTab(tabId, withAmazonEnglishLocale(plan.startUrl), { timeoutMs: 5_000 }).catch(() => null);
       await delay(300);
       return {
         ...outcome,
@@ -1928,8 +2058,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     if (plan.targetDomain === 'amazon.com') {
       const englishUrl = withAmazonEnglishLocale(filteredTab.url || '');
       if (englishUrl && englishUrl !== filteredTab.url) {
-        await chrome.tabs.update(tabId, { url: englishUrl, active: false });
-        await waitForTabReady(tabId).catch(() => null);
+        await navigateMissionTab(tabId, englishUrl, { timeoutMs: 5_000 }).catch(() => null);
         await delay(250);
         filteredTab = await chrome.tabs.get(tabId).catch(() => filteredTab);
       }
@@ -2341,6 +2470,9 @@ async function runSession(rawSession) {
         observedNavigationUrl: outcome.observedNavigationUrl ? compactNavigationUrl(outcome.observedNavigationUrl) : null,
         navigationConfirmed: typeof outcome.navigationConfirmed === 'boolean' ? outcome.navigationConfirmed : null,
         directSearchResultCart: Boolean(outcome.directSearchResultCart),
+        postAddCartOpened: Boolean(outcome.postAddCartOpened),
+        cartOpenControlStrategy: outcome.cartOpenControlStrategy || null,
+        cartOpenAttempts: Number(outcome.cartOpenAttempts || 0),
         checkoutPreludeRecovered: Boolean(outcome.checkoutPreludeRecovered),
         checkoutPreludeRecoveryUrl: outcome.checkoutPreludeRecoveryUrl ? compactNavigationUrl(outcome.checkoutPreludeRecoveryUrl) : null,
         checkoutInterstitialContinued: Boolean(outcome.checkoutInterstitialContinued),
@@ -2578,6 +2710,21 @@ async function runSession(rawSession) {
       });
       return { sessionId: session.id, status: 'retrying_control_plane', retrying: true };
     }
+    if (isRetryableBrowserRuntimeError(error)) {
+      retainActiveRun = true;
+      scheduleRunnerResume();
+      await saveConfig({
+        lastError: 'The browser connection was interrupted. Retrying the current step.',
+        lastExecution: {
+          sessionId: session.id,
+          status: 'retrying_browser_step',
+          actionId: currentAction?.id || null,
+          durationMs: actionDurationMs,
+          at: new Date().toISOString()
+        }
+      });
+      return { sessionId: session.id, status: 'retrying_browser_step', retrying: true };
+    }
     await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'step_needs_review', actionId: currentAction?.id || null, durationMs: actionDurationMs, at: new Date().toISOString() } });
     if (!plan && session?.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID) return reportStartupFailure(session, error);
     if (!plan) throw error;
@@ -2636,15 +2783,20 @@ async function resumeActiveRun() {
   return runSession(session);
 }
 
-async function pollAndExecute() {
+async function pollAndExecute(requestedSessionId = '') {
   const config = await getConfig();
   if (!config.deviceToken) return { paired: false, executed: [] };
   await registerExecutor(config);
   const poll = await pollSessions();
   const executed = [];
+  const normalizedSessionId = String(requestedSessionId || '').trim();
+  const runnableSessions = poll.sessions.filter(isRunnableSession);
+  const selectedSessions = normalizedSessionId
+    ? runnableSessions.filter((session) => String(session?.id || '') === normalizedSessionId)
+    : runnableSessions.slice(0, 1);
   // Keep the browser surface single-threaded. A second mission can reuse the
   // same tab after the first one reaches a boundary, but cannot compete for it.
-  for (const session of poll.sessions.filter(isRunnableSession).slice(0, 1)) {
+  for (const session of selectedSessions.slice(0, 1)) {
     try {
       executed.push(await runSession(session));
     } catch (error) {
@@ -2659,14 +2811,32 @@ async function pollAndExecute() {
       }
     }
   }
-  return { ...poll, executed };
+  return {
+    ...poll,
+    requestedSessionId: normalizedSessionId || null,
+    requestedSessionFound: normalizedSessionId
+      ? selectedSessions.length > 0
+      : runnableSessions.length > 0,
+    executed
+  };
 }
 
 async function pollOnly() {
   const config = await getConfig();
   if (!config.deviceToken) return { paired: false, sessions: [], actionableCount: 0 };
   await registerExecutor(config);
-  return pollSessions();
+  const poll = await pollSessions();
+  // A website wake is the fast path, but an MV3 service worker can be asleep
+  // exactly when the page sends it. The server returns only a short-lived
+  // dispatch created by the user's Run click, so the next heartbeat may pick
+  // up that exact signed mission without becoming a general work queue.
+  const dispatchedSession = poll.sessions.find((session) => {
+    if (!isRunnableSession(session)) return false;
+    const dispatchExpiry = Date.parse(session?.extensionRunDispatch?.expiresAt || '');
+    return Number.isFinite(dispatchExpiry) && dispatchExpiry > Date.now();
+  });
+  if (!dispatchedSession?.id) return poll;
+  return pollAndExecute(dispatchedSession.id);
 }
 
 async function getPendingMissionSite() {
@@ -2778,7 +2948,7 @@ async function handleMessage(message, sender = null) {
   if (message?.type === 'ALLOW_AND_START_PENDING_MISSION_SITE' || message?.type === 'ENABLE_PENDING_MISSION_SITE') {
     return allowAndStartPendingMissionSite();
   }
-  if (message?.type === 'RUN_PENDING_SESSIONS') return pollAndExecute();
+  if (message?.type === 'RUN_PENDING_SESSIONS') return pollAndExecute(message.sessionId || '');
   if (message?.type === 'REGISTER_PLUGIN') {
     await registerExecutor();
     return { registered: true };

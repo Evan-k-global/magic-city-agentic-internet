@@ -62,6 +62,22 @@ if (!/ACTIVE_MISSION_CONTINUATION_DELAY_MS/.test(packagedBackground)
   || !/result\?\.status === 'already_running'/.test(packagedBackground)) {
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
 }
+if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.test(packagedBackground)
+  || !/return dispatch\(message, \{ origin \}\);/.test(packagedBackground)
+  || !/Keep the external message open through the exact-session claim/.test(packagedBackground)) {
+  fail('external runner wake must run through the direct exact-session claim path, without detached MV3 work');
+}
+if (!/async function pollAndExecute\(requestedSessionId = ''\)/.test(packagedLegacyBackground)
+  || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)) {
+  fail('runner execution must select the exact session requested by Magic City');
+}
+if (!/async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id\)/.test(packagedLegacyBackground)) {
+  fail('heartbeat fallback must execute only a still-valid user-dispatched browser mission');
+}
+if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackground)
+  || !/const navigation = waitForTabNavigation\(tabId, beforeUrl, timeoutMs\);[\s\S]*const updatedTab = await withTimeout/.test(packagedLegacyBackground)) {
+  fail('navigation readiness must be idempotent and subscribe before the tab update');
+}
 
   const smoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
     cwd: rootDir,

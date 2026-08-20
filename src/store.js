@@ -381,6 +381,8 @@ const persistence = {
   atRestEncryption: stateEncryptionStatus(),
   singleWriterRequired: POSTGRES_SINGLE_WRITER,
   writerLockAcquired: false,
+  writerLockLastAcquiredAt: null,
+  writerLockLastError: null,
   migrationSource: null,
   lastWriteAt: null,
   lastWriteError: null,
@@ -389,12 +391,70 @@ const persistence = {
 
 let persistQueue = Promise.resolve();
 let postgresWriterLockClient = null;
+let postgresWriterLockAcquirePromise = null;
 let postgresPersistDirty = false;
 let postgresPersistScheduled = false;
 let filePersistTimer = null;
 let filePersistDirty = false;
 let filePersistLastError = null;
 let state = defaultState();
+
+function handlePostgresWriterLockClientError(client, error) {
+  if (postgresWriterLockClient === client) {
+    postgresWriterLockClient = null;
+    persistence.writerLockAcquired = false;
+    persistence.writerLockLastError = error instanceof Error ? error.message : String(error);
+  }
+  markPostgresWriteFailure(error);
+  try {
+    client.release(error);
+  } catch {
+    // The pool may already have discarded a terminated connection.
+  }
+}
+
+async function ensurePostgresWriterLock() {
+  if (!pool || !POSTGRES_SINGLE_WRITER) return;
+  if (postgresWriterLockClient && persistence.writerLockAcquired) return;
+  if (postgresWriterLockAcquirePromise) return postgresWriterLockAcquirePromise;
+
+  postgresWriterLockAcquirePromise = (async () => {
+    let client = null;
+    try {
+      client = await pool.connect();
+      client.on('error', (error) => {
+        handlePostgresWriterLockClientError(client, error);
+      });
+      const lock = await client.query(
+        'select pg_try_advisory_lock(hashtext($1)) as acquired',
+        [POSTGRES_WRITER_LOCK_KEY]
+      );
+      if (!lock.rows[0]?.acquired) {
+        throw new Error('postgres_single_writer_lock_unavailable');
+      }
+      postgresWriterLockClient = client;
+      persistence.writerLockAcquired = true;
+      persistence.writerLockLastAcquiredAt = new Date().toISOString();
+      persistence.writerLockLastError = null;
+      return;
+    } catch (error) {
+      persistence.writerLockAcquired = false;
+      persistence.writerLockLastError = error instanceof Error ? error.message : String(error);
+      if (client) {
+        try {
+          client.release(error);
+        } catch {
+          // The client can already be gone after a connection-level error.
+        }
+      }
+      throw error;
+    } finally {
+      postgresWriterLockAcquirePromise = null;
+    }
+  })();
+
+  return postgresWriterLockAcquirePromise;
+}
 
 function normalizeConnectorSessions() {
   for (const session of state.connectorSessions) {
@@ -481,7 +541,17 @@ function markPostgresWriteFailure(error) {
   console.error('[agent-verification] postgres_persist_failed', persistence.lastWriteError);
 }
 
+if (pool) {
+  // node-postgres emits connection errors on idle pool clients. Without this
+  // listener Node treats a dropped Postgres connection as an uncaught error
+  // and restarts the web process, stranding live browser missions.
+  pool.on('error', (error) => {
+    markPostgresWriteFailure(error);
+  });
+}
+
 async function writePostgresSnapshot(snapshot = JSON.stringify(state)) {
+  await ensurePostgresWriterLock();
   const storedSnapshot = serializePostgresState(snapshot);
   await pool.query(
     `
@@ -590,17 +660,7 @@ async function initializeState() {
   }
 
   try {
-    if (POSTGRES_SINGLE_WRITER) {
-      postgresWriterLockClient = await pool.connect();
-      const lock = await postgresWriterLockClient.query(
-        'select pg_try_advisory_lock(hashtext($1)) as acquired',
-        [POSTGRES_WRITER_LOCK_KEY]
-      );
-      if (!lock.rows[0]?.acquired) {
-        throw new Error('postgres_single_writer_lock_unavailable');
-      }
-      persistence.writerLockAcquired = true;
-    }
+    await ensurePostgresWriterLock();
     await pool.query(`
       create table if not exists app_state (
         state_key text primary key,
