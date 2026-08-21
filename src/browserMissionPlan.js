@@ -4,6 +4,9 @@ export const BROWSER_EXTENSION_PLAN_SCHEMA = 'magic-city-browser-plan-v1';
 export const BROWSER_EXTENSION_PLAN_PROTOCOL = 'declarative-v1';
 
 const MAX_PLAN_ACTIONS = 64;
+const MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 90_000;
+const MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 30_000;
+const MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 120_000;
 // Each basket item needs a complete, observable loop. Eight keeps even the
 // generic-site variant below the signed plan's 64-action ceiling.
 const MAX_PLANNED_BASKET_ITEMS = 8;
@@ -150,10 +153,14 @@ export function evaluateBrowserExtensionFulfillment({ status = '', result = null
     return { status: 'fulfilled', accepted: true, proofEligible: true, reason: 'order_submitted' };
   }
   if (browser.finalSubmitRequested === true && checkoutReached) {
-    if (milestoneContractActive && !verifiedMilestones.has('final_submit_requested')) {
-      return { status: 'failed', accepted: false, proofEligible: false, reason: 'final_submit_not_verified' };
-    }
-    return { status: 'fulfilled', accepted: true, proofEligible: true, reason: 'final_submit_requested' };
+    return {
+      status: 'failed',
+      accepted: false,
+      proofEligible: false,
+      reason: milestoneContractActive && !verifiedMilestones.has('final_submit_requested')
+        ? 'final_submit_not_verified'
+        : 'merchant_order_confirmation_missing'
+    };
   }
   if (VERIFIED_HUMAN_BOUNDARIES.has(stopState)) {
     const earlyBoundary = stopState === 'login_required' || stopState === 'captcha_or_challenge_required';
@@ -397,11 +404,17 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   // with that installed surface rather than failing the entire browser mission.
   const extensionFinalSubmitEnabled = session.extensionFinalSubmitEnabled !== false;
   const finalApprovalPolicy = String(selections.finalApprovalPolicy || '').trim().toLowerCase();
-  // An explicit Run authorizes one checkout submit only when the local runner
+  // One Amazon Run authorizes one checkout submit only when the local runner
   // can still verify the merchant, cap, saved address, and selected card cue.
-  // Unspecified plans retain the historical review stop for SDK callers.
-  const autoSubmitAfterVerifiedCheckout = finalApprovalPolicy === 'auto_submit_after_verified_checkout'
+  // A recovery-only reconciliation retains its pause so it cannot transform a
+  // previously stopped session into a fresh spend authority.
+  const autoSubmitAfterVerifiedCheckout = (finalApprovalPolicy === 'auto_submit_after_verified_checkout'
+    || (!finalApprovalPolicy && fastAmazonCatalogPlan && !requestedCheckoutReconcile))
     && extensionFinalSubmitEnabled;
+  // Amazon's "make this my default" checkbox is a merchant-side convenience
+  // preference. It is signed into the same one-order final-submit action and
+  // only runs after the vault address/card and final review are verified.
+  const saveMerchantCheckoutDefault = autoSubmitAfterVerifiedCheckout && fastAmazonCatalogPlan;
   // A user can opt into reviewing checkout in Magic City. Their explicit
   // Place order command then issues this short, verification-only continuation
   // instead of replaying catalog search and cart work.
@@ -479,11 +492,23 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
       expectedCartItemCount: index + 1
     }));
   });
+  const finalSubmitAction = () => buildAction('submit-final-order', 'final_submit', 'final_submit', {
+    autoSubmitAfterVerifiedCheckout: true,
+    saveMerchantCheckoutDefault,
+    maxPrice,
+    expectedMilestone: 'final_submit_requested'
+  });
+  const confirmMerchantOrderAction = () => buildAction('confirm-merchant-order', 'inspect', 'read_public_page', {
+    awaitMerchantOrderConfirmation: true,
+    merchantConfirmationTimeoutMs: MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS,
+    expectedMilestone: 'order_submitted'
+  });
   const reviewSubmitActions = [
     buildAction('inspect-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true }),
     ...(fillLocalCheckoutProfile ? [buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeFinalSubmit: true })] : []),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true, expectedMilestone: 'final_review_ready' }),
-    buildAction('submit-final-order', 'final_submit', 'final_submit', { autoSubmitAfterVerifiedCheckout: true, maxPrice, expectedMilestone: 'final_submit_requested' }),
+    finalSubmitAction(),
+    confirmMerchantOrderAction(),
     buildAction('pause-for-user', 'pause', 'handoff', { reason: 'order_submission_requested' })
   ];
   // A checkout can expose its delivery selector first and its card selector only
@@ -521,7 +546,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [buildAction('submit-final-order', 'final_submit', 'final_submit', { autoSubmitAfterVerifiedCheckout: true, maxPrice, expectedMilestone: 'final_submit_requested' })] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'basket_review_ready' })
         ]
       : [
@@ -548,7 +573,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           ...(fillLocalCheckoutProfile ? [buildAction('fill-checkout-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [buildAction('submit-final-order', 'final_submit', 'final_submit', { autoSubmitAfterVerifiedCheckout: true, maxPrice, expectedMilestone: 'final_submit_requested' })] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })
         ])
     : [];
@@ -601,6 +626,9 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     resumeFinalSubmit,
     resumeCheckoutReconcile,
     finalApprovalPolicy: autoSubmitAfterVerifiedCheckout ? 'auto_submit_after_verified_checkout' : 'pause_before_final_approval',
+    saveMerchantCheckoutDefault,
+    requireMerchantOrderConfirmation: autoSubmitAfterVerifiedCheckout,
+    merchantConfirmationTimeoutMs: autoSubmitAfterVerifiedCheckout ? MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS : null,
     limits: {
       maxActions: Math.min(MAX_PLAN_ACTIONS, policyBoundActions.length),
       maxRevisions: 2,
@@ -649,6 +677,23 @@ export function validateBrowserExtensionPlan(plan = null) {
     || action.missionAction !== 'final_submit'
   ))) {
     return { valid: false, reason: 'plan_final_submit_invalid' };
+  }
+  const finalSubmitIndex = actions.findIndex((action) => action.type === 'final_submit');
+  if (finalSubmitIndex >= 0 && !actions.slice(finalSubmitIndex + 1).some((action) => (
+    action.type === 'inspect'
+    && action.awaitMerchantOrderConfirmation === true
+    && action.expectedMilestone === 'order_submitted'
+  ))) {
+    return { valid: false, reason: 'plan_merchant_confirmation_missing' };
+  }
+  if (actions.some((action) => action.awaitMerchantOrderConfirmation === true && (
+    action.type !== 'inspect'
+    || action.expectedMilestone !== 'order_submitted'
+    || !Number.isFinite(Number(action.merchantConfirmationTimeoutMs))
+    || Number(action.merchantConfirmationTimeoutMs) < MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
+    || Number(action.merchantConfirmationTimeoutMs) > MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
+  ))) {
+    return { valid: false, reason: 'plan_merchant_confirmation_invalid' };
   }
   const { planHash, ...unsigned } = plan;
   if (hashPlan(unsigned) !== planHash) return { valid: false, reason: 'plan_hash_invalid' };

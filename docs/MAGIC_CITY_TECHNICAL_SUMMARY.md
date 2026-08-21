@@ -927,7 +927,7 @@ The main API families are:
 | Auth | Google, wallet, email/password, session, logout |
 | MCP and agent SDK | MCP OAuth/server routes and `/agent-sdk/v1/missions` |
 
-There are also historical ACP, verification-service, NAVA-compatibility, payout, dispute, leaderboard, and older connector routes. They increase compatibility but are not all part of the current retail happy path.
+There are also historical ACP, verification-service, payout, dispute, leaderboard, and older connector routes. They increase compatibility but are not all part of the current retail happy path.
 
 ## 15. Happy Paths
 

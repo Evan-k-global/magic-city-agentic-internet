@@ -637,7 +637,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<a href="#add-card">Add a credit or debit card</a>',
       '<a href="#gift-card">Use a gift card, voucher, or promo code</a>',
       '</div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent" name="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent" type="submit" aria-labelledby="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<div style="height: 300px"></div>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
       '</section>',
       '<section aria-label="Delivery address">',
       '<h2>Delivering to Test User</h2>',
@@ -653,6 +655,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<section aria-label="Order summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p></section>',
       '<section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>',
       '<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>',
+      '<label><input id="merchant-checkout-default" type="checkbox" /> Default to this delivery address and payment method.</label>',
       '<span class="a-button"><span class="a-button-inner"><input id="submitOrderButtonId" type="submit" aria-labelledby="submitOrderButtonId-announce" onclick="document.body.dataset.orderSubmitted=\'1\'; location.href=\'/checkout/order-confirmation\'" /><span id="submitOrderButtonId-announce" class="a-button-text">Place your order</span></span></span>',
       '</main>'
     ].join('');
@@ -877,7 +880,18 @@ async function main() {
           planId: `mplan_${id}`,
           startUrl: page.url(),
           limits: { ...plan.limits, stopBeforeFinalSubmit: false },
-          actions: [action, { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'recovery_smoke' }]
+          actions: [
+            action,
+            ...(action.type === 'final_submit' ? [{
+              id: 'confirm-merchant-order',
+              type: 'inspect',
+              missionAction: 'read_public_page',
+              awaitMerchantOrderConfirmation: true,
+              merchantConfirmationTimeoutMs: 90_000,
+              expectedMilestone: 'order_submitted'
+            }] : []),
+            { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'recovery_smoke' }
+          ]
         });
         session = {
           ...session,
@@ -1254,6 +1268,39 @@ async function main() {
     });
     await paymentConfirmPage.close();
 
+    const paymentConfirmContinuationPage = await context.newPage();
+    await paymentConfirmContinuationPage.goto(`${baseUrl}/checkout/pay-confirm`);
+    const paymentConfirmContinuationAction = await commandPage(paymentConfirmContinuationPage, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'click_intent', intent: 'checkout', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Test User',
+        streetAddress: '1 Magic City Way',
+        shippingCity: 'San Francisco',
+        shippingState: 'CA',
+        zipCode: '94107',
+        contactPhone: '4155550100',
+        billingStreetAddress: '99 Billing Plaza',
+        billingZipCode: '10001',
+        paymentCardLast4: '6383'
+      }
+    });
+    await paymentConfirmContinuationPage.waitForURL(/\/checkout\/final-review/, { timeout: 5_000 }).catch(() => null);
+    if (!paymentConfirmContinuationAction?.completed
+      || paymentConfirmContinuationAction?.controlStrategy !== 'selected_payment_method_confirmation'
+      || !/use this payment method/i.test(String(paymentConfirmContinuationAction.label || ''))
+      || !paymentConfirmContinuationPage.url().includes('/checkout/final-review')) {
+      fail(`browser_extension_did_not_continue_matching_payment_method:${JSON.stringify({
+        action: paymentConfirmContinuationAction,
+        url: paymentConfirmContinuationPage.url()
+      })}`);
+    }
+    recordPurchaseScenario('Checkout continuation confirms the selected matching card with duplicate merchant controls', {
+      strategy: paymentConfirmContinuationAction.controlStrategy,
+      label: paymentConfirmContinuationAction.label
+    });
+    await paymentConfirmContinuationPage.close();
+
     await popup.close();
     const externalWakePage = await context.newPage();
     await externalWakePage.goto(`${baseUrl}/external-wake`);
@@ -1499,6 +1546,14 @@ async function main() {
           expectedMilestone: 'final_submit_requested',
           maxPrice: 4
         },
+        {
+          id: 'confirm-merchant-order',
+          type: 'inspect',
+          missionAction: 'read_public_page',
+          awaitMerchantOrderConfirmation: true,
+          merchantConfirmationTimeoutMs: 90_000,
+          expectedMilestone: 'order_submitted'
+        },
         { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'order_confirmed' }
       ]
     });
@@ -1563,6 +1618,112 @@ async function main() {
     recordPurchaseScenario('MV3 restart after merchant order confirmation preserves final-submit proof', {
       recovered: recoveredFinalCheckpoint.browser.runnerStep.recoveredFromInterruption,
       orderSubmitted: recoveredFinalCheckpoint.browser.orderSubmitted
+    });
+
+    // An order click is irreversible. If the worker restarts while waiting for
+    // confirmation and the signed window is already exhausted, it must release
+    // the run without replaying the button and leave the merchant tab intact.
+    const unconfirmedFinalSessionId = 'browser-smoke-unconfirmed-final-session';
+    const unconfirmedFinalPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-unconfirmed-final-session',
+      startUrl: `${baseUrl}/checkout/final-review`,
+      limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+      actions: [
+        {
+          id: 'submit-final-order',
+          type: 'final_submit',
+          missionAction: 'final_submit',
+          autoSubmitAfterVerifiedCheckout: true,
+          expectedMilestone: 'final_submit_requested',
+          maxPrice: 4
+        },
+        {
+          id: 'confirm-merchant-order',
+          type: 'inspect',
+          missionAction: 'read_public_page',
+          awaitMerchantOrderConfirmation: true,
+          merchantConfirmationTimeoutMs: 90_000,
+          expectedMilestone: 'order_submitted'
+        },
+        { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'confirmation_timeout_smoke' }
+      ]
+    });
+    checkpoints.length = 0;
+    fulfillment = null;
+    await retainedTargetPage.goto(`${baseUrl}/checkout/final-review`);
+    const unconfirmedFinalTab = await worker.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+      tabs.find((candidate) => candidate.url === url) || null), retainedTargetPage.url());
+    if (!unconfirmedFinalTab?.id) fail('browser_extension_unconfirmed_final_tab_missing');
+    session = {
+      ...session,
+      id: unconfirmedFinalSessionId,
+      status: 'claimed',
+      claimedByPluginId: 'magic-city-runner-extension',
+      fulfillment: null,
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        subject: { sessionId: unconfirmedFinalSessionId }
+      },
+      extensionMissionPlan: unconfirmedFinalPlan,
+      extensionMissionPlanState: {
+        planHash: unconfirmedFinalPlan.planHash,
+        nextActionIndex: 1,
+        completedActionIds: ['submit-final-order'],
+        verifiedMilestones: ['final_submit_requested']
+      },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    await worker.evaluate(({ sessionId, tabId, planHash }) => new Promise((resolve) => {
+      chrome.storage.local.get(['activeMissionTabs'], (stored) => {
+        chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+          activeSessionId: sessionId,
+          activeRun: {
+            sessionId,
+            planHash,
+            phase: 'awaiting_merchant_confirmation',
+            tabId,
+            actionId: 'confirm-merchant-order',
+            actionIndex: 1,
+            nextActionIndex: 1,
+            merchantConfirmationStartedAt: new Date(Date.now() - 91_000).toISOString(),
+            merchantConfirmationDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+            merchantConfirmationAttempts: 4,
+            startedAt: new Date(Date.now() - 91_000).toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        }, () => {
+          chrome.alarms.create('magic-city-runner-resume', { when: Date.now() + 500 });
+          resolve();
+        });
+      });
+    }), { sessionId: unconfirmedFinalSessionId, tabId: unconfirmedFinalTab.id, planHash: unconfirmedFinalPlan.planHash });
+    const unconfirmedFinalCdp = await context.newCDPSession(retainedTargetPage);
+    await unconfirmedFinalCdp.send('ServiceWorker.enable');
+    await unconfirmedFinalCdp.send('ServiceWorker.stopAllWorkers');
+    try {
+      await waitFor(() => Boolean(fulfillment), 20_000);
+    } catch {
+      fail(`browser_extension_unconfirmed_final_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
+    }
+    const unconfirmedFinalStorage = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['activeRun'], resolve)));
+    const unconfirmedOrderSubmitted = await retainedTargetPage.evaluate(() => document.body.dataset.orderSubmitted === '1');
+    if (fulfillment.status !== 'failed'
+      || fulfillment.fundingDisposition !== 'release'
+      || fulfillment.result?.browserExecution?.stopState !== 'final_submit_unconfirmed'
+      || !/signed confirmation window/i.test(String(fulfillment.result?.browserExecution?.stopEvidence || ''))
+      || unconfirmedOrderSubmitted
+      || unconfirmedFinalStorage.activeRun) {
+      fail(`browser_extension_unconfirmed_final_not_released:${JSON.stringify({ fulfillment, unconfirmedOrderSubmitted, activeRun: unconfirmedFinalStorage.activeRun })}`);
+    }
+    if (!retainedTargetPage.url().includes('/checkout/final-review')) {
+      fail(`browser_extension_unconfirmed_final_tab_not_preserved:${retainedTargetPage.url()}`);
+    }
+    recordPurchaseScenario('Expired merchant confirmation releases without replaying the final order control', {
+      stopState: fulfillment.result.browserExecution.stopState,
+      fundingDisposition: fulfillment.fundingDisposition
     });
 
     await retainedTargetPage.close();
@@ -1670,6 +1831,14 @@ async function main() {
         selections: checkpoint.browser?.checkoutSelections,
         profileTransitions: checkpoint.browser?.runnerStep?.profileTransitions || []
       })))}:payment_radios=${JSON.stringify(paymentRadios)}:address=${JSON.stringify(addressFixtureState)}:execution=${JSON.stringify(fulfillment.result?.browserExecution || {})}`);
+    }
+    const merchantDefaultCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    if (merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault?.saved !== true) {
+      fail(`browser_extension_merchant_checkout_default_not_saved:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
+    }
+    const merchantConfirmationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-merchant-order');
+    if (merchantConfirmationCheckpoint?.browser?.runnerStep?.merchantOrderConfirmation?.confirmed !== true) {
+      fail(`browser_extension_merchant_order_confirmation_not_verified:${JSON.stringify(merchantConfirmationCheckpoint?.browser?.runnerStep || {})}`);
     }
     if (fulfillment.result?.browserExecution?.checkoutSummary?.merchandiseSubtotal !== '$3.50'
       || fulfillment.result?.browserExecution?.checkoutSummary?.shippingTotal !== '$0.00'

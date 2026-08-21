@@ -65,7 +65,6 @@ const defaultState = () => ({
   personalAgentRuntimes: [],
   nativeRunnerDevices: [],
   nativeRunnerPairingSessions: [],
-  navaTransactions: [],
   paymentAuthorizations: [],
   ethereumShadowRelayerJobs: [],
   ethereumConfirmationIndexJobs: [],
@@ -88,6 +87,7 @@ const defaultState = () => ({
 });
 
 function withDefaults(raw = {}) {
+  delete raw.navaTransactions;
   raw.agents = raw.agents ?? {};
   raw.attestations = raw.attestations ?? [];
   raw.receipts = raw.receipts ?? [];
@@ -139,7 +139,6 @@ function withDefaults(raw = {}) {
   raw.personalAgentRuntimes = raw.personalAgentRuntimes ?? [];
   raw.nativeRunnerDevices = raw.nativeRunnerDevices ?? [];
   raw.nativeRunnerPairingSessions = raw.nativeRunnerPairingSessions ?? [];
-  raw.navaTransactions = raw.navaTransactions ?? [];
   raw.paymentAuthorizations = raw.paymentAuthorizations ?? [];
   raw.ethereumShadowRelayerJobs = raw.ethereumShadowRelayerJobs ?? [];
   raw.ethereumConfirmationIndexJobs = raw.ethereumConfirmationIndexJobs ?? [];
@@ -898,53 +897,6 @@ export function createPaymentAuthorization(entry) {
   state.paymentAuthorizations.push(row);
   persistState();
   return row;
-}
-
-export function createNavaTransaction(entry) {
-  const now = new Date().toISOString();
-  const row = {
-    id: `navatx-${state.navaTransactions.length + 1}`,
-    createdAt: now,
-    updatedAt: now,
-    ...entry
-  };
-  state.navaTransactions.push(row);
-  persistState();
-  return row;
-}
-
-export function getNavaTransaction(id) {
-  return state.navaTransactions.find((row) => row.id === id) ?? null;
-}
-
-export function findNavaTransactionByRequestHash(requestHash) {
-  if (!requestHash) return null;
-  return state.navaTransactions.find((row) => row.requestHash === requestHash) ?? null;
-}
-
-export function listNavaTransactions({ escrowAddress = null, userId = null, limit = 50 } = {}) {
-  const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 500));
-  const normalizedEscrow = String(escrowAddress || '').trim().toLowerCase();
-  return state.navaTransactions
-    .filter((row) => {
-      if (userId && row.userId !== userId) return false;
-      if (normalizedEscrow && String(row.escrowAddress || '').trim().toLowerCase() !== normalizedEscrow) return false;
-      return true;
-    })
-    .slice(-safeLimit)
-    .reverse();
-}
-
-export function updateNavaTransaction(id, patch) {
-  const index = state.navaTransactions.findIndex((row) => row.id === id);
-  if (index < 0) return null;
-  state.navaTransactions[index] = {
-    ...state.navaTransactions[index],
-    ...patch,
-    updatedAt: new Date().toISOString()
-  };
-  persistState();
-  return state.navaTransactions[index];
 }
 
 export function getPaymentAuthorization(id) {
