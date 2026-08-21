@@ -712,7 +712,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.2'
+  '0.4.3'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -2721,6 +2721,7 @@ function buildMissionContractForSession(session = {}, {
       allowAmazonLocalMarket: Boolean(extensionPlan?.allowAmazonLocalMarket),
       allowThirdPartyFulfillment: Boolean(extensionPlan?.allowThirdPartyFulfillment),
       stopBeforeFinalSubmit,
+      saveMerchantCheckoutDefault: extensionPlan?.saveMerchantCheckoutDefault === true,
       finalSubmitApprovalHash: finalSubmitApproval?.approvalHash || null,
       finalSubmitApprovalExpiresAt: finalSubmitApproval?.expiresAt || null,
       retailCheckoutReceiptProfile: isRetailCheckoutMission(session)
@@ -2834,8 +2835,13 @@ function buildMissionCapability({
     'request_quote',
     'handoff'
   ]);
+  const extensionPlan = getExtensionMissionPlanForSession(session);
   const finalApprovalPolicy = String(session?.finalSelections?.finalApprovalPolicy || session?.selections?.finalApprovalPolicy || '').trim().toLowerCase();
-  const autoSubmitAfterVerifiedCheckout = finalApprovalPolicy === 'auto_submit_after_verified_checkout';
+  // The browser plan is signed into the capability contract. Honor its explicit
+  // no-pause decision so a normal Amazon Run authorizes exactly one verified
+  // final submit without relying on a second UI confirmation.
+  const autoSubmitAfterVerifiedCheckout = finalApprovalPolicy === 'auto_submit_after_verified_checkout'
+    || extensionPlan?.limits?.stopBeforeFinalSubmit === false;
   const policy = {
     allowedDomains: inferMissionCapabilityDomains({ session, mission, targetUrl, allowedDomains }),
     allowedActions: normalizedAllowedActions,

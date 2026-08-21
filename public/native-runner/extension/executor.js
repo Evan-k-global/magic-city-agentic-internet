@@ -3016,6 +3016,27 @@
     return controls;
   }
 
+  function saveAmazonCheckoutDefault() {
+    if (!/(^|\.)amazon\.com$/i.test(String(location.hostname || ''))) {
+      return { attempted: false, saved: false, reason: 'not_amazon' };
+    }
+    const control = Array.from(interactionRoot().querySelectorAll('input[type="checkbox"], [role="checkbox"]'))
+      .filter((entry) => visible(entry))
+      .find((entry) => /\bdefault to this (?:delivery address|address) and payment method\b/i.test(compactText([
+        entry.labels?.[0]?.innerText || '',
+        entry.getAttribute?.('aria-label') || '',
+        ariaLabelledText(entry),
+        radioContainer(entry)?.innerText || ''
+      ].filter(Boolean).join('\n'), 500)));
+    if (!control) return { attempted: true, saved: false, reason: 'not_offered' };
+    const isChecked = () => control.matches?.('input[type="checkbox"]')
+      ? control.checked
+      : control.getAttribute?.('aria-checked') === 'true';
+    if (isChecked()) return { attempted: true, saved: true, alreadySet: true };
+    if (!immediateSafeClick(control)) return { attempted: true, saved: false, reason: 'click_failed' };
+    return { attempted: true, saved: isChecked(), reason: isChecked() ? 'enabled' : 'not_confirmed' };
+  }
+
   function submitFinalOrder(action = {}, profile = {}) {
     if (action.autoSubmitAfterVerifiedCheckout !== true) {
       return { completed: false, reason: 'This mission did not authorize automatic final order submission.' };
@@ -3054,6 +3075,9 @@
     if (summary.deliveryConfirmed !== true) {
       return { completed: false, reason: 'The preferred delivery option is not confirmed yet.', state };
     }
+    const merchantCheckoutDefault = action.saveMerchantCheckoutDefault === true
+      ? saveAmazonCheckoutDefault()
+      : { attempted: false, saved: false, reason: 'not_requested' };
     const controls = finalOrderControls();
     if (!controls.length) {
       return { completed: false, reason: 'Magic City could not identify a verified final order control.', state };
@@ -3070,6 +3094,7 @@
         navigationRequested: true,
         finalSubmitRequested: true,
         label: visibleControlLabel(control, 140) || compactText(textFor(control), 140),
+        merchantCheckoutDefault,
         state
       };
     } catch {

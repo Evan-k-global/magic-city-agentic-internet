@@ -833,6 +833,13 @@ function getBrowserWorkerInputs(session) {
     inferBrowserWorkerUrlFromText([goalSeed, constraintSeed, budgetSeed].filter(Boolean).join('\n')) ||
     ''
   );
+  const amazonCheckoutMission = (() => {
+    try {
+      return /(^|\.)amazon\.com$/i.test(new URL(targetUrl || 'https://invalid.local').hostname || '');
+    } catch {
+      return false;
+    }
+  })();
   const goal = goalSeed || 'Move the site task forward until a safe handoff point.';
   const constraints = constraintSeed;
   const budget = budgetSeed;
@@ -876,7 +883,7 @@ function getBrowserWorkerInputs(session) {
       paymentProfileDisplay: cleanTravelHint(selections.paymentProfileDisplay) || 'agent_card_label_and_last4',
       checkoutRunnerMode: normalizeCheckoutRunnerMode(selections.checkoutRunnerMode),
       checkoutRunnerReceiptProof: cleanTravelHint(selections.checkoutRunnerReceiptProof) || 'receipt_hashes_and_screenshots',
-      checkoutRunnerStopBeforeFinalSubmit: selections.checkoutRunnerStopBeforeFinalSubmit !== false,
+      checkoutRunnerStopBeforeFinalSubmit: selections.checkoutRunnerStopBeforeFinalSubmit === true,
       limitSource: cleanTravelHint(selections.limitSource) || 'bank_controls_and_magic_city_policy',
       allowedUse: cleanTravelHint(selections.allowedUse) || 'internet_agent,procurement,bookings,applications',
       trustTier: normalizeBrowserTrustTier(useInferredBoundedAuthority ? inferredAuthority.trustTier : explicitTrustTier || inferredAuthority.trustTier),
@@ -888,7 +895,9 @@ function getBrowserWorkerInputs(session) {
       authProfileMode: cleanTravelHint(selections.authProfileMode) || 'public_handoff',
       loginTouchpointPolicy: cleanTravelHint(selections.loginTouchpointPolicy) || 'handoff_before_login_or_mfa',
       paymentTouchpointPolicy: cleanTravelHint(selections.paymentTouchpointPolicy) || 'handoff_before_payment',
-      finalApprovalPolicy: cleanTravelHint(selections.finalApprovalPolicy) || 'pause_before_final_approval',
+      finalApprovalPolicy: cleanTravelHint(selections.finalApprovalPolicy) || (amazonCheckoutMission
+        ? 'auto_submit_after_verified_checkout'
+        : 'pause_before_final_approval'),
       blockedUses: cleanTravelHint(selections.blockedUses) || 'subscriptions,cash_equivalents,gift_cards,financial_services',
       killSwitch: cleanTravelHint(selections.killSwitch) || 'remove_payment_profile'
     },
@@ -1098,7 +1107,7 @@ function evaluateBrowserPaymentPolicy(inputs, finalUrl = '') {
     authProfileMode: profile.authProfileMode || 'public_handoff',
     loginTouchpointPolicy: profile.loginTouchpointPolicy || 'handoff_before_login_or_mfa',
     paymentTouchpointPolicy: profile.paymentTouchpointPolicy || 'handoff_before_payment',
-    finalApprovalPolicy: profile.finalApprovalPolicy || 'pause_before_final_approval',
+    finalApprovalPolicy: profile.finalApprovalPolicy || 'auto_submit_after_verified_checkout',
     blockedUses,
     decision,
     reasons,
@@ -1127,7 +1136,7 @@ function buildLocalCheckoutRunnerPolicy(inputs, finalUrl = '') {
       'stop_before_final_submit',
       'receipt_hash'
     ],
-    stopBeforeFinalSubmit: profile.checkoutRunnerStopBeforeFinalSubmit !== false,
+    stopBeforeFinalSubmit: profile.checkoutRunnerStopBeforeFinalSubmit === true,
     receiptProof: profile.checkoutRunnerReceiptProof || 'receipt_hashes_and_screenshots',
     authoritySplit: {
       cardAuthority: profile.cardAuthority || 'issuer_or_card_wallet',
@@ -1139,7 +1148,7 @@ function buildLocalCheckoutRunnerPolicy(inputs, finalUrl = '') {
     authProfileMode: profile.authProfileMode || 'public_handoff',
     loginTouchpointPolicy: profile.loginTouchpointPolicy || 'handoff_before_login_or_mfa',
     paymentTouchpointPolicy: profile.paymentTouchpointPolicy || 'handoff_before_payment',
-    finalApprovalPolicy: profile.finalApprovalPolicy || 'pause_before_final_approval',
+    finalApprovalPolicy: profile.finalApprovalPolicy || 'auto_submit_after_verified_checkout',
     serverReceivesRawCard: false,
     rawCardDataHandledByMagicCity: false,
     userFacingRevocation: 'remove_payment_profile'

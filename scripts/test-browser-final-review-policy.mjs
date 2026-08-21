@@ -31,6 +31,14 @@ assert.ok(automaticPlan.actions.every((action) => action.fulfillmentPolicy === '
 assert.ok(automaticPlan.actions.every((action) => action.primeRequired === true));
 assert.equal(automaticPlan.actions.at(-2)?.type, 'final_submit');
 assert.equal(automaticPlan.actions.at(-2)?.autoSubmitAfterVerifiedCheckout, true);
+assert.equal(automaticPlan.actions.at(-2)?.saveMerchantCheckoutDefault, true);
+
+const defaultAmazonPlan = buildBrowserExtensionMissionPlan(baseSession);
+assert.equal(validateBrowserExtensionPlan(defaultAmazonPlan).valid, true);
+assert.equal(defaultAmazonPlan.limits.stopBeforeFinalSubmit, false);
+assert.equal(defaultAmazonPlan.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.actions.at(-2)?.type, 'final_submit');
+assert.equal(defaultAmazonPlan.actions.at(-2)?.saveMerchantCheckoutDefault, true);
 
 const reviewPlan = buildBrowserExtensionMissionPlan({
   ...baseSession,

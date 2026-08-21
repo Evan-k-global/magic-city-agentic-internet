@@ -397,11 +397,17 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   // with that installed surface rather than failing the entire browser mission.
   const extensionFinalSubmitEnabled = session.extensionFinalSubmitEnabled !== false;
   const finalApprovalPolicy = String(selections.finalApprovalPolicy || '').trim().toLowerCase();
-  // An explicit Run authorizes one checkout submit only when the local runner
+  // One Amazon Run authorizes one checkout submit only when the local runner
   // can still verify the merchant, cap, saved address, and selected card cue.
-  // Unspecified plans retain the historical review stop for SDK callers.
-  const autoSubmitAfterVerifiedCheckout = finalApprovalPolicy === 'auto_submit_after_verified_checkout'
+  // A recovery-only reconciliation retains its pause so it cannot transform a
+  // previously stopped session into a fresh spend authority.
+  const autoSubmitAfterVerifiedCheckout = (finalApprovalPolicy === 'auto_submit_after_verified_checkout'
+    || (!finalApprovalPolicy && fastAmazonCatalogPlan && !requestedCheckoutReconcile))
     && extensionFinalSubmitEnabled;
+  // Amazon's "make this my default" checkbox is a merchant-side convenience
+  // preference. It is signed into the same one-order final-submit action and
+  // only runs after the vault address/card and final review are verified.
+  const saveMerchantCheckoutDefault = autoSubmitAfterVerifiedCheckout && fastAmazonCatalogPlan;
   // A user can opt into reviewing checkout in Magic City. Their explicit
   // Place order command then issues this short, verification-only continuation
   // instead of replaying catalog search and cart work.
@@ -479,11 +485,17 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
       expectedCartItemCount: index + 1
     }));
   });
+  const finalSubmitAction = () => buildAction('submit-final-order', 'final_submit', 'final_submit', {
+    autoSubmitAfterVerifiedCheckout: true,
+    saveMerchantCheckoutDefault,
+    maxPrice,
+    expectedMilestone: 'final_submit_requested'
+  });
   const reviewSubmitActions = [
     buildAction('inspect-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true }),
     ...(fillLocalCheckoutProfile ? [buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeFinalSubmit: true })] : []),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true, expectedMilestone: 'final_review_ready' }),
-    buildAction('submit-final-order', 'final_submit', 'final_submit', { autoSubmitAfterVerifiedCheckout: true, maxPrice, expectedMilestone: 'final_submit_requested' }),
+    finalSubmitAction(),
     buildAction('pause-for-user', 'pause', 'handoff', { reason: 'order_submission_requested' })
   ];
   // A checkout can expose its delivery selector first and its card selector only
@@ -521,7 +533,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [buildAction('submit-final-order', 'final_submit', 'final_submit', { autoSubmitAfterVerifiedCheckout: true, maxPrice, expectedMilestone: 'final_submit_requested' })] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'basket_review_ready' })
         ]
       : [
@@ -548,7 +560,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           ...(fillLocalCheckoutProfile ? [buildAction('fill-checkout-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [buildAction('submit-final-order', 'final_submit', 'final_submit', { autoSubmitAfterVerifiedCheckout: true, maxPrice, expectedMilestone: 'final_submit_requested' })] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })
         ])
     : [];
@@ -601,6 +613,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     resumeFinalSubmit,
     resumeCheckoutReconcile,
     finalApprovalPolicy: autoSubmitAfterVerifiedCheckout ? 'auto_submit_after_verified_checkout' : 'pause_before_final_approval',
+    saveMerchantCheckoutDefault,
     limits: {
       maxActions: Math.min(MAX_PLAN_ACTIONS, policyBoundActions.length),
       maxRevisions: 2,

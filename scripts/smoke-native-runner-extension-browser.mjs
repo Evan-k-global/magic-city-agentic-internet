@@ -655,6 +655,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<section aria-label="Order summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p></section>',
       '<section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>',
       '<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>',
+      '<label><input id="merchant-checkout-default" type="checkbox" /> Default to this delivery address and payment method.</label>',
       '<span class="a-button"><span class="a-button-inner"><input id="submitOrderButtonId" type="submit" aria-labelledby="submitOrderButtonId-announce" onclick="document.body.dataset.orderSubmitted=\'1\'; location.href=\'/checkout/order-confirmation\'" /><span id="submitOrderButtonId-announce" class="a-button-text">Place your order</span></span></span>',
       '</main>'
     ].join('');
@@ -1705,6 +1706,10 @@ async function main() {
         selections: checkpoint.browser?.checkoutSelections,
         profileTransitions: checkpoint.browser?.runnerStep?.profileTransitions || []
       })))}:payment_radios=${JSON.stringify(paymentRadios)}:address=${JSON.stringify(addressFixtureState)}:execution=${JSON.stringify(fulfillment.result?.browserExecution || {})}`);
+    }
+    const merchantDefaultCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    if (merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault?.saved !== true) {
+      fail(`browser_extension_merchant_checkout_default_not_saved:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
     }
     if (fulfillment.result?.browserExecution?.checkoutSummary?.merchandiseSubtotal !== '$3.50'
       || fulfillment.result?.browserExecution?.checkoutSummary?.shippingTotal !== '$0.00'
