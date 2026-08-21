@@ -25,7 +25,6 @@ licensed so builders can make and connect their own local helper agents.
 Execution architecture specs:
 - [SCHEDULED_WORKFLOWS_SPEC.md](/Users/evankereiakes/Documents/Codex/agent-verification/SCHEDULED_WORKFLOWS_SPEC.md)
 - [AGENT_PRODUCTION_ROADMAP.md](/Users/evankereiakes/Documents/Codex/agent-verification/AGENT_PRODUCTION_ROADMAP.md)
-- [NAVA_ON_ZEKO.md](/Users/evankereiakes/Documents/Codex/agent-verification/NAVA_ON_ZEKO.md)
 - [ZEKO_ETHEREUM_PAYMENT_PLAN.md](/Users/evankereiakes/Documents/Codex/agent-verification/ZEKO_ETHEREUM_PAYMENT_PLAN.md)
 - [TRADING_BOTS_SPEC.md](/Users/evankereiakes/Documents/Codex/agent-verification/TRADING_BOTS_SPEC.md)
 
@@ -34,13 +33,6 @@ The product path is now:
 1. humans type a request into a simple chat UI
 2. Magic City privately routes it to the best free agent/model lane
 3. agents can still register, coordinate, and write receipts underneath
-
-The codebase now also includes a Nava-compatible execution-escrow surface built on top of the same local primitives:
-
-1. users submit a Nava-style transaction request plus natural-language intent
-2. the local arbiter evaluates the request and writes approvals
-3. the Nava verdict can be tracked against Zeko testnet
-4. Ethereum remains the intended long-term settlement rail
 
 Magic City mission-bound auth is different: Magic City mission proofs and receipt anchors are configured for Zeko testnet, while SantaClawz agents remain an external counterparty lane whose own proof environment is Zeko testnet.
 
@@ -108,13 +100,6 @@ npm run start
 
 Service runs at `http://127.0.0.1:4411` by default.
 UI is available at `http://127.0.0.1:4411/`.
-
-To inspect the Nava-compatible service metadata:
-
-```bash
-curl http://127.0.0.1:4411/ \
-  -H 'accept: application/json'
-```
 
 Run the 3-agent demo pipeline (research -> analysis -> execution):
 
@@ -219,45 +204,6 @@ SANTACLAWZ_PROOF_NETWORK=zeko:testnet
 ```
 
 The legacy `ZEKO_SUBMITTER_*` and `SUBMITTER_PRIVATE_KEY` names still work as compatibility fallbacks, but new configuration should use relayer terminology. Keep the split explicit: `ZEKO_*`/`MAGIC_CITY_MISSION_PROOF_NETWORK_ID` point Magic City mission-bound auth to Zeko testnet; `SANTACLAWZ_PROOF_NETWORK` labels SantaClawz's separate agent proof lane as Zeko testnet. The public Zeko label and the o1js signing domain are intentionally separate: `zeko:testnet` versus `testnet`.
-
-## Nava On Zeko
-
-This repo can now emulate Nava's core execution-escrow flow using the current Zeko testnet as the proof and audit layer while keeping the high-level settlement story pointed at Ethereum.
-
-Detailed notes live in [NAVA_ON_ZEKO.md](/Users/evankereiakes/Documents/Codex/agent-verification/NAVA_ON_ZEKO.md), but the short version is:
-
-1. `POST /transactions` accepts a Nava-shaped request with `escrowAddress`, `userPrompt`, and `tx`
-2. the built-in arbiter generates Orion-style approvals and reasoning traces
-3. the verdict is wrapped into an anchor payload and tracked against `zeko:testnet`
-4. public agent, transaction, and metrics endpoints expose the resulting activity
-5. OAuth and MCP metadata stay available through the existing local auth surface
-
-Minimal happy-path example:
-
-```bash
-curl -X POST http://127.0.0.1:4411/transactions \
-  -H 'content-type: application/json' \
-  -d '{
-    "escrowAddress":"0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-    "userPrompt":"Send 0.01 ETH to 0x1111111111111111111111111111111111111111",
-    "tx":{
-      "to":"0x1111111111111111111111111111111111111111",
-      "value":"10000000000000000",
-      "data":"0x"
-    },
-    "chainId":11155111
-  }'
-```
-
-Then inspect the arbiter and Zeko anchoring state:
-
-```bash
-curl http://127.0.0.1:4411/transactions/<requestHash>/approval-status
-curl http://127.0.0.1:4411/transactions/<requestHash>/verification-status
-curl http://127.0.0.1:4411/public/agents/0x742d35Cc6634C0532925a3b844Bc454e4438f44e
-```
-
-Use a real 20-byte EVM address in examples. Some placeholder addresses in third-party docs are not checksum-valid and will be rejected by the stricter local parser.
 
 Default seeded agents are created automatically on startup unless `AUTO_SEED_DEFAULT_AGENTS=false`:
 
