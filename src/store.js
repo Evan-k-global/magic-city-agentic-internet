@@ -466,6 +466,12 @@ function normalizeConnectorSessions() {
       session.status = 'fulfilled';
       continue;
     }
+    // A signed runner checkpoint advances the session to executing. Preserve
+    // that durable phase across a process restart; otherwise the watchdog
+    // loses the distinction between an unclaimed run and an interrupted one.
+    if (String(session.status || '').trim().toLowerCase() === 'executing') {
+      continue;
+    }
     if (session.executionRequestedAt || session.completionRequestedAt) {
       session.status = 'queued';
     }

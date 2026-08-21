@@ -112,7 +112,7 @@ async function main() {
     SANTACLAWZ_SAFE_START_DELAY_MS: '600000',
     AUTO_START_LOCAL_EXECUTION_AGENTS: 'false',
     AUTO_SEED_DEFAULT_AGENTS: 'false',
-    EXECUTION_WATCHDOG_ENABLED: 'false',
+    EXECUTION_WATCHDOG_ENABLED: 'true',
     ETHEREUM_CONFIRMATION_INDEXER_ENABLED: 'false',
     ETHEREUM_SHADOW_RELAYER_ENABLED: 'false',
     MISSION_BOUND_AUTH_SECRET: 'native-runner-extension-test-secret'
@@ -174,7 +174,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.4.0-test',
+        extensionVersion: '0.4.1-test',
         extensionId: 'test-extension-id'
       }
     });
@@ -1013,6 +1013,125 @@ async function main() {
     });
     if (cancelledRestart.response.status !== 409 || cancelledRestart.data?.error !== 'execution_cancelled') {
       throw new Error(`cancelled_execution_restarted:${cancelledRestart.response.status}:${JSON.stringify(cancelledRestart.data)}`);
+    }
+
+    // A fresh second device must not keep a run alive when the device that
+    // actually claimed the browser mission stopped reporting. This prevents a
+    // different Chrome profile from masking a dead owner in the watchdog.
+    const watchdogStart = await request(baseUrl, '/connectors/sessions/start', {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        connectorId: 'browser-worker-demo-v1',
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        prompt: 'buy nature valley granola bars from amazon under $4',
+        profileSummary: {}
+      }
+    });
+    const watchdogSessionId = watchdogStart.data.session?.id;
+    if (!watchdogStart.response.ok || !watchdogSessionId) {
+      throw new Error(`watchdog_fixture_start_failed:${watchdogStart.response.status}:${JSON.stringify(watchdogStart.data)}`);
+    }
+    const watchdogMode = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/completion-mode`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: { mode: 'agent_checkout' }
+    });
+    if (!watchdogMode.response.ok) throw new Error(`watchdog_fixture_mode_failed:${watchdogMode.response.status}:${JSON.stringify(watchdogMode.data)}`);
+    const watchdogExecution = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/start-execution`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: { mode: 'agent_checkout', preferredExecutionAgentId: 'magic-city-runner-extension' }
+    });
+    if (!watchdogExecution.response.ok) throw new Error(`watchdog_fixture_execution_failed:${watchdogExecution.response.status}:${JSON.stringify(watchdogExecution.data)}`);
+    const watchdogPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1'
+    });
+    const watchdogExtensionSession = (watchdogPoll.data.sessions || []).find((entry) => entry.id === watchdogSessionId);
+    const watchdogHolderKey = crypto.generateKeyPairSync('ed25519');
+    const watchdogClaim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/claim`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        holderPublicKeyJwk: watchdogHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: watchdogExtensionSession?.extensionRunDispatch?.nonce
+      }
+    });
+    if (!watchdogClaim.response.ok || !watchdogClaim.data.claimed) {
+      throw new Error(`watchdog_fixture_claim_failed:${watchdogClaim.response.status}:${JSON.stringify(watchdogClaim.data)}`);
+    }
+    const watchdogPlan = watchdogClaim.data.session?.extensionMissionPlan;
+    const watchdogStartAction = watchdogPlan?.actions?.[0];
+    if (!watchdogPlan?.planHash || watchdogStartAction?.id !== 'open-site') {
+      throw new Error(`watchdog_fixture_plan_missing:${JSON.stringify(watchdogPlan || {})}`);
+    }
+    const watchdogCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/checkpoint`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        label: 'Watchdog fixture started',
+        missionAction: watchdogStartAction.missionAction,
+        targetUrl: watchdogPlan.startUrl,
+        planHash: watchdogPlan.planHash,
+        planActionId: watchdogStartAction.id,
+        planActionStatus: 'completed',
+        browser: { url: watchdogPlan.startUrl, title: 'Amazon search' },
+        proofOfPossession: buildPopProof({
+          keyPair: watchdogHolderKey,
+          session: watchdogClaim.data.session,
+          action: watchdogStartAction.missionAction,
+          targetUrl: watchdogPlan.startUrl
+        })
+      }
+    });
+    if (!watchdogCheckpoint.response.ok || watchdogCheckpoint.data.session?.status !== 'executing') {
+      throw new Error(`watchdog_fixture_checkpoint_failed:${watchdogCheckpoint.response.status}:${JSON.stringify(watchdogCheckpoint.data)}`);
+    }
+
+    await stopServer();
+    const watchdogStatePath = path.join(tmpDir, 'data', 'state.json');
+    const watchdogState = JSON.parse(fs.readFileSync(watchdogStatePath, 'utf8'));
+    const staleAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    const watchdogSession = watchdogState.connectorSessions.find((entry) => entry.id === watchdogSessionId);
+    const watchdogClaimedDeviceId = String(watchdogSession?.claimedByNativeRunnerDeviceId || '');
+    const claimedDevice = watchdogState.nativeRunnerDevices.find((device) => device.id === watchdogClaimedDeviceId);
+    if (!claimedDevice || !watchdogSession) throw new Error('watchdog_fixture_state_missing');
+    Object.assign(claimedDevice, { lastPollAt: staleAt, lastSeenAt: staleAt, updatedAt: staleAt });
+    watchdogState.nativeRunnerDevices.push({
+      ...claimedDevice,
+      id: `${claimedDevice.id}-fresh-other`,
+      tokenHash: `watchdog-fresh-${crypto.randomBytes(8).toString('hex')}`,
+      tokenLast4: 'test',
+      lastPollAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    Object.assign(watchdogSession, {
+      status: 'executing',
+      createdAt: staleAt,
+      completionRequestedAt: staleAt,
+      executionRequestedAt: staleAt,
+      claimedAt: staleAt,
+      updatedAt: staleAt,
+      executionLive: { state: 'running', label: 'fixture', createdAt: staleAt },
+      executionTrace: [{ pluginId: 'magic-city-runner-extension', label: 'fixture', state: 'running', createdAt: staleAt }]
+    });
+    fs.writeFileSync(watchdogStatePath, JSON.stringify(watchdogState));
+    child = startServer();
+    await waitForServer(baseUrl);
+    const watchdogOutcome = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}`, { cookie: auth.cookie });
+    if (!watchdogOutcome.response.ok || watchdogOutcome.data.session?.status !== 'failed'
+      || watchdogOutcome.data.session?.executionWatchdog?.lastReason !== 'executing_timeout') {
+      throw new Error(`watchdog_claimed_device_heartbeat_not_enforced:${watchdogOutcome.response.status}:${JSON.stringify(watchdogOutcome.data)}`);
     }
 
     console.log('native-runner extension pairing regression passed');

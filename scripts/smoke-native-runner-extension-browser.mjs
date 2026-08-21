@@ -687,6 +687,10 @@ async function main() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-extension-browser-'));
   let context = null;
   let server = null;
+  // Playwright's browser protocol promises are intentionally unref'd. Keep
+  // Node alive until the assertions below resolve instead of letting a quiet
+  // MV3 startup make the smoke exit before it exercises any scenario.
+  const keepAlive = setInterval(() => {}, 1_000);
   try {
     const certificate = createCertificate(tmpDir);
     const checkpoints = [];
@@ -846,7 +850,8 @@ async function main() {
       args: ['--ignore-certificate-errors', `--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`]
     };
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
-    let worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    await waitFor(() => context.serviceWorkers()[0], 15_000);
+    let worker = context.serviceWorkers()[0];
     const extensionId = new URL(worker.url()).host;
     let popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -858,6 +863,145 @@ async function main() {
       console.error(`pairing_status_timeout:${status}`);
       throw error;
     });
+    if (process.env.MAGIC_CITY_BROWSER_SMOKE_FOCUS === 'recovery') {
+      const runRecoveryScenario = async ({ id, startPath, action, selectedCandidate = null, checkoutProfile = null, assertCheckpoint }) => {
+        checkpoints.length = 0;
+        fulfillment = null;
+        const page = await context.newPage();
+        await page.goto(`${baseUrl}${startPath}`);
+        const tab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+          tabs.find((candidate) => candidate.url === url) || null), page.url());
+        if (!tab?.id) fail(`browser_extension_${id}_tab_missing`);
+        const recoveryPlan = rehashExtensionPlan({
+          ...plan,
+          planId: `mplan_${id}`,
+          startUrl: page.url(),
+          limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+          actions: [action, { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'recovery_smoke' }]
+        });
+        session = {
+          ...session,
+          id,
+          status: 'claimed',
+          claimedByPluginId: 'magic-city-runner-extension',
+          fulfillment: null,
+          missionBoundAuth: { ...session.missionBoundAuth, subject: { sessionId: id } },
+          extensionMissionPlan: recoveryPlan,
+          extensionMissionPlanState: { planHash: recoveryPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+          missionBoundaryLatestHash: null,
+          missionBoundaryEventCount: 0
+        };
+        if (checkoutProfile) {
+          await popup.evaluate(({ sessionId, profile }) => new Promise((resolve) => {
+            chrome.storage.local.get(['localCheckoutProfiles'], (stored) => {
+              chrome.storage.local.set({
+                localCheckoutProfiles: {
+                  ...(stored.localCheckoutProfiles || {}),
+                  [sessionId]: { profile, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+                }
+              }, resolve);
+            });
+          }), { sessionId: id, profile: checkoutProfile });
+        }
+        await popup.evaluate(({ sessionId, tabId, planHash, action: interruptedAction, selected }) => new Promise((resolve) => {
+          chrome.storage.local.get(['activeMissionTabs'], (stored) => {
+            chrome.storage.local.set({
+              activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+              activeSessionId: sessionId,
+              activeRun: {
+                sessionId,
+                planHash,
+                phase: 'executing_step',
+                tabId,
+                actionId: interruptedAction.id,
+                actionIndex: 0,
+                nextActionIndex: 0,
+                selectedCandidate: selected,
+                startedAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              }
+            }, () => {
+              chrome.alarms.create('magic-city-runner-resume', { when: Date.now() + 400 });
+              resolve();
+            });
+          });
+        }), { sessionId: id, tabId: tab.id, planHash: recoveryPlan.planHash, action, selected: selectedCandidate });
+        const cdp = await context.newCDPSession(page);
+        await cdp.send('ServiceWorker.enable');
+        await cdp.send('ServiceWorker.stopAllWorkers');
+        await waitFor(() => Boolean(fulfillment), 12_000);
+        const checkpoint = checkpoints.find((entry) => entry.planActionId === action.id);
+        assertCheckpoint(checkpoint, fulfillment);
+        await page.close();
+      };
+      await runRecoveryScenario({
+        id: 'browser-smoke-cart-recovery-session',
+        startPath: '/cart',
+        action: {
+          id: 'prepare-cart', type: 'click_intent', missionAction: 'prepare_cart', intent: 'add_to_cart',
+          query: 'test gadget', requiredBasketItem: true, expectedMilestone: 'cart_confirmed', expectedCartItemCount: 1, maxPrice: 4
+        },
+        selectedCandidate: { title: 'Test Gadget', asin: 'BROWSER-SMOKE-ASIN', price: 3.5 },
+        assertCheckpoint: (checkpoint) => {
+          if (checkpoint?.browser?.runnerStep?.recoveredFromInterruption !== true || !checkpoint?.verifiedMilestones?.includes('cart_confirmed')) {
+            fail(`browser_extension_cart_recovery_not_verified:${JSON.stringify({ checkpoint, fulfillment })}`);
+          }
+        }
+      });
+      await runRecoveryScenario({
+        id: 'browser-smoke-payment-recovery-session',
+        startPath: '/checkout/pay-confirm',
+        action: {
+          id: 'fill-checkout-profile', type: 'fill_checkout_profile', missionAction: 'fill_safe_fields',
+          expectedMilestone: 'checkout_profile_verified', primeRequired: true
+        },
+        checkoutProfile: {
+          contactName: 'Test User', streetAddress: '1 Magic City Way', shippingCity: 'San Francisco',
+          shippingState: 'CA', zipCode: '94107', contactPhone: '4155550100',
+          billingStreetAddress: '99 Billing Plaza', billingZipCode: '10001', paymentCardLast4: '6383'
+        },
+        assertCheckpoint: (checkpoint) => {
+          if (checkpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
+            || !checkpoint?.verifiedMilestones?.includes('checkout_profile_verified')) {
+            fail(`browser_extension_payment_recovery_not_verified:${JSON.stringify({ checkpoint, fulfillment })}`);
+          }
+        }
+      });
+      await runRecoveryScenario({
+        id: 'browser-smoke-checkout-recovery-session',
+        startPath: '/checkout/p/p-106-7044535-6467434/spc?pipelineType=Chewbacca&referrer=spc',
+        action: {
+          id: 'open-checkout', type: 'click_intent', missionAction: 'browser_click', intent: 'checkout',
+          expectedMilestone: 'checkout_open'
+        },
+        assertCheckpoint: (checkpoint) => {
+          if (checkpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
+            || !checkpoint?.verifiedMilestones?.includes('checkout_open')) {
+            fail(`browser_extension_checkout_recovery_not_verified:${JSON.stringify({ checkpoint, fulfillment })}`);
+          }
+        }
+      });
+      await runRecoveryScenario({
+        id: 'browser-smoke-final-recovery-session',
+        startPath: '/checkout/order-confirmation',
+        action: {
+          id: 'submit-final-order', type: 'final_submit', missionAction: 'final_submit', autoSubmitAfterVerifiedCheckout: true,
+          expectedMilestone: 'final_submit_requested', maxPrice: 4
+        },
+        assertCheckpoint: (checkpoint) => {
+          if (checkpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
+            || checkpoint?.browser?.finalSubmitRequested !== true
+            || checkpoint?.browser?.orderSubmitted !== true
+            || !checkpoint?.verifiedMilestones?.includes('final_submit_requested')) {
+            fail(`browser_extension_final_recovery_not_verified:${JSON.stringify({ checkpoint, fulfillment })}`);
+          }
+        }
+      });
+      recordPurchaseScenario('Forced MV3 restart recovers cart, checkout, payment confirmation, and final-order mutations', { scenarios: 4 });
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner focused recovery smoke passed');
+      return;
+    }
     const commandPage = async (page, message) => {
       const tab = await worker.evaluate(async (url) => {
         const tabs = await chrome.tabs.query({});
@@ -1249,6 +1393,178 @@ async function main() {
       steps: checkpoints.map((checkpoint) => checkpoint.planActionId),
       stopState: fulfillment.result?.browserExecution?.stopState
     });
+
+    // Simulate an MV3 worker suspension immediately after Amazon accepted an
+    // add-to-cart click. The persisted candidate identity must let the resumed
+    // worker verify the cart and checkpoint the existing mutation, never click
+    // Add to cart a second time.
+    const recoveredCartSessionId = 'browser-smoke-cart-recovery-session';
+    const recoveredCartPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-cart-recovery-session',
+      startUrl: `${baseUrl}/cart`,
+      actions: [
+        {
+          id: 'prepare-cart',
+          type: 'click_intent',
+          missionAction: 'prepare_cart',
+          intent: 'add_to_cart',
+          query: 'test gadget',
+          requiredBasketItem: true,
+          expectedMilestone: 'cart_confirmed',
+          expectedCartItemCount: 1,
+          maxPrice: 4
+        },
+        { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'cart_recovered' }
+      ]
+    });
+    checkpoints.length = 0;
+    fulfillment = null;
+    await retainedTargetPage.goto(`${baseUrl}/cart`);
+    const recoveredCartTab = await worker.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+      tabs.find((candidate) => candidate.url === url) || null), retainedTargetPage.url());
+    if (!recoveredCartTab?.id) fail('browser_extension_cart_recovery_tab_missing');
+    session = {
+      ...session,
+      id: recoveredCartSessionId,
+      status: 'claimed',
+      claimedByPluginId: 'magic-city-runner-extension',
+      fulfillment: null,
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        subject: { sessionId: recoveredCartSessionId }
+      },
+      extensionMissionPlan: recoveredCartPlan,
+      extensionMissionPlanState: { planHash: recoveredCartPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    await worker.evaluate(({ sessionId, tabId, planHash }) => new Promise((resolve) => {
+      chrome.storage.local.get(['activeMissionTabs'], (stored) => {
+        chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+          activeSessionId: sessionId,
+          activeRun: {
+            sessionId,
+            planHash,
+            phase: 'executing_step',
+            tabId,
+            actionId: 'prepare-cart',
+            actionIndex: 0,
+            nextActionIndex: 0,
+            selectedCandidate: { title: 'Test Gadget', asin: 'BROWSER-SMOKE-ASIN', price: 3.5 },
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        }, () => {
+          chrome.alarms.create('magic-city-runner-resume', { when: Date.now() + 500 });
+          resolve();
+        });
+      });
+    }), { sessionId: recoveredCartSessionId, tabId: recoveredCartTab.id, planHash: recoveredCartPlan.planHash });
+    const cartRecoveryCdp = await context.newCDPSession(retainedTargetPage);
+    await cartRecoveryCdp.send('ServiceWorker.enable');
+    await cartRecoveryCdp.send('ServiceWorker.stopAllWorkers');
+    try {
+      await waitFor(() => Boolean(fulfillment), 20_000);
+    } catch {
+      fail(`browser_extension_cart_recovery_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
+    }
+    const recoveredCartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'prepare-cart');
+    if (recoveredCartCheckpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
+      || !Array.isArray(recoveredCartCheckpoint?.verifiedMilestones)
+      || !recoveredCartCheckpoint.verifiedMilestones.includes('cart_confirmed')) {
+      fail(`browser_extension_cart_recovery_not_verified:${JSON.stringify({ fulfillment, checkpoints })}`);
+    }
+    recordPurchaseScenario('MV3 restart after cart mutation verifies the bound cart item without replay', {
+      recovered: recoveredCartCheckpoint.browser.runnerStep.recoveredFromInterruption,
+      milestones: recoveredCartCheckpoint.verifiedMilestones
+    });
+
+    // The final-order equivalent is just as important: once the merchant has
+    // confirmed an order, a resumed worker must preserve that fact rather than
+    // retrying a no-longer-visible purchase control.
+    const recoveredFinalSessionId = 'browser-smoke-final-recovery-session';
+    const recoveredFinalPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-final-recovery-session',
+      startUrl: `${baseUrl}/checkout/order-confirmation`,
+      limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+      actions: [
+        {
+          id: 'submit-final-order',
+          type: 'final_submit',
+          missionAction: 'final_submit',
+          autoSubmitAfterVerifiedCheckout: true,
+          expectedMilestone: 'final_submit_requested',
+          maxPrice: 4
+        },
+        { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'order_confirmed' }
+      ]
+    });
+    checkpoints.length = 0;
+    fulfillment = null;
+    await retainedTargetPage.goto(`${baseUrl}/checkout/order-confirmation`);
+    const recoveredFinalTab = await worker.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+      tabs.find((candidate) => candidate.url === url) || null), retainedTargetPage.url());
+    if (!recoveredFinalTab?.id) fail('browser_extension_final_recovery_tab_missing');
+    session = {
+      ...session,
+      id: recoveredFinalSessionId,
+      status: 'claimed',
+      claimedByPluginId: 'magic-city-runner-extension',
+      fulfillment: null,
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        subject: { sessionId: recoveredFinalSessionId }
+      },
+      extensionMissionPlan: recoveredFinalPlan,
+      extensionMissionPlanState: { planHash: recoveredFinalPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    await worker.evaluate(({ sessionId, tabId, planHash }) => new Promise((resolve) => {
+      chrome.storage.local.get(['activeMissionTabs'], (stored) => {
+        chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+          activeSessionId: sessionId,
+          activeRun: {
+            sessionId,
+            planHash,
+            phase: 'executing_step',
+            tabId,
+            actionId: 'submit-final-order',
+            actionIndex: 0,
+            nextActionIndex: 0,
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        }, () => {
+          chrome.alarms.create('magic-city-runner-resume', { when: Date.now() + 500 });
+          resolve();
+        });
+      });
+    }), { sessionId: recoveredFinalSessionId, tabId: recoveredFinalTab.id, planHash: recoveredFinalPlan.planHash });
+    const finalRecoveryCdp = await context.newCDPSession(retainedTargetPage);
+    await finalRecoveryCdp.send('ServiceWorker.enable');
+    await finalRecoveryCdp.send('ServiceWorker.stopAllWorkers');
+    try {
+      await waitFor(() => Boolean(fulfillment), 20_000);
+    } catch {
+      fail(`browser_extension_final_recovery_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
+    }
+    const recoveredFinalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    if (recoveredFinalCheckpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
+      || recoveredFinalCheckpoint?.browser?.finalSubmitRequested !== true
+      || recoveredFinalCheckpoint?.browser?.orderSubmitted !== true
+      || !recoveredFinalCheckpoint?.verifiedMilestones?.includes('final_submit_requested')) {
+      fail(`browser_extension_final_recovery_not_verified:${JSON.stringify({ fulfillment, checkpoints })}`);
+    }
+    recordPurchaseScenario('MV3 restart after merchant order confirmation preserves final-submit proof', {
+      recovered: recoveredFinalCheckpoint.browser.runnerStep.recoveredFromInterruption,
+      orderSubmitted: recoveredFinalCheckpoint.browser.orderSubmitted
+    });
+
     await retainedTargetPage.close();
     await externalWakePage.close();
     checkpoints.splice(0, checkpoints.length, ...primaryCheckpoints);
@@ -2511,13 +2827,16 @@ async function main() {
     }, null, 2));
     console.log('native-runner browser extension smoke passed');
   } finally {
+    clearInterval(keepAlive);
     await context?.close();
     await new Promise((resolve) => server?.close(resolve) ?? resolve());
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
-main().catch((error) => {
+try {
+  await main();
+} catch (error) {
   console.error(error?.stack || error?.message || error);
   process.exitCode = 1;
-});
+}

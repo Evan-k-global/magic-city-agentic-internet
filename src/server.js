@@ -712,7 +712,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.0'
+  '0.4.1'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -19654,7 +19654,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: 'execution_not_active', session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId) });
       }
       if (pluginAuth.type === 'native_runner') {
-        touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice.id, {
+        touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice, {
           lastSeenAt: new Date().toISOString()
         });
         recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {

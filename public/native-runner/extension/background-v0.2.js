@@ -412,6 +412,19 @@ async function saveConfig(patch = {}) {
   return getConfig();
 }
 
+function normalizeActiveRunCandidate(candidate = null) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const title = String(candidate.title || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+  const asin = String(candidate.asin || '').trim().slice(0, 32);
+  const price = Number(candidate.price);
+  if (!title && !asin) return null;
+  return {
+    title: title || null,
+    asin: asin || null,
+    price: Number.isFinite(price) && price > 0 ? price : null
+  };
+}
+
 function normalizeActiveRun(entry = null) {
   const sessionId = String(entry?.sessionId || '').trim();
   if (!sessionId) return null;
@@ -423,6 +436,7 @@ function normalizeActiveRun(entry = null) {
     actionId: String(entry?.actionId || '').trim() || null,
     actionIndex: Number.isInteger(Number(entry?.actionIndex)) ? Number(entry.actionIndex) : null,
     nextActionIndex: Number.isInteger(Number(entry?.nextActionIndex)) ? Number(entry.nextActionIndex) : null,
+    selectedCandidate: normalizeActiveRunCandidate(entry?.selectedCandidate),
     waitExpiresAt: String(entry?.waitExpiresAt || '').trim() || null,
     startedAt: String(entry?.startedAt || '').trim() || new Date().toISOString(),
     updatedAt: String(entry?.updatedAt || '').trim() || new Date().toISOString()
@@ -900,15 +914,42 @@ async function withTimeout(task, timeoutMs, label) {
   }
 }
 
-async function tabCommand(tabId, command, { injectionTimeoutMs = TAB_COMMAND_TIMEOUT_MS, responseTimeoutMs = TAB_COMMAND_TIMEOUT_MS } = {}) {
+function remainingDeadlineMs(deadlineMs = 0) {
+  const deadline = Number(deadlineMs || 0);
+  if (!Number.isFinite(deadline) || deadline <= 0) return null;
+  return Math.max(0, deadline - Date.now());
+}
+
+async function tabCommand(tabId, command, {
+  injectionTimeoutMs = TAB_COMMAND_TIMEOUT_MS,
+  responseTimeoutMs = TAB_COMMAND_TIMEOUT_MS,
+  deadlineMs = 0
+} = {}) {
+  const remainingBeforeInjectionMs = remainingDeadlineMs(deadlineMs);
+  if (remainingBeforeInjectionMs != null && remainingBeforeInjectionMs < 1) {
+    throw new Error('browser_command_deadline_exceeded');
+  }
+  // When a caller supplies an absolute deadline, reserve enough time for the
+  // content-script response instead of letting injection consume the whole
+  // budget. The second timeout is recalculated after injection completes.
+  const boundedInjectionTimeoutMs = remainingBeforeInjectionMs == null
+    ? injectionTimeoutMs
+    : Math.max(1, Math.min(injectionTimeoutMs, Math.floor(remainingBeforeInjectionMs * 0.45)));
   await withTimeout(
     () => chrome.scripting.executeScript({ target: { tabId }, files: [EXECUTOR_FILE] }),
-    injectionTimeoutMs,
+    boundedInjectionTimeoutMs,
     'browser_script_injection_timeout'
   );
+  const remainingBeforeResponseMs = remainingDeadlineMs(deadlineMs);
+  if (remainingBeforeResponseMs != null && remainingBeforeResponseMs < 1) {
+    throw new Error('browser_command_deadline_exceeded');
+  }
+  const boundedResponseTimeoutMs = remainingBeforeResponseMs == null
+    ? responseTimeoutMs
+    : Math.max(1, Math.min(responseTimeoutMs, remainingBeforeResponseMs));
   return withTimeout(
     () => chrome.tabs.sendMessage(tabId, command),
-    responseTimeoutMs,
+    boundedResponseTimeoutMs,
     'browser_content_script_timeout'
   );
 }
@@ -1122,21 +1163,28 @@ async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null) {
   return { advanced: false, outcome: null, state: null, attempts: 3 };
 }
 
-async function tabBrowserState(tabId, checkoutProfile = null, { attempts = 5, delayMs = 350 } = {}) {
+async function tabBrowserState(tabId, checkoutProfile = null, {
+  attempts = 5,
+  delayMs = 350,
+  deadlineMs = 0
+} = {}) {
   let lastError = null;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (remainingDeadlineMs(deadlineMs) === 0) break;
     try {
       return await tabCommand(
         tabId,
         { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile },
-        { injectionTimeoutMs: 6_000, responseTimeoutMs: 8_000 }
+        { injectionTimeoutMs: 6_000, responseTimeoutMs: 8_000, deadlineMs }
       );
     } catch (error) {
       lastError = error;
-      await delay(delayMs);
+      const remainingMs = remainingDeadlineMs(deadlineMs);
+      if (remainingMs === 0) break;
+      await delay(remainingMs == null ? delayMs : Math.min(delayMs, remainingMs));
     }
   }
-  throw lastError || new Error('browser_state_unavailable');
+  throw lastError || new Error(deadlineMs ? 'browser_state_deadline_exceeded' : 'browser_state_unavailable');
 }
 
 async function waitForPurchasableProduct(tabId, checkoutProfile = null, { timeoutMs = 4_500, intervalMs = 350 } = {}) {
@@ -1441,7 +1489,7 @@ function normalizeMissionText(value = '') {
 
 function missionQueryTokens(action = {}) {
   const stopWords = new Set(['buy', 'from', 'amazon', 'com', 'please', 'max', 'spend', 'under', 'for', 'the', 'a', 'an', 'with']);
-  return normalizeMissionText(action.query || action.selectionBrief || action.item || '')
+  return normalizeMissionText(action.query || action.selectionBrief || action.item || action.boundCandidate?.title || '')
     .split(/\s+/)
     .filter((token) => token && !stopWords.has(token));
 }
@@ -1865,12 +1913,22 @@ function actionWasSatisfiedBeforeRestart(action = {}, report = {}) {
   if (expected === 'candidate_selected') {
     return Boolean(signals.candidateSelected || cartStateVerifiesCandidateSelection(report, action));
   }
-  if (expected === 'cart_confirmed') {
+  const isCartMutation = action.type === 'click_intent' && action.intent === 'add_to_cart';
+  if (expected === 'cart_confirmed' || isCartMutation) {
     const minimumCount = Math.max(1, Number(action.expectedCartItemCount || 1));
-    return Boolean(signals.cartVisible && Number.isFinite(cartCount) && cartCount >= minimumCount);
+    if (!signals.cartVisible || !Number.isFinite(cartCount) || cartCount < minimumCount) return false;
+    // A restarted add-to-cart step must prove the same selected product is in
+    // the cart. A generic non-empty cart is never enough to skip the click.
+    return !isCartMutation || cartStateVerifiesCandidateSelection(report, action);
   }
   if (expected === 'checkout_open') return Boolean(signals.checkoutOpen);
-  if (expected === 'checkout_profile_verified') return Boolean(signals.checkoutOpen && signals.checkoutProfileVerified);
+  if (expected === 'checkout_profile_verified') {
+    // The payment selector can already display a matching card before its
+    // "Use this payment method" confirmation has committed. On recovery, only
+    // treat the profile action as satisfied once Amazon has advanced past that
+    // selector to its final review state.
+    return Boolean(signals.checkoutOpen && signals.checkoutProfileVerified && signals.finalReviewReady);
+  }
   if (expected === 'final_review_ready') return Boolean(signals.checkoutOpen && signals.finalReviewReady);
   if (expected === 'final_submit_requested') return Boolean(report.orderSubmitted || signals.orderSubmitted);
   return false;
@@ -1902,7 +1960,8 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       checkoutProfile
     }, {
       injectionTimeoutMs: Math.max(750, Math.min(4_000, remainingBeforeCommandMs - 400)),
-      responseTimeoutMs: Math.max(750, Math.min(4_000, remainingBeforeCommandMs - 400))
+      responseTimeoutMs: Math.max(750, Math.min(4_000, remainingBeforeCommandMs - 400)),
+      deadlineMs: reconcileDeadline
     });
     latestOutcome = outcome;
     merged.completed = Boolean(outcome?.completed);
@@ -1953,8 +2012,9 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
     const remainingForStateMs = reconcileDeadline - Date.now();
     merged.state = outcome.state || (remainingForStateMs > 900
       ? await tabBrowserState(tabId, checkoutProfile, {
-          attempts: Math.min(2, Math.max(1, Math.floor(remainingForStateMs / 1_200))),
-          delayMs: 160
+        attempts: Math.min(2, Math.max(1, Math.floor(remainingForStateMs / 1_200))),
+        delayMs: 160,
+        deadlineMs: reconcileDeadline
         }).catch(() => null)
       : null);
     return { ...outcome, ...merged, state: merged.state || outcome.state };
@@ -1962,8 +2022,9 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
   const remainingForFinalStateMs = reconcileDeadline - Date.now();
   merged.state = remainingForFinalStateMs > 900
     ? await tabBrowserState(tabId, checkoutProfile, {
-        attempts: Math.min(2, Math.max(1, Math.floor(remainingForFinalStateMs / 1_200))),
-        delayMs: 160
+      attempts: Math.min(2, Math.max(1, Math.floor(remainingForFinalStateMs / 1_200))),
+      delayMs: 160,
+      deadlineMs: reconcileDeadline
       }).catch(() => latestOutcome?.state || null)
     : latestOutcome?.state || null;
   return {
@@ -2398,8 +2459,15 @@ async function runSession(rawSession) {
   let currentActionStartedAt = 0;
   let retainActiveRun = false;
   try {
+    // Read durable state before claiming. An MV3 restart may be resuming an
+    // action after the browser accepted its click but before a checkpoint was
+    // recorded, so overwriting this marker would make the action replayable.
+    const persistedActiveRun = await getActiveRun();
+    const resumingPersistedRun = Boolean(persistedActiveRun?.sessionId === rawSession.id);
     session = await claimSession(rawSession);
-    await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
+    if (!resumingPersistedRun) {
+      await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
+    }
     // One bounded recovery opportunity protects an already-authorized run
     // from MV3 service-worker suspension without turning alarms into a
     // background mission discovery loop.
@@ -2414,7 +2482,7 @@ async function runSession(rawSession) {
     const planState = session.extensionMissionPlanState?.planHash === plan.planHash
       ? session.extensionMissionPlanState
       : { nextActionIndex: 0 };
-    const interruptedRun = await getActiveRun();
+    const interruptedRun = resumingPersistedRun ? persistedActiveRun : await getActiveRun();
     const resumesInterruptedAction = Boolean(
       interruptedRun?.sessionId === session.id
       && interruptedRun.phase === 'executing_step'
@@ -2492,6 +2560,9 @@ async function runSession(rawSession) {
       localCheckoutProfileAvailable: checkoutProfileAvailable,
       directSearchResultCart: false
     };
+    if (interruptedRun?.selectedCandidate) {
+      progress.selectedCandidate = normalizeActiveRunCandidate(interruptedRun.selectedCandidate);
+    }
     const pendingPaymentWait = await getPendingPaymentWait(session.id);
     if (pendingPaymentWait && tab) {
       if (checkoutProfileExpected && !checkoutProfileAvailable) {
@@ -2529,6 +2600,9 @@ async function runSession(rawSession) {
       currentAction = action;
       currentActionStartedAt = Date.now();
       const durableRun = await getActiveRun();
+      if (!progress.selectedCandidate && durableRun?.selectedCandidate) {
+        progress.selectedCandidate = normalizeActiveRunCandidate(durableRun.selectedCandidate);
+      }
       const recoveringInterruptedAction = Boolean(
         durableRun?.sessionId === session.id
         && durableRun.phase === 'executing_step'
@@ -2541,7 +2615,8 @@ async function runSession(rawSession) {
         tabId: Number(tab?.id || 0) || null,
         actionId: action.id,
         actionIndex: index,
-        nextActionIndex: index
+        nextActionIndex: index,
+        selectedCandidate: progress.selectedCandidate
       });
       const presentation = planActionPresentation(action);
       await assertActive({ force: action.type === 'final_submit' });
@@ -2576,7 +2651,13 @@ async function runSession(rawSession) {
       const executionAction = action.type === 'click_intent'
         && action.intent === 'add_to_cart'
         && progress.selectedCandidate
-        ? { ...action, boundCandidate: progress.selectedCandidate }
+        ? {
+            ...action,
+            boundCandidate: progress.selectedCandidate,
+            maxPrice: Number.isFinite(Number(action.maxPrice))
+              ? Number(action.maxPrice)
+              : Number(plan.maxPrice || 0) || undefined
+          }
         : action;
       const recoveredState = recoveringInterruptedAction && tab
         ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
@@ -2597,6 +2678,8 @@ async function runSession(rawSession) {
               completed: true,
               skipped: false,
               recoveredFromInterruption: true,
+              finalSubmitRequested: action.type === 'final_submit' && Boolean(recoveredState?.orderSubmitted || recoveredState?.milestoneSignals?.orderSubmitted),
+              orderSubmitted: action.type === 'final_submit' && Boolean(recoveredState?.orderSubmitted || recoveredState?.milestoneSignals?.orderSubmitted),
               reason: 'Recovered the interrupted browser step from its already-verified merchant state.',
               state: recoveredState
             }
@@ -2605,6 +2688,13 @@ async function runSession(rawSession) {
             BROWSER_ACTION_TIMEOUT_MS,
             `browser_step_timeout:${action.id}`
           );
+      if (resumesInterruptedAction && outcome?.completed && !outcome.recoveredFromInterruption) {
+        outcome = {
+          ...outcome,
+          recoveredFromInterruption: true,
+          reason: outcome.reason || 'Resumed the interrupted browser step and verified its merchant result.'
+        };
+      }
       const actionDurationMs = Date.now() - currentActionStartedAt;
       if (action.type === 'select_candidate' && outcome?.selected) {
         progress.selectedCandidate = {
@@ -2778,7 +2868,8 @@ async function runSession(rawSession) {
         tabId: Number(tab?.id || 0) || null,
         actionId: null,
         actionIndex: null,
-        nextActionIndex: index + 1
+        nextActionIndex: index + 1,
+        selectedCandidate: progress.selectedCandidate
       });
       if (action.type === 'pause') {
         const boundary = stopForBoundary(report, plan, action);
@@ -2950,7 +3041,8 @@ async function resumeActiveRun() {
   const poll = await pollSessions();
   const session = poll.sessions.find((candidate) => String(candidate?.id || '') === sessionId);
   if (!session || !isRunnableSession(session)) {
-    await saveConfig({ activeSessionId: '' });
+    await clearPendingPaymentWait(sessionId).catch(() => null);
+    await clearActiveRun(sessionId);
     return { resumed: false, reason: 'active_run_no_longer_runnable', sessionId };
   }
   return runSession(session);
