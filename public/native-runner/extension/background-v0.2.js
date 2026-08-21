@@ -14,6 +14,9 @@ const API_TIMEOUT_MS = 20_000;
 const RUNNER_STATUS_TIMEOUT_MS = 4_000;
 const RUNNER_STATUS_LEASE_MS = 3_000;
 const RUNNER_RESUME_DELAY_MS = 5_000;
+const MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 90_000;
+const MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 30_000;
+const MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 120_000;
 // Keep exactly one recovery wake for an already approved mission. Chrome can
 // suspend an MV3 worker between two valid checkpoints; this lets it resume the
 // signed next action without turning the runner into a background crawler.
@@ -336,7 +339,20 @@ async function validatePlanForSession(session = {}) {
       || Number(action.maxPrice) <= 0
       || action.missionAction !== 'final_submit'
     )) throw new Error('mission_plan_final_submit_invalid');
+    if (action.awaitMerchantOrderConfirmation === true && (
+      action.type !== 'inspect'
+      || action.expectedMilestone !== 'order_submitted'
+      || !Number.isFinite(Number(action.merchantConfirmationTimeoutMs))
+      || Number(action.merchantConfirmationTimeoutMs) < MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
+      || Number(action.merchantConfirmationTimeoutMs) > MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
+    )) throw new Error('mission_plan_merchant_confirmation_invalid');
   }
+  const finalSubmitIndex = plan.actions.findIndex((action) => action.type === 'final_submit');
+  if (finalSubmitIndex >= 0 && !plan.actions.slice(finalSubmitIndex + 1).some((action) => (
+    action.type === 'inspect'
+    && action.awaitMerchantOrderConfirmation === true
+    && action.expectedMilestone === 'order_submitted'
+  ))) throw new Error('mission_plan_merchant_confirmation_missing');
   const { planHash, ...unsignedPlan } = plan;
   if (await hashPlan(unsignedPlan) !== planHash) throw new Error('mission_plan_hash_invalid');
   return plan;
@@ -438,6 +454,9 @@ function normalizeActiveRun(entry = null) {
     nextActionIndex: Number.isInteger(Number(entry?.nextActionIndex)) ? Number(entry.nextActionIndex) : null,
     selectedCandidate: normalizeActiveRunCandidate(entry?.selectedCandidate),
     waitExpiresAt: String(entry?.waitExpiresAt || '').trim() || null,
+    merchantConfirmationStartedAt: String(entry?.merchantConfirmationStartedAt || '').trim() || null,
+    merchantConfirmationDeadlineAt: String(entry?.merchantConfirmationDeadlineAt || '').trim() || null,
+    merchantConfirmationAttempts: Math.max(0, Number(entry?.merchantConfirmationAttempts || 0) || 0),
     startedAt: String(entry?.startedAt || '').trim() || new Date().toISOString(),
     updatedAt: String(entry?.updatedAt || '').trim() || new Date().toISOString()
   };
@@ -1192,7 +1211,24 @@ async function waitForMerchantOrderConfirmation(tabId, checkoutProfile = null, a
   intervalMs = 450
 } = {}) {
   const startedAt = Date.now();
-  const deadline = startedAt + Math.max(3_000, Number(timeoutMs) || 14_000);
+  const requestedTimeoutMs = Number(timeoutMs);
+  const observationWindowMs = Number.isFinite(requestedTimeoutMs)
+    ? Math.max(0, requestedTimeoutMs)
+    : 14_000;
+  if (observationWindowMs === 0) {
+    return {
+      completed: false,
+      finalSubmitRequested: true,
+      orderSubmitted: false,
+      merchantOrderConfirmation: {
+        confirmed: false,
+        reason: 'merchant_confirmation_deadline_expired',
+        waitMs: 0
+      },
+      state: null
+    };
+  }
+  const deadline = startedAt + observationWindowMs;
   let latest = null;
   do {
     if (typeof assertActive === 'function') await assertActive();
@@ -1865,7 +1901,9 @@ async function reportAndStop(session, plan, report, note = '') {
     report.fulfillmentStatus = 'fulfilled';
   } else if (submitRequested) {
     report.stopState = 'final_submit_unconfirmed';
-    report.stopEvidence = 'The final-order click was issued, but Amazon did not confirm the order. The local tab was preserved; no completion receipt was issued.';
+    report.stopEvidence = report.merchantOrderConfirmation?.reason === 'merchant_confirmation_deadline_expired'
+      ? 'Amazon did not show an order confirmation within the signed confirmation window after the final-order click. The local tab was preserved; no completion receipt was issued.'
+      : 'The final-order click was issued, but Amazon did not confirm the order. The local tab was preserved; no completion receipt was issued.';
     report.fundingDisposition = 'release';
     report.fulfillmentStatus = 'failed';
   } else if (boundary) {
@@ -2165,7 +2203,11 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
   }
   if (action.type === 'inspect' && action.awaitMerchantOrderConfirmation === true) {
-    const outcome = await waitForMerchantOrderConfirmation(tabId, checkoutProfile, assertActive);
+    const deadlineAt = Date.parse(String(action.merchantConfirmationDeadlineAt || ''));
+    const remainingMs = Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : null;
+    const outcome = await waitForMerchantOrderConfirmation(tabId, checkoutProfile, assertActive, {
+      timeoutMs: remainingMs == null ? 14_000 : Math.min(14_000, remainingMs)
+    });
     return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
   }
   if (action.type === 'inspect' || action.type === 'pause') {
@@ -2717,7 +2759,67 @@ async function runSession(rawSession) {
               ? Number(action.maxPrice)
               : Number(plan.maxPrice || 0) || undefined
           }
-        : action;
+        : action.awaitMerchantOrderConfirmation === true
+          ? {
+              ...action,
+              merchantConfirmationDeadlineAt: (() => {
+                const persistedDeadline = Date.parse(String(durableRun?.merchantConfirmationDeadlineAt || ''));
+                if (Number.isFinite(persistedDeadline)) return new Date(persistedDeadline).toISOString();
+                const signedWindowMs = Math.max(
+                  MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS,
+                  Math.min(
+                    MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS,
+                    Number(action.merchantConfirmationTimeoutMs) || MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
+                  )
+                );
+                return new Date(Date.now() + signedWindowMs).toISOString();
+              })()
+            }
+          : action;
+      if (action.awaitMerchantOrderConfirmation === true) {
+        const confirmationDeadlineAt = String(executionAction.merchantConfirmationDeadlineAt || '');
+        const confirmationDeadlineMs = Date.parse(confirmationDeadlineAt);
+        await saveActiveRun({
+          sessionId: session.id,
+          planHash: plan.planHash,
+          phase: 'awaiting_merchant_confirmation',
+          tabId: Number(tab?.id || 0) || null,
+          actionId: action.id,
+          actionIndex: index,
+          nextActionIndex: index,
+          selectedCandidate: progress.selectedCandidate,
+          merchantConfirmationStartedAt: durableRun?.merchantConfirmationStartedAt || new Date().toISOString(),
+          merchantConfirmationDeadlineAt: confirmationDeadlineAt,
+          merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0))
+        });
+        if (Number.isFinite(confirmationDeadlineMs) && confirmationDeadlineMs <= Date.now()) {
+          const state = await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null);
+          if (state?.orderSubmitted || state?.milestoneSignals?.orderSubmitted) {
+            return reportAndStop(session, plan, {
+              ...(state || {}),
+              ...progress,
+              finalSubmitRequested: true,
+              orderSubmitted: true,
+              merchantOrderConfirmation: {
+                confirmed: true,
+                observedAt: new Date().toISOString(),
+                waitMs: 0
+              }
+            });
+          }
+          return reportAndStop(session, plan, {
+            ...(state || {}),
+            ...progress,
+            finalSubmitRequested: true,
+            orderSubmitted: false,
+            merchantOrderConfirmation: {
+              confirmed: false,
+              reason: 'merchant_confirmation_deadline_expired',
+              waitMs: 0
+            }
+          });
+        }
+      }
       const recoveredState = recoveringInterruptedAction && tab
         ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
         : null;
@@ -2947,6 +3049,19 @@ async function runSession(rawSession) {
         selectedCandidate: progress.selectedCandidate
       });
       if (action.awaitMerchantOrderConfirmation === true && outcome.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
+        const confirmationDeadlineMs = Date.parse(String(executionAction.merchantConfirmationDeadlineAt || ''));
+        if (Number.isFinite(confirmationDeadlineMs) && confirmationDeadlineMs <= Date.now()) {
+          return reportAndStop(session, plan, {
+            ...report,
+            finalSubmitRequested: true,
+            orderSubmitted: false,
+            merchantOrderConfirmation: {
+              ...(outcome.merchantOrderConfirmation || {}),
+              confirmed: false,
+              reason: 'merchant_confirmation_deadline_expired'
+            }
+          });
+        }
         // The final control was clicked once. Keep this exact signed observer
         // action active and re-check only for merchant confirmation; never
         // replay the irreversible click while a navigation is still settling.
@@ -2958,7 +3073,10 @@ async function runSession(rawSession) {
           actionId: action.id,
           actionIndex: index,
           nextActionIndex: index,
-          selectedCandidate: progress.selectedCandidate
+          selectedCandidate: progress.selectedCandidate,
+          merchantConfirmationStartedAt: durableRun?.merchantConfirmationStartedAt || new Date().toISOString(),
+          merchantConfirmationDeadlineAt: executionAction.merchantConfirmationDeadlineAt || null,
+          merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0)) + 1
         });
         retainActiveRun = true;
         scheduleRunnerResume(RUNNER_RESUME_DELAY_MS);

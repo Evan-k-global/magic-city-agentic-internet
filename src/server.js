@@ -712,7 +712,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.4'
+  '0.4.5'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -2723,6 +2723,7 @@ function buildMissionContractForSession(session = {}, {
       stopBeforeFinalSubmit,
       saveMerchantCheckoutDefault: extensionPlan?.saveMerchantCheckoutDefault === true,
       requireMerchantOrderConfirmation: extensionPlan?.requireMerchantOrderConfirmation === true,
+      merchantConfirmationTimeoutMs: Math.max(0, Number(extensionPlan?.merchantConfirmationTimeoutMs || 0)),
       finalSubmitApprovalHash: finalSubmitApproval?.approvalHash || null,
       finalSubmitApprovalExpiresAt: finalSubmitApproval?.expiresAt || null,
       retailCheckoutReceiptProfile: isRetailCheckoutMission(session)

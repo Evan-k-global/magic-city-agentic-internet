@@ -36,6 +36,8 @@ assert.equal(automaticPlan.actions.at(-3)?.autoSubmitAfterVerifiedCheckout, true
 assert.equal(automaticPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
 assert.equal(automaticPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 assert.equal(automaticPlan.actions.at(-2)?.expectedMilestone, 'order_submitted');
+assert.equal(automaticPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
+assert.equal(automaticPlan.merchantConfirmationTimeoutMs, 90_000);
 
 const defaultAmazonPlan = buildBrowserExtensionMissionPlan(baseSession);
 assert.equal(validateBrowserExtensionPlan(defaultAmazonPlan).valid, true);
@@ -45,6 +47,7 @@ assert.equal(defaultAmazonPlan.requireMerchantOrderConfirmation, true);
 assert.equal(defaultAmazonPlan.actions.at(-3)?.type, 'final_submit');
 assert.equal(defaultAmazonPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
+assert.equal(defaultAmazonPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
 
 const reviewPlan = buildBrowserExtensionMissionPlan({
   ...baseSession,

@@ -4,6 +4,9 @@ export const BROWSER_EXTENSION_PLAN_SCHEMA = 'magic-city-browser-plan-v1';
 export const BROWSER_EXTENSION_PLAN_PROTOCOL = 'declarative-v1';
 
 const MAX_PLAN_ACTIONS = 64;
+const MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 90_000;
+const MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 30_000;
+const MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 120_000;
 // Each basket item needs a complete, observable loop. Eight keeps even the
 // generic-site variant below the signed plan's 64-action ceiling.
 const MAX_PLANNED_BASKET_ITEMS = 8;
@@ -497,6 +500,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   });
   const confirmMerchantOrderAction = () => buildAction('confirm-merchant-order', 'inspect', 'read_public_page', {
     awaitMerchantOrderConfirmation: true,
+    merchantConfirmationTimeoutMs: MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS,
     expectedMilestone: 'order_submitted'
   });
   const reviewSubmitActions = [
@@ -624,6 +628,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     finalApprovalPolicy: autoSubmitAfterVerifiedCheckout ? 'auto_submit_after_verified_checkout' : 'pause_before_final_approval',
     saveMerchantCheckoutDefault,
     requireMerchantOrderConfirmation: autoSubmitAfterVerifiedCheckout,
+    merchantConfirmationTimeoutMs: autoSubmitAfterVerifiedCheckout ? MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS : null,
     limits: {
       maxActions: Math.min(MAX_PLAN_ACTIONS, policyBoundActions.length),
       maxRevisions: 2,
@@ -682,7 +687,11 @@ export function validateBrowserExtensionPlan(plan = null) {
     return { valid: false, reason: 'plan_merchant_confirmation_missing' };
   }
   if (actions.some((action) => action.awaitMerchantOrderConfirmation === true && (
-    action.type !== 'inspect' || action.expectedMilestone !== 'order_submitted'
+    action.type !== 'inspect'
+    || action.expectedMilestone !== 'order_submitted'
+    || !Number.isFinite(Number(action.merchantConfirmationTimeoutMs))
+    || Number(action.merchantConfirmationTimeoutMs) < MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
+    || Number(action.merchantConfirmationTimeoutMs) > MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS
   ))) {
     return { valid: false, reason: 'plan_merchant_confirmation_invalid' };
   }

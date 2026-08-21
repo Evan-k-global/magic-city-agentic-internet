@@ -880,7 +880,18 @@ async function main() {
           planId: `mplan_${id}`,
           startUrl: page.url(),
           limits: { ...plan.limits, stopBeforeFinalSubmit: false },
-          actions: [action, { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'recovery_smoke' }]
+          actions: [
+            action,
+            ...(action.type === 'final_submit' ? [{
+              id: 'confirm-merchant-order',
+              type: 'inspect',
+              missionAction: 'read_public_page',
+              awaitMerchantOrderConfirmation: true,
+              merchantConfirmationTimeoutMs: 90_000,
+              expectedMilestone: 'order_submitted'
+            }] : []),
+            { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'recovery_smoke' }
+          ]
         });
         session = {
           ...session,
@@ -1535,6 +1546,14 @@ async function main() {
           expectedMilestone: 'final_submit_requested',
           maxPrice: 4
         },
+        {
+          id: 'confirm-merchant-order',
+          type: 'inspect',
+          missionAction: 'read_public_page',
+          awaitMerchantOrderConfirmation: true,
+          merchantConfirmationTimeoutMs: 90_000,
+          expectedMilestone: 'order_submitted'
+        },
         { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'order_confirmed' }
       ]
     });
@@ -1599,6 +1618,112 @@ async function main() {
     recordPurchaseScenario('MV3 restart after merchant order confirmation preserves final-submit proof', {
       recovered: recoveredFinalCheckpoint.browser.runnerStep.recoveredFromInterruption,
       orderSubmitted: recoveredFinalCheckpoint.browser.orderSubmitted
+    });
+
+    // An order click is irreversible. If the worker restarts while waiting for
+    // confirmation and the signed window is already exhausted, it must release
+    // the run without replaying the button and leave the merchant tab intact.
+    const unconfirmedFinalSessionId = 'browser-smoke-unconfirmed-final-session';
+    const unconfirmedFinalPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-unconfirmed-final-session',
+      startUrl: `${baseUrl}/checkout/final-review`,
+      limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+      actions: [
+        {
+          id: 'submit-final-order',
+          type: 'final_submit',
+          missionAction: 'final_submit',
+          autoSubmitAfterVerifiedCheckout: true,
+          expectedMilestone: 'final_submit_requested',
+          maxPrice: 4
+        },
+        {
+          id: 'confirm-merchant-order',
+          type: 'inspect',
+          missionAction: 'read_public_page',
+          awaitMerchantOrderConfirmation: true,
+          merchantConfirmationTimeoutMs: 90_000,
+          expectedMilestone: 'order_submitted'
+        },
+        { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'confirmation_timeout_smoke' }
+      ]
+    });
+    checkpoints.length = 0;
+    fulfillment = null;
+    await retainedTargetPage.goto(`${baseUrl}/checkout/final-review`);
+    const unconfirmedFinalTab = await worker.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+      tabs.find((candidate) => candidate.url === url) || null), retainedTargetPage.url());
+    if (!unconfirmedFinalTab?.id) fail('browser_extension_unconfirmed_final_tab_missing');
+    session = {
+      ...session,
+      id: unconfirmedFinalSessionId,
+      status: 'claimed',
+      claimedByPluginId: 'magic-city-runner-extension',
+      fulfillment: null,
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        subject: { sessionId: unconfirmedFinalSessionId }
+      },
+      extensionMissionPlan: unconfirmedFinalPlan,
+      extensionMissionPlanState: {
+        planHash: unconfirmedFinalPlan.planHash,
+        nextActionIndex: 1,
+        completedActionIds: ['submit-final-order'],
+        verifiedMilestones: ['final_submit_requested']
+      },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    await worker.evaluate(({ sessionId, tabId, planHash }) => new Promise((resolve) => {
+      chrome.storage.local.get(['activeMissionTabs'], (stored) => {
+        chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+          activeSessionId: sessionId,
+          activeRun: {
+            sessionId,
+            planHash,
+            phase: 'awaiting_merchant_confirmation',
+            tabId,
+            actionId: 'confirm-merchant-order',
+            actionIndex: 1,
+            nextActionIndex: 1,
+            merchantConfirmationStartedAt: new Date(Date.now() - 91_000).toISOString(),
+            merchantConfirmationDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+            merchantConfirmationAttempts: 4,
+            startedAt: new Date(Date.now() - 91_000).toISOString(),
+            updatedAt: new Date().toISOString()
+          }
+        }, () => {
+          chrome.alarms.create('magic-city-runner-resume', { when: Date.now() + 500 });
+          resolve();
+        });
+      });
+    }), { sessionId: unconfirmedFinalSessionId, tabId: unconfirmedFinalTab.id, planHash: unconfirmedFinalPlan.planHash });
+    const unconfirmedFinalCdp = await context.newCDPSession(retainedTargetPage);
+    await unconfirmedFinalCdp.send('ServiceWorker.enable');
+    await unconfirmedFinalCdp.send('ServiceWorker.stopAllWorkers');
+    try {
+      await waitFor(() => Boolean(fulfillment), 20_000);
+    } catch {
+      fail(`browser_extension_unconfirmed_final_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
+    }
+    const unconfirmedFinalStorage = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['activeRun'], resolve)));
+    const unconfirmedOrderSubmitted = await retainedTargetPage.evaluate(() => document.body.dataset.orderSubmitted === '1');
+    if (fulfillment.status !== 'failed'
+      || fulfillment.fundingDisposition !== 'release'
+      || fulfillment.result?.browserExecution?.stopState !== 'final_submit_unconfirmed'
+      || !/signed confirmation window/i.test(String(fulfillment.result?.browserExecution?.stopEvidence || ''))
+      || unconfirmedOrderSubmitted
+      || unconfirmedFinalStorage.activeRun) {
+      fail(`browser_extension_unconfirmed_final_not_released:${JSON.stringify({ fulfillment, unconfirmedOrderSubmitted, activeRun: unconfirmedFinalStorage.activeRun })}`);
+    }
+    if (!retainedTargetPage.url().includes('/checkout/final-review')) {
+      fail(`browser_extension_unconfirmed_final_tab_not_preserved:${retainedTargetPage.url()}`);
+    }
+    recordPurchaseScenario('Expired merchant confirmation releases without replaying the final order control', {
+      stopState: fulfillment.result.browserExecution.stopState,
+      fundingDisposition: fulfillment.fundingDisposition
     });
 
     await retainedTargetPage.close();
