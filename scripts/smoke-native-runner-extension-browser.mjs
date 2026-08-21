@@ -2209,7 +2209,7 @@ async function main() {
     if (!checkpoints.some((checkpoint) => checkpoint.browser?.checkoutSelections?.includes('matching delivery address'))) {
       fail(`browser_extension_missing_matching_address_checkpoint:${JSON.stringify(checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, selections: checkpoint.browser?.checkoutSelections || [] })))}`);
     }
-    const pendingPaymentState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['pendingPaymentWaits', 'lastExecution'], resolve)));
+    const pendingPaymentState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['pendingPaymentWaits', 'activeRun', 'lastExecution'], resolve)));
     if (fulfillment) fail(`browser_extension_card_handoff_fulfilled_before_user_autofill:${JSON.stringify({
       fulfillment,
       steps: checkpoints.map((checkpoint) => ({
@@ -2223,6 +2223,10 @@ async function main() {
     })}`);
     if (!pendingPaymentState.pendingPaymentWaits?.['browser-smoke-mismatch-session']) {
       fail(`browser_extension_card_handoff_not_parked:${JSON.stringify(pendingPaymentState.lastExecution || {})}`);
+    }
+    if (pendingPaymentState.activeRun?.sessionId !== 'browser-smoke-mismatch-session'
+      || pendingPaymentState.activeRun?.phase !== 'waiting_for_payment_autofill') {
+      fail(`browser_extension_card_handoff_missing_durable_run:${JSON.stringify(pendingPaymentState.activeRun || {})}`);
     }
     if (!checkpoints.some((checkpoint) => checkpoint.state === 'waiting_for_payment_autofill' && checkpoint.planActionStatus === 'waiting')) {
       fail(`browser_extension_card_handoff_missing_waiting_checkpoint:${JSON.stringify(checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, state: checkpoint.state, status: checkpoint.planActionStatus })))}`);
@@ -2254,17 +2258,19 @@ async function main() {
     if (cardEntryVisible && await mismatchPage.locator('input[aria-label="Card number"]').inputValue()) {
       fail('browser_extension_card_handoff_typed_sensitive_card_data');
     }
+    // Simulate MV3 suspending the service worker while the user is choosing a
+    // local card. The persisted active run plus the real resume alarm must
+    // recover this without any test-only wake message.
+    const paymentWaitCdp = await context.newCDPSession(mismatchPage);
+    await paymentWaitCdp.send('ServiceWorker.enable');
+    await paymentWaitCdp.send('ServiceWorker.stopAllWorkers');
     await mismatchPage.locator('input[aria-label="Card number"]').fill('5555555555559999');
     await mismatchPage.locator('input[aria-label="Name on card"]').fill('Test User');
     await mismatchPage.getByRole('button', { name: 'Add your card' }).click();
-    const mismatchResumeResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
-    }), session.id);
-    if (!mismatchResumeResponse?.ok) fail(`browser_extension_mismatch_resume_failed:${mismatchResumeResponse?.error || 'no_response'}`);
     try {
-      await waitFor(() => Boolean(fulfillment));
+      await waitFor(() => Boolean(fulfillment), 30_000);
     } catch {
-      const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'pendingPaymentWaits'], resolve)));
+      const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'pendingPaymentWaits', 'activeRun'], resolve)));
       fail(`browser_extension_mismatch_resume_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}:pending=${JSON.stringify(runnerState.pendingPaymentWaits || {})}`);
     }
     if (fulfillment.status !== 'fulfilled' || fulfillment.fundingDisposition !== 'hold') {
@@ -2277,10 +2283,11 @@ async function main() {
     if (fulfillment.result?.browserExecution?.checkoutSummary?.cardMatches !== true) {
       fail(`browser_extension_card_resume_did_not_verify_expected_card:${JSON.stringify(fulfillment.result?.browserExecution?.checkoutSummary || {})}`);
     }
-    const resumedPaymentState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['pendingPaymentWaits'], resolve)));
+    const resumedPaymentState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['pendingPaymentWaits', 'activeRun'], resolve)));
     if (resumedPaymentState.pendingPaymentWaits?.['browser-smoke-mismatch-session']) {
       fail('browser_extension_card_resume_did_not_clear_wait_state');
     }
+    if (resumedPaymentState.activeRun) fail(`browser_extension_card_resume_did_not_clear_durable_run:${JSON.stringify(resumedPaymentState.activeRun)}`);
     recordPurchaseScenario('Approximate saved address match plus wrong card opens card handoff and resumes', {
       stopState: fulfillment.result?.browserExecution?.stopState,
       cardMatches: fulfillment.result?.browserExecution?.checkoutSummary?.cardMatches

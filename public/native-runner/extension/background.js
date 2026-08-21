@@ -8,7 +8,7 @@ const POLL_ALARM = 'magic-city-runner-poll';
 const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_CONTINUATION_DELAY_MS = 30_000;
-const LEAN_RUNTIME_MODE = 'v0.3.1-lean';
+const LEAN_RUNTIME_MODE = 'v0.4.0-durable-recovery';
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
   'https://magic-city-staging.fly.dev'
@@ -57,8 +57,9 @@ async function dispatchAlarm(alarm = null) {
     }
     return result;
   }
-  const { activeSessionId = '' } = await chrome.storage.local.get({ activeSessionId: '' });
-  if (activeSessionId) {
+  const { activeSessionId = '', activeRun = null } = await chrome.storage.local.get({ activeSessionId: '', activeRun: null });
+  const activeRunSessionId = String(activeRun?.sessionId || activeSessionId || '').trim();
+  if (activeRunSessionId) {
     // A worker restart may clear the one-shot alarm. Recover only this
     // already-authorized session; ordinary heartbeats remain poll-only.
     return legacyController.resumeActiveRun();
@@ -70,8 +71,8 @@ async function dispatchAlarm(alarm = null) {
 
 async function bootLeanRuntime() {
   await setLeanRuntimeMode();
-  const { activeSessionId = '' } = await chrome.storage.local.get({ activeSessionId: '' });
-  if (activeSessionId) {
+  const { activeSessionId = '', activeRun = null } = await chrome.storage.local.get({ activeSessionId: '', activeRun: null });
+  if (String(activeRun?.sessionId || activeSessionId || '').trim()) {
     // Preserve recovery across a service-worker restart. The marker is set
     // only after the user-approved mission has been claimed.
     await chrome.alarms.create(RESUME_ALARM, { when: Date.now() + 1_000 });

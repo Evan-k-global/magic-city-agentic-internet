@@ -481,6 +481,10 @@ const EXECUTION_WATCHDOG_NATIVE_RUNNER_PERMISSION_TIMEOUT_MS = Math.max(
   2 * 60 * 1000,
   Number(process.env.EXECUTION_WATCHDOG_NATIVE_RUNNER_PERMISSION_TIMEOUT_MS ?? 15 * 60 * 1000)
 );
+const EXECUTION_WATCHDOG_NATIVE_RUNNER_HUMAN_BOUNDARY_TIMEOUT_MS = Math.max(
+  2 * 60 * 1000,
+  Number(process.env.EXECUTION_WATCHDOG_NATIVE_RUNNER_HUMAN_BOUNDARY_TIMEOUT_MS ?? 15 * 60 * 1000)
+);
 const EXECUTION_WATCHDOG_YOUR_AGENT_TIMEOUT_MS = Math.max(60000, Number(process.env.EXECUTION_WATCHDOG_YOUR_AGENT_TIMEOUT_MS ?? 5 * 60 * 1000));
 const EXECUTION_WATCHDOG_MAX_RETRIES = Math.max(0, Number(process.env.EXECUTION_WATCHDOG_MAX_RETRIES ?? 2));
 const EXECUTION_WATCHDOG_SESSION_SCAN_LIMIT = Math.max(50, Number(process.env.EXECUTION_WATCHDOG_SESSION_SCAN_LIMIT ?? 200));
@@ -708,7 +712,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.3.15'
+  '0.4.0'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -6799,14 +6803,20 @@ function canNativeRunnerDeviceAccessConnectorSession(device, session, pluginId =
 function getNativeRunnerDeviceHeartbeat(device = null) {
   const lastPollAt = device?.lastPollAt || null;
   const lastSeenAt = device?.lastSeenAt || null;
-  const heartbeatAt = lastPollAt || lastSeenAt || null;
-  const heartbeatMs = Date.parse(heartbeatAt || '');
   const pollMs = Date.parse(lastPollAt || '');
+  const seenMs = Date.parse(lastSeenAt || '');
+  const heartbeatMs = Math.max(
+    Number.isFinite(pollMs) ? pollMs : 0,
+    Number.isFinite(seenMs) ? seenMs : 0
+  );
+  const heartbeatAt = heartbeatMs === (Number.isFinite(seenMs) ? seenMs : 0)
+    ? lastSeenAt
+    : lastPollAt;
   return {
     lastPollAt,
     lastSeenAt,
     heartbeatAt,
-    heartbeatAgeMs: Number.isFinite(heartbeatMs) ? Date.now() - heartbeatMs : null,
+    heartbeatAgeMs: heartbeatMs > 0 ? Date.now() - heartbeatMs : null,
     pollAgeMs: Number.isFinite(pollMs) ? Date.now() - pollMs : null,
     hasPoll: Number.isFinite(pollMs)
   };
@@ -6814,7 +6824,9 @@ function getNativeRunnerDeviceHeartbeat(device = null) {
 
 function nativeRunnerDeviceHasFreshPoll(device = null, timeoutMs = NATIVE_RUNNER_HEARTBEAT_TIMEOUT_MS) {
   const heartbeat = getNativeRunnerDeviceHeartbeat(device);
-  return Boolean(heartbeat.hasPoll && heartbeat.pollAgeMs != null && heartbeat.pollAgeMs >= 0 && heartbeat.pollAgeMs < timeoutMs);
+  // A runner-status or signed checkpoint call is as meaningful as a queue
+  // poll for an in-progress, already-authorized mission.
+  return Boolean(heartbeat.heartbeatAgeMs != null && heartbeat.heartbeatAgeMs >= 0 && heartbeat.heartbeatAgeMs < timeoutMs);
 }
 
 function compareDottedVersions(left = '', right = '') {
@@ -7649,7 +7661,9 @@ function isNativeRunnerExecutionSession(session) {
 function getNativeRunnerDeviceForSession(session) {
   if (!isNativeRunnerExecutionSession(session)) return null;
   const pluginId = String(session?.preferredExecutionAgentId || NATIVE_RUNNER_PLUGIN_ID).trim() || NATIVE_RUNNER_PLUGIN_ID;
-  const preferredDeviceId = String(session?.nativeRunnerDeviceId || '').trim();
+  const preferredDeviceId = String(
+    session?.claimedByNativeRunnerDeviceId || session?.nativeRunnerDeviceId || ''
+  ).trim();
   return listNativeRunnerDevices(100)
     .filter((device) => isNativeRunnerDeviceActive(device))
     .filter((device) => !preferredDeviceId || device.id === preferredDeviceId)
@@ -7672,15 +7686,37 @@ function getConnectorSessionWatchdogRetryCount(session) {
   return Math.max(0, Math.trunc(Number(session?.executionWatchdog?.retryCount || 0)));
 }
 
-function isNativeRunnerAwaitingSitePermission(session) {
+function getNativeRunnerHumanBoundary(session) {
   if (!isNativeRunnerExecutionSession(session)) return false;
   const trace = Array.isArray(session?.executionTrace) ? session.executionTrace : [];
-  const latestState = String(trace.at(-1)?.state || '').trim().toLowerCase();
-  return latestState === 'permission_required';
+  const latestState = String(
+    session?.executionLive?.state || trace.at(-1)?.state || ''
+  ).trim().toLowerCase();
+  const supportedStates = new Set([
+    'permission_required',
+    'waiting_for_payment_autofill',
+    'payment_required',
+    'login_required',
+    'captcha_or_challenge_required',
+    'final_approval_required',
+    'needs_final_approval',
+    'review_ready'
+  ]);
+  return supportedStates.has(latestState)
+    ? { state: latestState, createdAt: session?.executionLive?.createdAt || trace.at(-1)?.createdAt || null }
+    : null;
+}
+
+function isNativeRunnerAwaitingSitePermission(session) {
+  return getNativeRunnerHumanBoundary(session)?.state === 'permission_required';
 }
 
 function resolveConnectorSessionWatchdogTimeoutMs(session) {
   if (isYourAgentExecutionSession(session)) return EXECUTION_WATCHDOG_YOUR_AGENT_TIMEOUT_MS;
+  const humanBoundary = getNativeRunnerHumanBoundary(session);
+  if (humanBoundary && humanBoundary.state !== 'permission_required') {
+    return EXECUTION_WATCHDOG_NATIVE_RUNNER_HUMAN_BOUNDARY_TIMEOUT_MS;
+  }
   // Site approval is an intentional human pause, but it cannot remain an
   // executable mission forever. Expire abandoned prompts so the extension
   // does not advertise a stale merchant after the user has moved on.
@@ -7723,6 +7759,12 @@ function buildExecutionWatchdogFailureMessage(session, reasonKey, retryCount = 0
   } else if (isNativeRunnerExecutionSession(session)) {
     if (reasonKey === 'permission_timeout') {
       message = 'The browser-access request expired before it was approved.';
+    } else if (reasonKey === 'payment_wait_timeout') {
+      message = 'Magic City stopped waiting for local card selection. No card details were read or stored; reopen the checkout and continue when Chrome autofill is ready.';
+    } else if (reasonKey === 'login_wait_timeout') {
+      message = 'Magic City stopped waiting for local sign-in. Sign in in the prepared tab, then retry the same mission.';
+    } else if (reasonKey === 'final_review_timeout') {
+      message = 'Magic City stopped waiting for final order approval. The prepared checkout was left untouched.';
     } else if (reasonKey === 'queued_timeout') {
       message = `Magic City Runner did not pick up this ${laneLabel} in time.`;
     } else if (reasonKey === 'claimed_timeout') {
@@ -8053,8 +8095,15 @@ async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {})
           pollFresh: runnerPoll.fresh
         }));
       }
-      const reasonKey = isNativeRunnerAwaitingSitePermission(session)
+      const humanBoundary = getNativeRunnerHumanBoundary(session);
+      const reasonKey = humanBoundary?.state === 'permission_required'
         ? 'permission_timeout'
+        : humanBoundary?.state === 'waiting_for_payment_autofill' || humanBoundary?.state === 'payment_required'
+          ? 'payment_wait_timeout'
+          : humanBoundary?.state === 'login_required' || humanBoundary?.state === 'captcha_or_challenge_required'
+            ? 'login_wait_timeout'
+            : humanBoundary?.state === 'final_approval_required' || humanBoundary?.state === 'needs_final_approval' || humanBoundary?.state === 'review_ready'
+              ? 'final_review_timeout'
         : String(session.status || '').trim().toLowerCase() === 'queued'
           ? 'queued_timeout'
           : String(session.status || '').trim().toLowerCase() === 'claimed'
@@ -19597,12 +19646,25 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const body = await readBody(req);
       requireFields(body, ['pluginId']);
-      requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'runner_status_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
       if (!['queued', 'confirmed', 'claimed', 'executing'].includes(String(session.status || '').toLowerCase())) {
         return sendJson(res, 409, { error: 'execution_not_active', session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId) });
+      }
+      if (pluginAuth.type === 'native_runner') {
+        touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice.id, {
+          lastSeenAt: new Date().toISOString()
+        });
+        recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {
+          action: 'runner_status',
+          status: 'success',
+          source: 'native_runner',
+          sessionId,
+          pluginId: body.pluginId,
+          capability: 'inspect'
+        });
       }
       return sendJson(res, 200, {
         active: true,

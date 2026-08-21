@@ -21,6 +21,7 @@ const RUNNER_CONTINUATION_DELAY_MS = 30_000;
 const PAYMENT_WAIT_RESUME_DELAY_MS = 5_000;
 const PAYMENT_WAIT_HEARTBEAT_MS = 60_000;
 const PAYMENT_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
+const CHECKOUT_PROFILE_RECONCILE_TIMEOUT_MS = 24_000;
 const TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS = [200, 700];
 const TAB_COMMAND_TIMEOUT_MS = 15_000;
 const BROWSER_ACTION_TIMEOUT_MS = 45_000;
@@ -396,6 +397,8 @@ async function getConfig() {
     lastPollAt: '',
     lastError: '',
     lastExecution: null,
+    activeSessionId: '',
+    activeRun: null,
     activeMissionTabs: {},
     localCheckoutProfiles: {},
     pendingPaymentWaits: {},
@@ -407,6 +410,55 @@ async function getConfig() {
 async function saveConfig(patch = {}) {
   await chrome.storage.local.set(patch);
   return getConfig();
+}
+
+function normalizeActiveRun(entry = null) {
+  const sessionId = String(entry?.sessionId || '').trim();
+  if (!sessionId) return null;
+  return {
+    sessionId,
+    planHash: String(entry?.planHash || '').trim() || null,
+    phase: String(entry?.phase || 'claimed').trim() || 'claimed',
+    tabId: Number(entry?.tabId || 0) || null,
+    actionId: String(entry?.actionId || '').trim() || null,
+    actionIndex: Number.isInteger(Number(entry?.actionIndex)) ? Number(entry.actionIndex) : null,
+    nextActionIndex: Number.isInteger(Number(entry?.nextActionIndex)) ? Number(entry.nextActionIndex) : null,
+    waitExpiresAt: String(entry?.waitExpiresAt || '').trim() || null,
+    startedAt: String(entry?.startedAt || '').trim() || new Date().toISOString(),
+    updatedAt: String(entry?.updatedAt || '').trim() || new Date().toISOString()
+  };
+}
+
+async function getActiveRun() {
+  const config = await getConfig();
+  return normalizeActiveRun(config.activeRun) || normalizeActiveRun({ sessionId: config.activeSessionId });
+}
+
+async function saveActiveRun(patch = {}) {
+  const config = await getConfig();
+  const current = normalizeActiveRun(config.activeRun);
+  const sessionId = String(patch.sessionId || current?.sessionId || '').trim();
+  if (!sessionId) throw new Error('active_run_session_required');
+  const now = new Date().toISOString();
+  const activeRun = normalizeActiveRun({
+    ...(current?.sessionId === sessionId ? current : {}),
+    ...patch,
+    sessionId,
+    startedAt: patch.startedAt || (current?.sessionId === sessionId ? current.startedAt : now),
+    updatedAt: now
+  });
+  await saveConfig({ activeSessionId: sessionId, activeRun });
+  return activeRun;
+}
+
+async function clearActiveRun(sessionId = '') {
+  const config = await getConfig();
+  const activeRun = normalizeActiveRun(config.activeRun);
+  const requestedId = String(sessionId || '').trim();
+  const activeId = String(activeRun?.sessionId || config.activeSessionId || '').trim();
+  if (requestedId && activeId && requestedId !== activeId) return false;
+  await saveConfig({ activeSessionId: '', activeRun: null });
+  return true;
 }
 
 function normalizeLocalCheckoutProfile(profile = {}) {
@@ -578,9 +630,8 @@ async function retryTransientControlPlane(task) {
 }
 
 function scheduleRunnerResume(delayMs = RUNNER_CONTINUATION_DELAY_MS) {
-  // This is intentionally a single active-mission alarm. The v0.3 gateway
-  // receives it and resumes only `activeSessionId`; it never discovers a new
-  // mission or performs browser work without the user's original Run action.
+  // This is intentionally a single active-mission alarm. The gateway resumes
+  // only the persisted user-authorized run; it never discovers new work.
   void chrome.alarms.create(RESUME_ALARM, {
     when: Date.now() + Math.max(1_000, Number(delayMs) || RUNNER_CONTINUATION_DELAY_MS)
   }).catch(() => {});
@@ -1610,6 +1661,16 @@ async function parkForPaymentAutofill(session, plan, report = {}) {
     tabId: Number((await activeMissionTab(session.id))?.id || 0) || null,
     expectedCardLast4: String(report.checkoutSummary?.expectedCardLast4 || '').slice(-4)
   });
+  await saveActiveRun({
+    sessionId: session.id,
+    planHash: plan.planHash,
+    phase: 'waiting_for_payment_autofill',
+    tabId: Number((await activeMissionTab(session.id))?.id || 0) || null,
+    actionId: nextAction.id,
+    actionIndex: Number(planState.nextActionIndex || 0),
+    nextActionIndex: Number(planState.nextActionIndex || 0),
+    waitExpiresAt: new Date(expiresAt).toISOString()
+  });
   await saveConfig({
     lastError: '',
     lastExecution: {
@@ -1730,6 +1791,7 @@ async function reportAndStop(session, plan, report, note = '') {
     && ['final_approval_required', 'needs_final_approval', 'review_ready'].includes(String(report.stopState || '').toLowerCase());
   await fulfillSession(session, report, note, plan);
   await clearPendingPaymentWait(session.id);
+  await clearActiveRun(session.id);
   // Keep ownership while the prepared merchant tab remains open. The UI can
   // focus it directly, and retries/new missions can reuse it instead of
   // creating a duplicate checkout tab.
@@ -1794,6 +1856,26 @@ function milestoneFailureReason(action = {}, report = {}, outcome = {}) {
   return `The required ${expected.replace(/_/g, ' ')} milestone was not verified.`;
 }
 
+function actionWasSatisfiedBeforeRestart(action = {}, report = {}) {
+  const expected = String(action.expectedMilestone || '').trim();
+  const signals = report.milestoneSignals && typeof report.milestoneSignals === 'object'
+    ? report.milestoneSignals
+    : {};
+  const cartCount = Number(report.checkoutSummary?.cartItemCount);
+  if (expected === 'candidate_selected') {
+    return Boolean(signals.candidateSelected || cartStateVerifiesCandidateSelection(report, action));
+  }
+  if (expected === 'cart_confirmed') {
+    const minimumCount = Math.max(1, Number(action.expectedCartItemCount || 1));
+    return Boolean(signals.cartVisible && Number.isFinite(cartCount) && cartCount >= minimumCount);
+  }
+  if (expected === 'checkout_open') return Boolean(signals.checkoutOpen);
+  if (expected === 'checkout_profile_verified') return Boolean(signals.checkoutOpen && signals.checkoutProfileVerified);
+  if (expected === 'final_review_ready') return Boolean(signals.checkoutOpen && signals.finalReviewReady);
+  if (expected === 'final_submit_requested') return Boolean(report.orderSubmitted || signals.orderSubmitted);
+  return false;
+}
+
 async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null, assertActive = null) {
   const merged = {
     completed: true,
@@ -1806,15 +1888,22 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
   // Amazon can expose an address confirmation, then settle the selected
   // delivery state before revealing its payment selector. Keep this bounded
   // while allowing that extra local-only transition.
-  const reconcileDeadline = Date.now() + 26_000;
-  for (let attempt = 0; attempt < 6 && Date.now() < reconcileDeadline; attempt += 1) {
+  const reconcileDeadline = Date.now() + CHECKOUT_PROFILE_RECONCILE_TIMEOUT_MS;
+  // Retail checkouts often reveal delivery choices only after address and
+  // payment confirmations settle. Each pass performs one bounded safe step.
+  for (let attempt = 0; attempt < 10 && Date.now() < reconcileDeadline; attempt += 1) {
     if (typeof assertActive === 'function') await assertActive();
+    const remainingBeforeCommandMs = reconcileDeadline - Date.now();
+    if (remainingBeforeCommandMs < 900) break;
     const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
     const outcome = await tabCommand(tabId, {
       type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
       action: { ...action, type: 'fill_checkout_profile' },
       checkoutProfile
-    }, { injectionTimeoutMs: 9_000, responseTimeoutMs: 9_000 });
+    }, {
+      injectionTimeoutMs: Math.max(750, Math.min(4_000, remainingBeforeCommandMs - 400)),
+      responseTimeoutMs: Math.max(750, Math.min(4_000, remainingBeforeCommandMs - 400))
+    });
     latestOutcome = outcome;
     merged.completed = Boolean(outcome?.completed);
     merged.skipped = Boolean(merged.skipped && outcome?.skipped);
@@ -1841,7 +1930,7 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       // Amazon updates the checked option and summary after the content-script
       // response. Re-enter the same bounded primitive from the background
       // worker instead of awaiting inside the page message channel.
-      await delay(320);
+      await delay(Math.min(320, Math.max(0, reconcileDeadline - Date.now())));
       continue;
     }
     if (outcome.navigationRequested && !outcome.skipped) {
@@ -1851,18 +1940,32 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       await delay(280);
       const after = await chrome.tabs.get(tabId).catch(() => before);
       if (after.url !== before.url || after.status === 'loading') {
-        await waitForTabNavigation(tabId, before.url, 6500).catch(() => null);
-        await delay(450);
+        const remainingForNavigationMs = reconcileDeadline - Date.now();
+        if (remainingForNavigationMs < 900) break;
+        await waitForTabNavigation(tabId, before.url, Math.min(4_000, remainingForNavigationMs - 300)).catch(() => null);
+        await delay(Math.min(450, Math.max(0, reconcileDeadline - Date.now())));
       } else {
-        await delay(180);
+        await delay(Math.min(180, Math.max(0, reconcileDeadline - Date.now())));
       }
       continue;
     }
-    await delay(150);
-    merged.state = outcome.state || await tabBrowserState(tabId, checkoutProfile, { attempts: 3 }).catch(() => null);
+    await delay(Math.min(150, Math.max(0, reconcileDeadline - Date.now())));
+    const remainingForStateMs = reconcileDeadline - Date.now();
+    merged.state = outcome.state || (remainingForStateMs > 900
+      ? await tabBrowserState(tabId, checkoutProfile, {
+          attempts: Math.min(2, Math.max(1, Math.floor(remainingForStateMs / 1_200))),
+          delayMs: 160
+        }).catch(() => null)
+      : null);
     return { ...outcome, ...merged, state: merged.state || outcome.state };
   }
-  merged.state = await tabBrowserState(tabId, checkoutProfile, { attempts: 3 }).catch(() => latestOutcome?.state || null);
+  const remainingForFinalStateMs = reconcileDeadline - Date.now();
+  merged.state = remainingForFinalStateMs > 900
+    ? await tabBrowserState(tabId, checkoutProfile, {
+        attempts: Math.min(2, Math.max(1, Math.floor(remainingForFinalStateMs / 1_200))),
+        delayMs: 160
+      }).catch(() => latestOutcome?.state || null)
+    : latestOutcome?.state || null;
   return {
     ...(latestOutcome || {}),
     ...merged,
@@ -2276,21 +2379,8 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
           state: observedState
         };
       }
-      const fillOutcome = await runCheckoutProfileReconcile(tabId, {
-        id: `${action.id || 'checkout'}-local-profile-followup`,
-        type: 'fill_checkout_profile'
-      }, checkoutProfile, assertActive).catch((error) => {
-        if (isExecutionCancelledError(error)) throw error;
-        return null;
-      });
-      if (fillOutcome?.completed) {
-        return {
-          ...outcome,
-          state: fillOutcome.state || outcome.state,
-          safeFieldsFilled: Array.isArray(fillOutcome.safeFieldsFilled) ? fillOutcome.safeFieldsFilled : outcome.safeFieldsFilled,
-          checkoutSelections: Array.isArray(fillOutcome.checkoutSelections) ? fillOutcome.checkoutSelections : outcome.checkoutSelections
-        };
-      }
+      // Opening checkout is navigation only. Address, card, and delivery
+      // changes are a separate signed `fill_checkout_profile` plan action.
       return { ...outcome, state: await tabBrowserState(tabId, checkoutProfile) };
     }
     const state = await tabBrowserState(tabId, checkoutProfile);
@@ -2309,7 +2399,7 @@ async function runSession(rawSession) {
   let retainActiveRun = false;
   try {
     session = await claimSession(rawSession);
-    await saveConfig({ activeSessionId: session.id });
+    await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
     // One bounded recovery opportunity protects an already-authorized run
     // from MV3 service-worker suspension without turning alarms into a
     // background mission discovery loop.
@@ -2324,6 +2414,23 @@ async function runSession(rawSession) {
     const planState = session.extensionMissionPlanState?.planHash === plan.planHash
       ? session.extensionMissionPlanState
       : { nextActionIndex: 0 };
+    const interruptedRun = await getActiveRun();
+    const resumesInterruptedAction = Boolean(
+      interruptedRun?.sessionId === session.id
+      && interruptedRun.phase === 'executing_step'
+      && Number(interruptedRun.actionIndex) === Number(planState.nextActionIndex || 0)
+      && String(interruptedRun.actionId || '').trim()
+    );
+    await saveActiveRun({
+      sessionId: session.id,
+      planHash: plan.planHash,
+      phase: resumesInterruptedAction ? 'executing_step' : 'running',
+      nextActionIndex: Number(planState.nextActionIndex || 0),
+      ...(resumesInterruptedAction ? {
+        actionId: interruptedRun.actionId,
+        actionIndex: Number(interruptedRun.actionIndex)
+      } : {})
+    });
     const completedActionIds = new Set(Array.isArray(planState.completedActionIds) ? planState.completedActionIds : []);
     const persistedMilestones = Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : [];
     const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
@@ -2351,6 +2458,17 @@ async function runSession(rawSession) {
 
     await chrome.action.setBadgeText({ text: '' });
     let tab = await acquireMissionTab(session.id, startUrl);
+    await saveActiveRun({
+      sessionId: session.id,
+      planHash: plan.planHash,
+      phase: resumesInterruptedAction ? 'executing_step' : 'running',
+      tabId: Number(tab?.id || 0) || null,
+      nextActionIndex: Number(planState.nextActionIndex || 0),
+      ...(resumesInterruptedAction ? {
+        actionId: interruptedRun.actionId,
+        actionIndex: Number(interruptedRun.actionIndex)
+      } : {})
+    });
     let authorityVerifiedAt = Date.now();
     const assertActive = async ({ force = false } = {}) => {
       assertLocalMissionAuthority(session);
@@ -2397,7 +2515,11 @@ async function runSession(rawSession) {
           paymentState.stopEvidence = 'Card entry was not completed before the local checkout handoff expired. Reopen the checkout and use Chrome autofill to continue.';
           return reportAndStop(session, plan, { ...paymentState, ...progress });
         }
-        return parkForPaymentAutofill(session, plan, { ...paymentState, ...progress });
+        const parked = await parkForPaymentAutofill(session, plan, { ...paymentState, ...progress });
+        if (parked?.waiting) {
+          retainActiveRun = true;
+          return parked;
+        }
       }
       await clearPendingPaymentWait(session.id);
       await chrome.action.setBadgeText({ text: '' });
@@ -2406,6 +2528,21 @@ async function runSession(rawSession) {
       const action = plan.actions[index];
       currentAction = action;
       currentActionStartedAt = Date.now();
+      const durableRun = await getActiveRun();
+      const recoveringInterruptedAction = Boolean(
+        durableRun?.sessionId === session.id
+        && durableRun.phase === 'executing_step'
+        && durableRun.actionId === action.id
+      );
+      await saveActiveRun({
+        sessionId: session.id,
+        planHash: plan.planHash,
+        phase: 'executing_step',
+        tabId: Number(tab?.id || 0) || null,
+        actionId: action.id,
+        actionIndex: index,
+        nextActionIndex: index
+      });
       const presentation = planActionPresentation(action);
       await assertActive({ force: action.type === 'final_submit' });
       if (!tab && action.type !== 'navigate') {
@@ -2441,6 +2578,12 @@ async function runSession(rawSession) {
         && progress.selectedCandidate
         ? { ...action, boundCandidate: progress.selectedCandidate }
         : action;
+      const recoveredState = recoveringInterruptedAction && tab
+        ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
+        : null;
+      const resumedActionAlreadySatisfied = recoveredState
+        ? actionWasSatisfiedBeforeRestart(executionAction, recoveredState)
+        : false;
       let outcome = reuseVerifiedCart
         ? {
             completed: true,
@@ -2449,6 +2592,14 @@ async function runSession(rawSession) {
             reason: 'The approved cart item is already prepared and verified; not adding a duplicate.',
             state: await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 })
           }
+        : resumedActionAlreadySatisfied
+          ? {
+              completed: true,
+              skipped: false,
+              recoveredFromInterruption: true,
+              reason: 'Recovered the interrupted browser step from its already-verified merchant state.',
+              state: recoveredState
+            }
         : await withTimeout(
             () => executePlanAction(tab.id, executionAction, plan, checkoutProfile, assertActive),
             BROWSER_ACTION_TIMEOUT_MS,
@@ -2482,6 +2633,7 @@ async function runSession(rawSession) {
         checkoutPreludeRecoveryUrl: outcome.checkoutPreludeRecoveryUrl ? compactNavigationUrl(outcome.checkoutPreludeRecoveryUrl) : null,
         checkoutInterstitialContinued: Boolean(outcome.checkoutInterstitialContinued),
         checkoutInterstitialAttempts: Number(outcome.checkoutInterstitialAttempts || 0),
+        recoveredFromInterruption: Boolean(outcome.recoveredFromInterruption),
         selectedCandidate: outcome.selected ? {
           title: String(outcome.selected.title || '').slice(0, 180),
           asin: String(outcome.selected.asin || '').slice(0, 32) || null,
@@ -2619,11 +2771,23 @@ async function runSession(rawSession) {
         planAction: action,
         planActionStatus: actionStatus
       });
+      await saveActiveRun({
+        sessionId: session.id,
+        planHash: plan.planHash,
+        phase: 'running',
+        tabId: Number(tab?.id || 0) || null,
+        actionId: null,
+        actionIndex: null,
+        nextActionIndex: index + 1
+      });
       if (action.type === 'pause') {
         const boundary = stopForBoundary(report, plan, action);
         if (boundary) {
           const parked = await parkForPaymentAutofill(session, plan, report);
-          if (parked) return parked;
+          if (parked) {
+            retainActiveRun = true;
+            return parked;
+          }
           report.stopState = boundary.state;
           report.stopEvidence = boundary.evidence;
           if (boundary.failed) {
@@ -2657,7 +2821,10 @@ async function runSession(rawSession) {
         );
       if (boundary && !canFillBeforeSensitiveStop && !canOpenPaymentAutofill && !canSubmitAfterVerifiedCheckout) {
         const parked = await parkForPaymentAutofill(session, plan, report);
-        if (parked) return parked;
+        if (parked) {
+          retainActiveRun = true;
+          return parked;
+        }
         return reportAndStop(session, plan, report);
       }
       if (action.expectedMilestone && !expectedMilestoneVerified) {
@@ -2693,6 +2860,7 @@ async function runSession(rawSession) {
       await clearMissionTab(session.id);
       await clearLocalCheckoutProfile(session.id);
       await clearPendingPaymentWait(session.id);
+      await clearActiveRun(session.id);
       await saveConfig({
         lastError: '',
         lastExecution: { sessionId: session.id, status: 'cancelled', at: new Date().toISOString() }
@@ -2769,14 +2937,14 @@ async function runSession(rawSession) {
     inFlightSessionIds.delete(rawSession.id);
     const config = await getConfig().catch(() => null);
     if (!retainActiveRun && config?.activeSessionId === rawSession.id) {
-      await saveConfig({ activeSessionId: '' }).catch(() => null);
+      await clearActiveRun(rawSession.id).catch(() => null);
     }
   }
 }
 
 async function resumeActiveRun() {
   const config = await getConfig();
-  const sessionId = String(config.activeSessionId || '').trim();
+  const sessionId = String(config.activeRun?.sessionId || config.activeSessionId || '').trim();
   if (!sessionId) return { resumed: false, reason: 'no_active_run' };
   if (inFlightSessionIds.has(sessionId)) return { resumed: false, status: 'already_running', sessionId };
   const poll = await pollSessions();
@@ -2829,6 +2997,7 @@ async function pollAndExecute(requestedSessionId = '') {
 async function pollOnly() {
   const config = await getConfig();
   if (!config.deviceToken) return { paired: false, sessions: [], actionableCount: 0 };
+  if (config.activeRun?.sessionId || config.activeSessionId) return resumeActiveRun();
   await registerExecutor(config);
   const poll = await pollSessions();
   // A website wake is the fast path, but an MV3 service worker can be asleep

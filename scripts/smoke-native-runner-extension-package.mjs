@@ -58,6 +58,24 @@ if (/startsWith\('v0\.3\.0'\)/.test(packagedLegacyBackground)) {
 if (!/scheduleRunnerResume\(\);[\s\S]{0,240}return data\.session \|\| session/.test(packagedLegacyBackground)) {
   fail('each persisted browser checkpoint must arm active-mission recovery');
 }
+if (!/activeRun:\s*null/.test(packagedLegacyBackground)
+  || !/async function saveActiveRun/.test(packagedLegacyBackground)
+  || !/async function clearActiveRun/.test(packagedLegacyBackground)
+  || !/phase:\s*'waiting_for_payment_autofill'/.test(packagedLegacyBackground)) {
+  fail('payment handoff must persist a durable active run for automatic recovery');
+}
+if (!/function actionWasSatisfiedBeforeRestart/.test(packagedLegacyBackground)
+  || !/recoveredFromInterruption:\s*true/.test(packagedLegacyBackground)) {
+  fail('interrupted browser steps must re-observe verified merchant state before repeating an action');
+}
+const checkoutNavigationMarker = 'Opening checkout is navigation only.';
+const checkoutNavigationIndex = packagedLegacyBackground.indexOf(checkoutNavigationMarker);
+const checkoutNavigationSection = checkoutNavigationIndex >= 0
+  ? packagedLegacyBackground.slice(Math.max(0, checkoutNavigationIndex - 900), checkoutNavigationIndex + 900)
+  : '';
+if (!checkoutNavigationSection || /runCheckoutProfileReconcile/.test(checkoutNavigationSection)) {
+  fail('open-checkout must remain a navigation primitive, without hidden profile reconciliation');
+}
 if (!/ACTIVE_MISSION_CONTINUATION_DELAY_MS/.test(packagedBackground)
   || !/result\?\.status === 'already_running'/.test(packagedBackground)) {
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
