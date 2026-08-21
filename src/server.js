@@ -481,6 +481,10 @@ const EXECUTION_WATCHDOG_NATIVE_RUNNER_PERMISSION_TIMEOUT_MS = Math.max(
   2 * 60 * 1000,
   Number(process.env.EXECUTION_WATCHDOG_NATIVE_RUNNER_PERMISSION_TIMEOUT_MS ?? 15 * 60 * 1000)
 );
+const EXECUTION_WATCHDOG_NATIVE_RUNNER_HUMAN_BOUNDARY_TIMEOUT_MS = Math.max(
+  2 * 60 * 1000,
+  Number(process.env.EXECUTION_WATCHDOG_NATIVE_RUNNER_HUMAN_BOUNDARY_TIMEOUT_MS ?? 15 * 60 * 1000)
+);
 const EXECUTION_WATCHDOG_YOUR_AGENT_TIMEOUT_MS = Math.max(60000, Number(process.env.EXECUTION_WATCHDOG_YOUR_AGENT_TIMEOUT_MS ?? 5 * 60 * 1000));
 const EXECUTION_WATCHDOG_MAX_RETRIES = Math.max(0, Number(process.env.EXECUTION_WATCHDOG_MAX_RETRIES ?? 2));
 const EXECUTION_WATCHDOG_SESSION_SCAN_LIMIT = Math.max(50, Number(process.env.EXECUTION_WATCHDOG_SESSION_SCAN_LIMIT ?? 200));
@@ -708,7 +712,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.2.31'
+  '0.4.1'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -6561,12 +6565,34 @@ function isExtensionRunnerSession(session = null) {
     && isDeclarativeExtensionExecutionAgentId(preferred);
 }
 
-function buildExtensionRunDispatchAuthorization({ reason = 'user_started_execution' } = {}) {
+const extensionClaimLocks = new Map();
+
+async function withExtensionClaimLock(sessionId, task) {
+  const key = String(sessionId || '');
+  const previous = extensionClaimLocks.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  extensionClaimLocks.set(key, tail);
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (extensionClaimLocks.get(key) === tail) extensionClaimLocks.delete(key);
+  }
+}
+
+function buildExtensionRunDispatchAuthorization({ reason = 'user_started_execution', nativeRunnerDeviceId = '' } = {}) {
   const authorizedAt = new Date().toISOString();
   return {
     authorizedAt,
     expiresAt: new Date(Date.now() + EXTENSION_RUN_DISPATCH_TTL_MS).toISOString(),
-    reason: String(reason || 'user_started_execution').slice(0, 80)
+    reason: String(reason || 'user_started_execution').slice(0, 80),
+    nonce: crypto.randomBytes(24).toString('base64url'),
+    nativeRunnerDeviceId: String(nativeRunnerDeviceId || '').trim() || null
   };
 }
 
@@ -6736,6 +6762,13 @@ function formatConnectorSessionForExtension(session = null) {
     finalSelections: selections,
     extensionMissionPlan,
     extensionMissionPlanState: getExtensionMissionPlanStateForSession(session, extensionMissionPlan),
+    extensionRunDispatch: hasActiveExtensionRunDispatch(session)
+      ? {
+          authorizedAt: session.extensionRunDispatch?.authorizedAt || null,
+          expiresAt: session.extensionRunDispatch?.expiresAt || null,
+          nonce: session.extensionRunDispatch?.nonce || null
+        }
+      : null,
     missionBoundAuth: formatExtensionMissionCapability(session.missionBoundAuth),
     missionBoundaryLatestHash: session.missionBoundaryLatestHash || null,
     missionBoundaryEventCount: Array.isArray(session.missionBoundaryTrace) ? session.missionBoundaryTrace.length : 0,
@@ -6770,14 +6803,20 @@ function canNativeRunnerDeviceAccessConnectorSession(device, session, pluginId =
 function getNativeRunnerDeviceHeartbeat(device = null) {
   const lastPollAt = device?.lastPollAt || null;
   const lastSeenAt = device?.lastSeenAt || null;
-  const heartbeatAt = lastPollAt || lastSeenAt || null;
-  const heartbeatMs = Date.parse(heartbeatAt || '');
   const pollMs = Date.parse(lastPollAt || '');
+  const seenMs = Date.parse(lastSeenAt || '');
+  const heartbeatMs = Math.max(
+    Number.isFinite(pollMs) ? pollMs : 0,
+    Number.isFinite(seenMs) ? seenMs : 0
+  );
+  const heartbeatAt = heartbeatMs === (Number.isFinite(seenMs) ? seenMs : 0)
+    ? lastSeenAt
+    : lastPollAt;
   return {
     lastPollAt,
     lastSeenAt,
     heartbeatAt,
-    heartbeatAgeMs: Number.isFinite(heartbeatMs) ? Date.now() - heartbeatMs : null,
+    heartbeatAgeMs: heartbeatMs > 0 ? Date.now() - heartbeatMs : null,
     pollAgeMs: Number.isFinite(pollMs) ? Date.now() - pollMs : null,
     hasPoll: Number.isFinite(pollMs)
   };
@@ -6785,7 +6824,9 @@ function getNativeRunnerDeviceHeartbeat(device = null) {
 
 function nativeRunnerDeviceHasFreshPoll(device = null, timeoutMs = NATIVE_RUNNER_HEARTBEAT_TIMEOUT_MS) {
   const heartbeat = getNativeRunnerDeviceHeartbeat(device);
-  return Boolean(heartbeat.hasPoll && heartbeat.pollAgeMs != null && heartbeat.pollAgeMs >= 0 && heartbeat.pollAgeMs < timeoutMs);
+  // A runner-status or signed checkpoint call is as meaningful as a queue
+  // poll for an in-progress, already-authorized mission.
+  return Boolean(heartbeat.heartbeatAgeMs != null && heartbeat.heartbeatAgeMs >= 0 && heartbeat.heartbeatAgeMs < timeoutMs);
 }
 
 function compareDottedVersions(left = '', right = '') {
@@ -7620,7 +7661,9 @@ function isNativeRunnerExecutionSession(session) {
 function getNativeRunnerDeviceForSession(session) {
   if (!isNativeRunnerExecutionSession(session)) return null;
   const pluginId = String(session?.preferredExecutionAgentId || NATIVE_RUNNER_PLUGIN_ID).trim() || NATIVE_RUNNER_PLUGIN_ID;
-  const preferredDeviceId = String(session?.nativeRunnerDeviceId || '').trim();
+  const preferredDeviceId = String(
+    session?.claimedByNativeRunnerDeviceId || session?.nativeRunnerDeviceId || ''
+  ).trim();
   return listNativeRunnerDevices(100)
     .filter((device) => isNativeRunnerDeviceActive(device))
     .filter((device) => !preferredDeviceId || device.id === preferredDeviceId)
@@ -7643,21 +7686,47 @@ function getConnectorSessionWatchdogRetryCount(session) {
   return Math.max(0, Math.trunc(Number(session?.executionWatchdog?.retryCount || 0)));
 }
 
-function isNativeRunnerAwaitingSitePermission(session) {
+function getNativeRunnerHumanBoundary(session) {
   if (!isNativeRunnerExecutionSession(session)) return false;
   const trace = Array.isArray(session?.executionTrace) ? session.executionTrace : [];
-  const latestState = String(trace.at(-1)?.state || '').trim().toLowerCase();
-  return latestState === 'permission_required';
+  const latestState = String(
+    session?.executionLive?.state || trace.at(-1)?.state || ''
+  ).trim().toLowerCase();
+  const supportedStates = new Set([
+    'permission_required',
+    'waiting_for_payment_autofill',
+    'payment_required',
+    'login_required',
+    'captcha_or_challenge_required',
+    'final_approval_required',
+    'needs_final_approval',
+    'review_ready'
+  ]);
+  return supportedStates.has(latestState)
+    ? { state: latestState, createdAt: session?.executionLive?.createdAt || trace.at(-1)?.createdAt || null }
+    : null;
+}
+
+function isNativeRunnerAwaitingSitePermission(session) {
+  return getNativeRunnerHumanBoundary(session)?.state === 'permission_required';
 }
 
 function resolveConnectorSessionWatchdogTimeoutMs(session) {
   if (isYourAgentExecutionSession(session)) return EXECUTION_WATCHDOG_YOUR_AGENT_TIMEOUT_MS;
+  const humanBoundary = getNativeRunnerHumanBoundary(session);
+  if (humanBoundary && humanBoundary.state !== 'permission_required') {
+    return EXECUTION_WATCHDOG_NATIVE_RUNNER_HUMAN_BOUNDARY_TIMEOUT_MS;
+  }
   // Site approval is an intentional human pause, but it cannot remain an
   // executable mission forever. Expire abandoned prompts so the extension
   // does not advertise a stale merchant after the user has moved on.
   if (isNativeRunnerAwaitingSitePermission(session)) return EXECUTION_WATCHDOG_NATIVE_RUNNER_PERMISSION_TIMEOUT_MS;
   const status = String(session?.status || '').trim().toLowerCase();
   if (isNativeRunnerExecutionSession(session)) {
+    // Chrome alarms are a one-minute best-effort delivery fallback for an
+    // explicit, five-minute browser dispatch. Let a queued extension mission
+    // survive long enough for that fallback instead of killing it at 60s.
+    if (status === 'queued') return EXECUTION_WATCHDOG_NATIVE_RUNNER_CLAIM_TIMEOUT_MS;
     if (status === 'claimed') return EXECUTION_WATCHDOG_NATIVE_RUNNER_CLAIM_TIMEOUT_MS;
     if (status === 'executing') return EXECUTION_WATCHDOG_NATIVE_RUNNER_EXECUTING_TIMEOUT_MS;
   }
@@ -7690,6 +7759,12 @@ function buildExecutionWatchdogFailureMessage(session, reasonKey, retryCount = 0
   } else if (isNativeRunnerExecutionSession(session)) {
     if (reasonKey === 'permission_timeout') {
       message = 'The browser-access request expired before it was approved.';
+    } else if (reasonKey === 'payment_wait_timeout') {
+      message = 'Magic City stopped waiting for local card selection. No card details were read or stored; reopen the checkout and continue when Chrome autofill is ready.';
+    } else if (reasonKey === 'login_wait_timeout') {
+      message = 'Magic City stopped waiting for local sign-in. Sign in in the prepared tab, then retry the same mission.';
+    } else if (reasonKey === 'final_review_timeout') {
+      message = 'Magic City stopped waiting for final order approval. The prepared checkout was left untouched.';
     } else if (reasonKey === 'queued_timeout') {
       message = `Magic City Runner did not pick up this ${laneLabel} in time.`;
     } else if (reasonKey === 'claimed_timeout') {
@@ -8020,8 +8095,15 @@ async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {})
           pollFresh: runnerPoll.fresh
         }));
       }
-      const reasonKey = isNativeRunnerAwaitingSitePermission(session)
+      const humanBoundary = getNativeRunnerHumanBoundary(session);
+      const reasonKey = humanBoundary?.state === 'permission_required'
         ? 'permission_timeout'
+        : humanBoundary?.state === 'waiting_for_payment_autofill' || humanBoundary?.state === 'payment_required'
+          ? 'payment_wait_timeout'
+          : humanBoundary?.state === 'login_required' || humanBoundary?.state === 'captcha_or_challenge_required'
+            ? 'login_wait_timeout'
+            : humanBoundary?.state === 'final_approval_required' || humanBoundary?.state === 'needs_final_approval' || humanBoundary?.state === 'review_ready'
+              ? 'final_review_timeout'
         : String(session.status || '').trim().toLowerCase() === 'queued'
           ? 'queued_timeout'
           : String(session.status || '').trim().toLowerCase() === 'claimed'
@@ -15296,12 +15378,16 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === 'GET' && urlPath === '/health') {
-      return sendJson(res, 200, {
-        status: 'ok',
+      const persistence = getPublicPersistenceStatus();
+      const persistenceReady = persistence.ready
+        && persistence.healthy
+        && (!persistence.singleWriterRequired || persistence.writerLockAcquired);
+      return sendJson(res, persistenceReady ? 200 : 503, {
+        status: persistenceReady ? 'ok' : 'degraded',
         service: 'agent-verification',
         now: new Date().toISOString(),
         productionPersistenceRequired: MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE,
-        persistence: getPublicPersistenceStatus()
+        persistence
       });
     }
 
@@ -18675,6 +18761,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      let extensionDispatchDeviceId = null;
       if (
         completionMode === 'agent_checkout'
         && isBrowserSession
@@ -18724,15 +18811,19 @@ const server = http.createServer(async (req, res) => {
             requireExecutableWorker: !declarativeExtensionRun
           }
         );
-        const canQueueForExtensionWake = Boolean(
+        extensionDispatchDeviceId = nativeRunnerReadiness.device?.id || null;
+        // An MV3 service worker is intentionally allowed to sleep between
+        // browser missions. For the packaged declarative runner, a paired and
+        // current device can therefore receive this user-initiated, exact
+        // session wake before its next polling heartbeat. Site permission and
+        // session ownership remain enforced by the extension when it claims.
+        const canDispatchExtensionWake = Boolean(
           declarativeExtensionRun
           && nativeRunnerReadiness.device
-          && nativeRunnerReadiness.reason !== 'runner_device_not_found'
-          && nativeRunnerReadiness.reason !== 'runner_not_paired'
-          && nativeRunnerReadiness.reason !== 'runner_extension_outdated'
           && !nativeRunnerReadiness.extensionUpdateRequired
+          && !['runner_device_not_found', 'runner_not_paired'].includes(nativeRunnerReadiness.reason)
         );
-        if (!nativeRunnerReadiness.ready && !canQueueForExtensionWake) {
+        if (!nativeRunnerReadiness.ready && !canDispatchExtensionWake) {
           console.warn('[agent-verification] native runner not ready for execution start', JSON.stringify({
             sessionId,
             reason: nativeRunnerReadiness.reason,
@@ -18747,8 +18838,8 @@ const server = http.createServer(async (req, res) => {
             session: getConnectorSession(sessionId) || session
           });
         }
-        if (!nativeRunnerReadiness.ready && canQueueForExtensionWake) {
-          console.warn('[agent-verification] queuing browser mission for extension wake', JSON.stringify({
+        if (!nativeRunnerReadiness.ready && canDispatchExtensionWake) {
+          console.info('[agent-verification] dispatching exact browser mission wake', JSON.stringify({
             sessionId,
             reason: nativeRunnerReadiness.reason,
             selectedExecutionAgentId: selectedExecutionAgentIdForRun,
@@ -18963,7 +19054,8 @@ const server = http.createServer(async (req, res) => {
                 ? 'user_resumed_checkout_reconcile'
               : retryingFailedSession
                 ? 'user_retried_execution'
-                : 'user_started_execution'
+                : 'user_started_execution',
+            nativeRunnerDeviceId: extensionDispatchDeviceId
           })
         : null;
       if (extensionSitePermissionPause) nextTrace.push({
@@ -19143,6 +19235,7 @@ const server = http.createServer(async (req, res) => {
         claimedAt: resetExpiredBrowserMission ? null : session.claimedAt ?? null,
         claimedByPluginId: resetExpiredBrowserMission ? null : session.claimedByPluginId ?? null,
         claimedByRegistrationId: resetExpiredBrowserMission ? null : session.claimedByRegistrationId ?? null,
+        claimedByNativeRunnerDeviceId: resetExpiredBrowserMission ? null : session.claimedByNativeRunnerDeviceId ?? null,
         pluginEndpoint: resetExpiredBrowserMission ? null : session.pluginEndpoint ?? null,
         completionMode,
         completionRequestedAt: new Date().toISOString(),
@@ -19229,6 +19322,7 @@ const server = http.createServer(async (req, res) => {
         claimedAt: nextSessionState.claimedAt,
         claimedByPluginId: nextSessionState.claimedByPluginId,
         claimedByRegistrationId: nextSessionState.claimedByRegistrationId,
+        claimedByNativeRunnerDeviceId: nextSessionState.claimedByNativeRunnerDeviceId,
         pluginEndpoint: nextSessionState.pluginEndpoint,
         completionMode: nextSessionState.completionMode,
         completionRequestedAt: nextSessionState.completionRequestedAt,
@@ -19552,12 +19646,25 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const body = await readBody(req);
       requireFields(body, ['pluginId']);
-      requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'runner_status_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
       if (!['queued', 'confirmed', 'claimed', 'executing'].includes(String(session.status || '').toLowerCase())) {
         return sendJson(res, 409, { error: 'execution_not_active', session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId) });
+      }
+      if (pluginAuth.type === 'native_runner') {
+        touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice, {
+          lastSeenAt: new Date().toISOString()
+        });
+        recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {
+          action: 'runner_status',
+          status: 'success',
+          source: 'native_runner',
+          sessionId,
+          pluginId: body.pluginId,
+          capability: 'inspect'
+        });
       }
       return sendJson(res, 200, {
         active: true,
@@ -19636,30 +19743,65 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/claim$/.test(urlPath)) {
       const sessionId = urlPath.split('/')[3];
-      const session = getConnectorSession(sessionId);
-      if (!session) return notFound(res);
-      const body = await readBody(req);
-      requireFields(body, ['pluginId']);
-      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
-      const plugin = getPluginRegistration(body.pluginId);
-      if (!plugin || plugin.status !== 'active') {
-        return sendJson(res, 404, { error: 'plugin_not_found' });
-      }
-      if (plugin.kind && session.handoffData?.kind && plugin.kind !== session.handoffData.kind) {
-        return sendJson(res, 409, { error: 'plugin_kind_mismatch', sessionKind: session.handoffData?.kind, pluginKind: plugin.kind });
-      }
-      if (session.completionMode !== 'agent_checkout') {
-        return sendJson(res, 409, { error: 'agent_completion_not_requested', completionMode: session.completionMode ?? null });
-      }
-      if (!canExecutionPluginActForPreferredAgent({ session, pluginId: plugin.pluginId })) {
+      return await withExtensionClaimLock(sessionId, async () => {
+        const session = getConnectorSession(sessionId);
+        if (!session) return notFound(res);
+        const body = await readBody(req);
+        requireFields(body, ['pluginId']);
+        const declarativeExtensionClaim = isChromeExtensionDeclarativeRunnerRequest(req);
+        const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+        const plugin = getPluginRegistration(body.pluginId);
+        if (!plugin || plugin.status !== 'active') {
+          return sendJson(res, 404, { error: 'plugin_not_found' });
+        }
+        if (plugin.kind && session.handoffData?.kind && plugin.kind !== session.handoffData.kind) {
+          return sendJson(res, 409, { error: 'plugin_kind_mismatch', sessionKind: session.handoffData?.kind, pluginKind: plugin.kind });
+        }
+        if (session.completionMode !== 'agent_checkout') {
+          return sendJson(res, 409, { error: 'agent_completion_not_requested', completionMode: session.completionMode ?? null });
+        }
+        if (!canExecutionPluginActForPreferredAgent({ session, pluginId: plugin.pluginId })) {
         console.warn('[agent-verification] execution plugin claim rejected', JSON.stringify({
           sessionId,
           kind: session.handoffData?.kind || null,
           preferredExecutionAgentId: session.preferredExecutionAgentId || null,
           pluginId: plugin.pluginId
         }));
-        return sendJson(res, 409, { error: 'preferred_execution_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
-      }
+          return sendJson(res, 409, { error: 'preferred_execution_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
+        }
+        if (declarativeExtensionClaim) {
+          if (pluginAuth.type !== 'native_runner' || !pluginAuth.nativeRunnerDevice?.id) {
+            return sendJson(res, 403, { error: 'native_runner_required_for_extension_claim' });
+          }
+          if (isActiveExtensionClaimForDevice(session, pluginAuth.nativeRunnerDevice)) {
+            return sendJson(res, 200, {
+              claimed: true,
+              resumed: true,
+              session: formatConnectorSessionForRunnerResponse(req, session, plugin.pluginId),
+              plugin
+            });
+          }
+          const dispatch = session.extensionRunDispatch || null;
+          const dispatchDeviceId = String(dispatch?.nativeRunnerDeviceId || '').trim();
+          const dispatchNonce = String(dispatch?.nonce || '').trim();
+          const suppliedDispatchNonce = String(body.extensionDispatchNonce || '').trim();
+          if (!hasActiveExtensionRunDispatch(session)
+            || !dispatchNonce
+            || dispatchDeviceId !== String(pluginAuth.nativeRunnerDevice.id)
+            || suppliedDispatchNonce !== dispatchNonce) {
+            return sendJson(res, 409, {
+              error: 'extension_run_dispatch_required',
+              message: 'This browser mission must be explicitly dispatched to this paired device before it can be claimed.'
+            });
+          }
+          const claimableStatus = String(session.status || '').trim().toLowerCase();
+          if (!['queued', 'confirmed'].includes(claimableStatus)) {
+            return sendJson(res, 409, {
+              error: 'extension_session_not_claimable',
+              status: session.status || null
+            });
+          }
+        }
       const sessionForClaimBase = enforceMissionToolBoundary({
         req,
         session,
@@ -19676,10 +19818,10 @@ const server = http.createServer(async (req, res) => {
         holderPublicKeyJwk: body.holderPublicKeyJwk || body.holder?.publicKeyJwk || null,
         holderPublicKeyPem: body.holderPublicKeyPem || body.holder?.publicKeyPem || ''
       });
-      const extensionMissionPlan = isChromeExtensionDeclarativeRunnerRequest(req)
+      const extensionMissionPlan = declarativeExtensionClaim
         ? getExtensionMissionPlanForSession(sessionForClaim)
         : sessionForClaim.extensionMissionPlan || null;
-      if (isChromeExtensionDeclarativeRunnerRequest(req) && !extensionMissionPlan) {
+      if (declarativeExtensionClaim && !extensionMissionPlan) {
         return sendJson(res, 409, {
           error: 'extension_mission_plan_invalid',
           message: 'Magic City could not create a valid browser mission plan for this session. Retry from Magic City after adding a target site.'
@@ -19693,11 +19835,11 @@ const server = http.createServer(async (req, res) => {
         claimedAt: new Date().toISOString(),
         claimedByPluginId: plugin.pluginId,
         claimedByRegistrationId: plugin.id,
-        ...(pluginAuth.type === 'native_runner'
-          ? { claimedByNativeRunnerDeviceId: pluginAuth.nativeRunnerDevice.id }
-          : {}),
+        claimedByNativeRunnerDeviceId: pluginAuth.type === 'native_runner'
+          ? pluginAuth.nativeRunnerDevice.id
+          : null,
         pluginEndpoint: plugin.endpoint,
-        ...(isChromeExtensionDeclarativeRunnerRequest(req) ? {
+        ...(declarativeExtensionClaim ? {
           extensionRunDispatch: null,
           extensionRunDispatchConsumedAt: new Date().toISOString()
         } : {}),
@@ -19720,6 +19862,7 @@ const server = http.createServer(async (req, res) => {
         claimed: true,
         session: formatConnectorSessionForRunnerResponse(req, updated, plugin.pluginId),
         plugin
+      });
       });
     }
 

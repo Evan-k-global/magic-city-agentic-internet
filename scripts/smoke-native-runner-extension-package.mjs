@@ -58,9 +58,57 @@ if (/startsWith\('v0\.3\.0'\)/.test(packagedLegacyBackground)) {
 if (!/scheduleRunnerResume\(\);[\s\S]{0,240}return data\.session \|\| session/.test(packagedLegacyBackground)) {
   fail('each persisted browser checkpoint must arm active-mission recovery');
 }
+if (!/activeRun:\s*null/.test(packagedLegacyBackground)
+  || !/async function saveActiveRun/.test(packagedLegacyBackground)
+  || !/async function clearActiveRun/.test(packagedLegacyBackground)
+  || !/phase:\s*'waiting_for_payment_autofill'/.test(packagedLegacyBackground)) {
+  fail('payment handoff must persist a durable active run for automatic recovery');
+}
+if (!/function actionWasSatisfiedBeforeRestart/.test(packagedLegacyBackground)
+  || !/recoveredFromInterruption:\s*true/.test(packagedLegacyBackground)) {
+  fail('interrupted browser steps must re-observe verified merchant state before repeating an action');
+}
+if (!/function normalizeActiveRunCandidate/.test(packagedLegacyBackground)
+  || !/selectedCandidate:\s*normalizeActiveRunCandidate\(entry\?\.selectedCandidate\)/.test(packagedLegacyBackground)
+  || !/selectedCandidate:\s*progress\.selectedCandidate/.test(packagedLegacyBackground)) {
+  fail('interrupted cart actions must retain a compact selected-product identity for replay protection');
+}
+if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,320}if \(!resumingPersistedRun\) \{[\s\S]{0,120}phase: 'claimed'/.test(packagedLegacyBackground)) {
+  fail('a resumed run must inspect its durable active-run marker before writing phase claimed');
+}
+if (!/const isCartMutation = action\.type === 'click_intent' && action\.intent === 'add_to_cart';[\s\S]{0,500}cartStateVerifiesCandidateSelection\(report, action\)/.test(packagedLegacyBackground)) {
+  fail('a recovered cart mutation must verify the selected product before skipping a retry');
+}
+if (!/finalSubmitRequested: action\.type === 'final_submit' && Boolean\(recoveredState\?\.orderSubmitted/.test(packagedLegacyBackground)) {
+  fail('a recovered merchant order confirmation must retain final-submit evidence');
+}
+const checkoutNavigationMarker = 'Opening checkout is navigation only.';
+const checkoutNavigationIndex = packagedLegacyBackground.indexOf(checkoutNavigationMarker);
+const checkoutNavigationSection = checkoutNavigationIndex >= 0
+  ? packagedLegacyBackground.slice(Math.max(0, checkoutNavigationIndex - 900), checkoutNavigationIndex + 900)
+  : '';
+if (!checkoutNavigationSection || /runCheckoutProfileReconcile/.test(checkoutNavigationSection)) {
+  fail('open-checkout must remain a navigation primitive, without hidden profile reconciliation');
+}
 if (!/ACTIVE_MISSION_CONTINUATION_DELAY_MS/.test(packagedBackground)
   || !/result\?\.status === 'already_running'/.test(packagedBackground)) {
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
+}
+if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.test(packagedBackground)
+  || !/return dispatch\(message, \{ origin \}\);/.test(packagedBackground)
+  || !/Keep the external message open through the exact-session claim/.test(packagedBackground)) {
+  fail('external runner wake must run through the direct exact-session claim path, without detached MV3 work');
+}
+if (!/async function pollAndExecute\(requestedSessionId = ''\)/.test(packagedLegacyBackground)
+  || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)) {
+  fail('runner execution must select the exact session requested by Magic City');
+}
+if (!/async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id\)/.test(packagedLegacyBackground)) {
+  fail('heartbeat fallback must execute only a still-valid user-dispatched browser mission');
+}
+if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackground)
+  || !/const navigation = waitForTabNavigation\(tabId, beforeUrl, timeoutMs\);[\s\S]*const updatedTab = await withTimeout/.test(packagedLegacyBackground)) {
+  fail('navigation readiness must be idempotent and subscribe before the tab update');
 }
 
   const smoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {

@@ -20,16 +20,21 @@ async function getAvailablePort() {
 }
 
 async function request(baseUrl, pathName, { method = 'GET', body = null, key = '', cookie = '', bearer = '' } = {}) {
-  const response = await fetch(`${baseUrl}${pathName}`, {
-    method,
-    headers: {
-      ...(body ? { 'content-type': 'application/json' } : {}),
-      ...(key ? { 'x-api-key': key } : {}),
-      ...(cookie ? { cookie } : {}),
-      ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+  let response;
+  try {
+    response = await fetch(`${baseUrl}${pathName}`, {
+      method,
+      headers: {
+        ...(body ? { 'content-type': 'application/json' } : {}),
+        ...(key ? { 'x-api-key': key } : {}),
+        ...(cookie ? { cookie } : {}),
+        ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (error) {
+    throw new Error(`request_failed:${method}:${pathName}:${error?.message || String(error)}`);
+  }
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
   const setCookie = response.headers.get('set-cookie') || '';
@@ -48,6 +53,14 @@ async function waitForServer(baseUrl) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error('server_start_timeout');
+}
+
+async function stopChildProcess(child) {
+  if (child.exitCode !== null || child.signalCode) return;
+  await new Promise((resolve) => {
+    child.once('exit', resolve);
+    child.kill('SIGTERM');
+  });
 }
 
 async function registerUser(baseUrl, email) {
@@ -173,13 +186,17 @@ async function main() {
       kind: 'food'
     }), 403);
 
-    await expectStatus('claim_other_user_session_denied', request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionB.id)}/claim`, {
-      method: 'POST',
-      bearer: tokenA,
-      body: {
-        pluginId: 'local-authenticated-browser-plugin'
-      }
-    }), 404);
+    try {
+      await expectStatus('claim_other_user_session_denied', request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionB.id)}/claim`, {
+        method: 'POST',
+        bearer: tokenA,
+        body: {
+          pluginId: 'local-authenticated-browser-plugin'
+        }
+      }), 404);
+    } catch (error) {
+      throw new Error(`${error?.message || String(error)}\nchild_stderr:\n${stderr || '(none)'}`);
+    }
 
     const claim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionA.id)}/claim`, {
       method: 'POST',
@@ -221,8 +238,7 @@ async function main() {
 
     console.log('native-runner security regression passed');
   } finally {
-    child.kill('SIGTERM');
-    await new Promise((resolve) => child.once('exit', resolve));
+    await stopChildProcess(child);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 
