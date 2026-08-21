@@ -883,7 +883,9 @@ function getBrowserWorkerInputs(session) {
       paymentProfileDisplay: cleanTravelHint(selections.paymentProfileDisplay) || 'agent_card_label_and_last4',
       checkoutRunnerMode: normalizeCheckoutRunnerMode(selections.checkoutRunnerMode),
       checkoutRunnerReceiptProof: cleanTravelHint(selections.checkoutRunnerReceiptProof) || 'receipt_hashes_and_screenshots',
-      checkoutRunnerStopBeforeFinalSubmit: selections.checkoutRunnerStopBeforeFinalSubmit === true,
+      checkoutRunnerStopBeforeFinalSubmit: typeof selections.checkoutRunnerStopBeforeFinalSubmit === 'boolean'
+        ? selections.checkoutRunnerStopBeforeFinalSubmit
+        : !amazonCheckoutMission,
       limitSource: cleanTravelHint(selections.limitSource) || 'bank_controls_and_magic_city_policy',
       allowedUse: cleanTravelHint(selections.allowedUse) || 'internet_agent,procurement,bookings,applications',
       trustTier: normalizeBrowserTrustTier(useInferredBoundedAuthority ? inferredAuthority.trustTier : explicitTrustTier || inferredAuthority.trustTier),
@@ -1107,7 +1109,7 @@ function evaluateBrowserPaymentPolicy(inputs, finalUrl = '') {
     authProfileMode: profile.authProfileMode || 'public_handoff',
     loginTouchpointPolicy: profile.loginTouchpointPolicy || 'handoff_before_login_or_mfa',
     paymentTouchpointPolicy: profile.paymentTouchpointPolicy || 'handoff_before_payment',
-    finalApprovalPolicy: profile.finalApprovalPolicy || 'auto_submit_after_verified_checkout',
+    finalApprovalPolicy: profile.finalApprovalPolicy || 'pause_before_final_approval',
     blockedUses,
     decision,
     reasons,
@@ -1136,7 +1138,9 @@ function buildLocalCheckoutRunnerPolicy(inputs, finalUrl = '') {
       'stop_before_final_submit',
       'receipt_hash'
     ],
-    stopBeforeFinalSubmit: profile.checkoutRunnerStopBeforeFinalSubmit === true,
+    stopBeforeFinalSubmit: typeof profile.checkoutRunnerStopBeforeFinalSubmit === 'boolean'
+      ? profile.checkoutRunnerStopBeforeFinalSubmit
+      : profile.finalApprovalPolicy !== 'auto_submit_after_verified_checkout',
     receiptProof: profile.checkoutRunnerReceiptProof || 'receipt_hashes_and_screenshots',
     authoritySplit: {
       cardAuthority: profile.cardAuthority || 'issuer_or_card_wallet',
@@ -1148,7 +1152,7 @@ function buildLocalCheckoutRunnerPolicy(inputs, finalUrl = '') {
     authProfileMode: profile.authProfileMode || 'public_handoff',
     loginTouchpointPolicy: profile.loginTouchpointPolicy || 'handoff_before_login_or_mfa',
     paymentTouchpointPolicy: profile.paymentTouchpointPolicy || 'handoff_before_payment',
-    finalApprovalPolicy: profile.finalApprovalPolicy || 'auto_submit_after_verified_checkout',
+    finalApprovalPolicy: profile.finalApprovalPolicy || 'pause_before_final_approval',
     serverReceivesRawCard: false,
     rawCardDataHandledByMagicCity: false,
     userFacingRevocation: 'remove_payment_profile'

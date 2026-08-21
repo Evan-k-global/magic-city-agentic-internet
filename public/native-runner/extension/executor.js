@@ -3075,9 +3075,6 @@
     if (summary.deliveryConfirmed !== true) {
       return { completed: false, reason: 'The preferred delivery option is not confirmed yet.', state };
     }
-    const merchantCheckoutDefault = action.saveMerchantCheckoutDefault === true
-      ? saveAmazonCheckoutDefault()
-      : { attempted: false, saved: false, reason: 'not_requested' };
     const controls = finalOrderControls();
     if (!controls.length) {
       return { completed: false, reason: 'Magic City could not identify a verified final order control.', state };
@@ -3086,6 +3083,13 @@
     if (control.disabled) {
       return { completed: false, reason: 'The final order control is not available.', state };
     }
+    // This Amazon preference changes a persistent merchant default. Only touch
+    // it after the one signed final-order control is present and enabled. It is
+    // deliberately best-effort: a missing or failed checkbox never blocks the
+    // already-authorized order submission.
+    const merchantCheckoutDefault = action.saveMerchantCheckoutDefault === true
+      ? saveAmazonCheckoutDefault()
+      : { attempted: false, saved: false, reason: 'not_requested' };
     control.scrollIntoView({ block: 'center', inline: 'center' });
     try {
       control.click();

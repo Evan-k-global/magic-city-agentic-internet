@@ -150,10 +150,14 @@ export function evaluateBrowserExtensionFulfillment({ status = '', result = null
     return { status: 'fulfilled', accepted: true, proofEligible: true, reason: 'order_submitted' };
   }
   if (browser.finalSubmitRequested === true && checkoutReached) {
-    if (milestoneContractActive && !verifiedMilestones.has('final_submit_requested')) {
-      return { status: 'failed', accepted: false, proofEligible: false, reason: 'final_submit_not_verified' };
-    }
-    return { status: 'fulfilled', accepted: true, proofEligible: true, reason: 'final_submit_requested' };
+    return {
+      status: 'failed',
+      accepted: false,
+      proofEligible: false,
+      reason: milestoneContractActive && !verifiedMilestones.has('final_submit_requested')
+        ? 'final_submit_not_verified'
+        : 'merchant_order_confirmation_missing'
+    };
   }
   if (VERIFIED_HUMAN_BOUNDARIES.has(stopState)) {
     const earlyBoundary = stopState === 'login_required' || stopState === 'captcha_or_challenge_required';
@@ -491,11 +495,16 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     maxPrice,
     expectedMilestone: 'final_submit_requested'
   });
+  const confirmMerchantOrderAction = () => buildAction('confirm-merchant-order', 'inspect', 'read_public_page', {
+    awaitMerchantOrderConfirmation: true,
+    expectedMilestone: 'order_submitted'
+  });
   const reviewSubmitActions = [
     buildAction('inspect-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true }),
     ...(fillLocalCheckoutProfile ? [buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeFinalSubmit: true })] : []),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true, expectedMilestone: 'final_review_ready' }),
     finalSubmitAction(),
+    confirmMerchantOrderAction(),
     buildAction('pause-for-user', 'pause', 'handoff', { reason: 'order_submission_requested' })
   ];
   // A checkout can expose its delivery selector first and its card selector only
@@ -533,7 +542,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction()] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'basket_review_ready' })
         ]
       : [
@@ -560,7 +569,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           ...(fillLocalCheckoutProfile ? [buildAction('fill-checkout-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction()] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })
         ])
     : [];
@@ -614,6 +623,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     resumeCheckoutReconcile,
     finalApprovalPolicy: autoSubmitAfterVerifiedCheckout ? 'auto_submit_after_verified_checkout' : 'pause_before_final_approval',
     saveMerchantCheckoutDefault,
+    requireMerchantOrderConfirmation: autoSubmitAfterVerifiedCheckout,
     limits: {
       maxActions: Math.min(MAX_PLAN_ACTIONS, policyBoundActions.length),
       maxRevisions: 2,
@@ -662,6 +672,19 @@ export function validateBrowserExtensionPlan(plan = null) {
     || action.missionAction !== 'final_submit'
   ))) {
     return { valid: false, reason: 'plan_final_submit_invalid' };
+  }
+  const finalSubmitIndex = actions.findIndex((action) => action.type === 'final_submit');
+  if (finalSubmitIndex >= 0 && !actions.slice(finalSubmitIndex + 1).some((action) => (
+    action.type === 'inspect'
+    && action.awaitMerchantOrderConfirmation === true
+    && action.expectedMilestone === 'order_submitted'
+  ))) {
+    return { valid: false, reason: 'plan_merchant_confirmation_missing' };
+  }
+  if (actions.some((action) => action.awaitMerchantOrderConfirmation === true && (
+    action.type !== 'inspect' || action.expectedMilestone !== 'order_submitted'
+  ))) {
+    return { valid: false, reason: 'plan_merchant_confirmation_invalid' };
   }
   const { planHash, ...unsigned } = plan;
   if (hashPlan(unsigned) !== planHash) return { valid: false, reason: 'plan_hash_invalid' };

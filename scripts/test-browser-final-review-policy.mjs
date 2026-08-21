@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   buildBrowserExtensionMissionPlan,
+  evaluateBrowserExtensionFulfillment,
   validateBrowserExtensionPlan
 } from '../src/browserMissionPlan.js';
 
@@ -29,16 +30,21 @@ assert.equal(automaticPlan.fulfillmentPolicy, 'amazon_free_shipping_preferred');
 assert.equal(automaticPlan.primeRequired, true);
 assert.ok(automaticPlan.actions.every((action) => action.fulfillmentPolicy === 'amazon_free_shipping_preferred'));
 assert.ok(automaticPlan.actions.every((action) => action.primeRequired === true));
-assert.equal(automaticPlan.actions.at(-2)?.type, 'final_submit');
-assert.equal(automaticPlan.actions.at(-2)?.autoSubmitAfterVerifiedCheckout, true);
-assert.equal(automaticPlan.actions.at(-2)?.saveMerchantCheckoutDefault, true);
+assert.equal(automaticPlan.requireMerchantOrderConfirmation, true);
+assert.equal(automaticPlan.actions.at(-3)?.type, 'final_submit');
+assert.equal(automaticPlan.actions.at(-3)?.autoSubmitAfterVerifiedCheckout, true);
+assert.equal(automaticPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
+assert.equal(automaticPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
+assert.equal(automaticPlan.actions.at(-2)?.expectedMilestone, 'order_submitted');
 
 const defaultAmazonPlan = buildBrowserExtensionMissionPlan(baseSession);
 assert.equal(validateBrowserExtensionPlan(defaultAmazonPlan).valid, true);
 assert.equal(defaultAmazonPlan.limits.stopBeforeFinalSubmit, false);
 assert.equal(defaultAmazonPlan.saveMerchantCheckoutDefault, true);
-assert.equal(defaultAmazonPlan.actions.at(-2)?.type, 'final_submit');
-assert.equal(defaultAmazonPlan.actions.at(-2)?.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.requireMerchantOrderConfirmation, true);
+assert.equal(defaultAmazonPlan.actions.at(-3)?.type, 'final_submit');
+assert.equal(defaultAmazonPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 
 const reviewPlan = buildBrowserExtensionMissionPlan({
   ...baseSession,
@@ -76,7 +82,7 @@ assert.equal(approvedResumePlan.resumeFinalSubmit, true);
 assert.equal(approvedResumePlan.limits.stopBeforeFinalSubmit, false);
 assert.deepEqual(
   approvedResumePlan.actions.map((action) => action.type),
-  ['inspect', 'fill_checkout_profile', 'inspect', 'final_submit', 'pause']
+  ['inspect', 'fill_checkout_profile', 'inspect', 'final_submit', 'inspect', 'pause']
 );
 assert.equal(approvedResumePlan.actions.some((action) => action.type === 'navigate'), false);
 assert.equal(approvedResumePlan.actions.find((action) => action.type === 'final_submit')?.maxPrice, 4);
@@ -104,4 +110,33 @@ assert.deepEqual(
 );
 assert.equal(checkoutReconcilePlan.actions.some((action) => action.type === 'final_submit'), false);
 
-console.log('browser final review policy ok');
+const clickedButUnconfirmed = evaluateBrowserExtensionFulfillment({
+  status: 'fulfilled',
+  result: {
+    browserExecution: {
+      finalSubmitRequested: true,
+      milestoneProtocol: 'verified-v1',
+      verifiedMilestones: ['checkout_open', 'final_submit_requested'],
+      checkoutSummary: { stage: 'final_review' }
+    }
+  }
+});
+assert.equal(clickedButUnconfirmed.accepted, false);
+assert.equal(clickedButUnconfirmed.proofEligible, false);
+assert.equal(clickedButUnconfirmed.reason, 'merchant_order_confirmation_missing');
+
+const merchantConfirmed = evaluateBrowserExtensionFulfillment({
+  status: 'fulfilled',
+  result: {
+    browserExecution: {
+      orderSubmitted: true,
+      milestoneProtocol: 'verified-v1',
+      verifiedMilestones: ['checkout_open', 'final_submit_requested', 'order_submitted'],
+      checkoutSummary: { stage: 'final_review' }
+    }
+  }
+});
+assert.equal(merchantConfirmed.accepted, true);
+assert.equal(merchantConfirmed.proofEligible, true);
+
+console.log('browser final review policy and merchant confirmation contract ok');

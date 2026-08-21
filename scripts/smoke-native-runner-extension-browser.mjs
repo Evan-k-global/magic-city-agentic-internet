@@ -1711,6 +1711,10 @@ async function main() {
     if (merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault?.saved !== true) {
       fail(`browser_extension_merchant_checkout_default_not_saved:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
     }
+    const merchantConfirmationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-merchant-order');
+    if (merchantConfirmationCheckpoint?.browser?.runnerStep?.merchantOrderConfirmation?.confirmed !== true) {
+      fail(`browser_extension_merchant_order_confirmation_not_verified:${JSON.stringify(merchantConfirmationCheckpoint?.browser?.runnerStep || {})}`);
+    }
     if (fulfillment.result?.browserExecution?.checkoutSummary?.merchandiseSubtotal !== '$3.50'
       || fulfillment.result?.browserExecution?.checkoutSummary?.shippingTotal !== '$0.00'
       || fulfillment.result?.browserExecution?.checkoutSummary?.likelyTotal !== '$4.15') {

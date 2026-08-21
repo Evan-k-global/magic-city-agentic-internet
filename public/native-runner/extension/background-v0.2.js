@@ -1187,6 +1187,57 @@ async function tabBrowserState(tabId, checkoutProfile = null, {
   throw lastError || new Error(deadlineMs ? 'browser_state_deadline_exceeded' : 'browser_state_unavailable');
 }
 
+async function waitForMerchantOrderConfirmation(tabId, checkoutProfile = null, assertActive = null, {
+  timeoutMs = 14_000,
+  intervalMs = 450
+} = {}) {
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.max(3_000, Number(timeoutMs) || 14_000);
+  let latest = null;
+  do {
+    if (typeof assertActive === 'function') await assertActive();
+    try {
+      latest = await tabCommand(
+        tabId,
+        { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile },
+        {
+          injectionTimeoutMs: 2_500,
+          responseTimeoutMs: 3_500,
+          deadlineMs: deadline
+        }
+      );
+    } catch {
+      // A merchant navigation can briefly remove the content script. Retry the
+      // same signed observation; do not issue a second final-order click.
+    }
+    if (latest?.orderSubmitted || latest?.milestoneSignals?.orderSubmitted) {
+      return {
+        completed: true,
+        finalSubmitRequested: true,
+        orderSubmitted: true,
+        merchantOrderConfirmation: {
+          confirmed: true,
+          observedAt: new Date().toISOString(),
+          waitMs: Date.now() - startedAt
+        },
+        state: latest
+      };
+    }
+    if (Date.now() < deadline) await delay(Math.min(intervalMs, Math.max(50, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return {
+    completed: false,
+    finalSubmitRequested: true,
+    orderSubmitted: false,
+    merchantOrderConfirmation: {
+      confirmed: false,
+      reason: 'merchant_confirmation_not_observed',
+      waitMs: Date.now() - startedAt
+    },
+    state: latest
+  };
+}
+
 async function waitForPurchasableProduct(tabId, checkoutProfile = null, { timeoutMs = 4_500, intervalMs = 350 } = {}) {
   const deadline = Date.now() + Math.max(1_000, Number(timeoutMs) || 4_500);
   let latest = null;
@@ -1435,6 +1486,9 @@ async function reportStartupFailure(session, error) {
 function planActionPresentation(action = {}) {
   if (action.type === 'navigate' && /(?:^|-)open-cart(?:-|$)|cart/i.test(String(action.id || ''))) {
     return { label: 'Opening cart', state: 'opening_cart' };
+  }
+  if (action.awaitMerchantOrderConfirmation === true) {
+    return { label: 'Confirming merchant order', state: 'confirming_order' };
   }
   const labels = {
     navigate: ['Opening approved site', 'browser_opening'],
@@ -1810,10 +1864,10 @@ async function reportAndStop(session, plan, report, note = '') {
     report.fundingDisposition = 'capture';
     report.fulfillmentStatus = 'fulfilled';
   } else if (submitRequested) {
-    report.stopState = 'final_submit_requested';
-    report.stopEvidence = 'The approved final order control was clicked. Waiting for the merchant confirmation page.';
-    report.fundingDisposition = 'hold';
-    report.fulfillmentStatus = 'fulfilled';
+    report.stopState = 'final_submit_unconfirmed';
+    report.stopEvidence = 'The final-order click was issued, but Amazon did not confirm the order. The local tab was preserved; no completion receipt was issued.';
+    report.fundingDisposition = 'release';
+    report.fulfillmentStatus = 'failed';
   } else if (boundary) {
     report.stopState = boundary.state;
     report.stopEvidence = boundary.evidence;
@@ -1931,6 +1985,7 @@ function actionWasSatisfiedBeforeRestart(action = {}, report = {}) {
   }
   if (expected === 'final_review_ready') return Boolean(signals.checkoutOpen && signals.finalReviewReady);
   if (expected === 'final_submit_requested') return Boolean(report.orderSubmitted || signals.orderSubmitted);
+  if (expected === 'order_submitted') return Boolean(report.orderSubmitted || signals.orderSubmitted);
   return false;
 }
 
@@ -2107,6 +2162,10 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
   }
   if (action.type === 'fill_checkout_profile') {
     const outcome = await runCheckoutProfileReconcile(tabId, action, checkoutProfile, assertActive);
+    return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
+  }
+  if (action.type === 'inspect' && action.awaitMerchantOrderConfirmation === true) {
+    const outcome = await waitForMerchantOrderConfirmation(tabId, checkoutProfile, assertActive);
     return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
   }
   if (action.type === 'inspect' || action.type === 'pause') {
@@ -2737,6 +2796,22 @@ async function runSession(rawSession) {
         profileCorrectionMissed: Boolean(outcome.profileCorrectionMissed),
         paymentAutofillRequired: Boolean(outcome.paymentAutofillRequired),
         profileTransitions: Array.isArray(outcome.profileTransitions) ? outcome.profileTransitions : [],
+        merchantCheckoutDefault: outcome.merchantCheckoutDefault && typeof outcome.merchantCheckoutDefault === 'object'
+          ? {
+              attempted: Boolean(outcome.merchantCheckoutDefault.attempted),
+              saved: Boolean(outcome.merchantCheckoutDefault.saved),
+              alreadySet: Boolean(outcome.merchantCheckoutDefault.alreadySet),
+              reason: String(outcome.merchantCheckoutDefault.reason || '').slice(0, 96) || null
+            }
+          : null,
+        merchantOrderConfirmation: outcome.merchantOrderConfirmation && typeof outcome.merchantOrderConfirmation === 'object'
+          ? {
+              confirmed: Boolean(outcome.merchantOrderConfirmation.confirmed),
+              reason: String(outcome.merchantOrderConfirmation.reason || '').slice(0, 96) || null,
+              observedAt: outcome.merchantOrderConfirmation.observedAt || null,
+              waitMs: Number(outcome.merchantOrderConfirmation.waitMs || 0) || null
+            }
+          : null,
         runnerVersion: chrome.runtime.getManifest().version
       };
       report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested);
@@ -2871,6 +2946,33 @@ async function runSession(rawSession) {
         nextActionIndex: index + 1,
         selectedCandidate: progress.selectedCandidate
       });
+      if (action.awaitMerchantOrderConfirmation === true && outcome.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
+        // The final control was clicked once. Keep this exact signed observer
+        // action active and re-check only for merchant confirmation; never
+        // replay the irreversible click while a navigation is still settling.
+        await saveActiveRun({
+          sessionId: session.id,
+          planHash: plan.planHash,
+          phase: 'awaiting_merchant_confirmation',
+          tabId: Number(tab?.id || 0) || null,
+          actionId: action.id,
+          actionIndex: index,
+          nextActionIndex: index,
+          selectedCandidate: progress.selectedCandidate
+        });
+        retainActiveRun = true;
+        scheduleRunnerResume(RUNNER_RESUME_DELAY_MS);
+        await saveConfig({
+          lastError: '',
+          lastExecution: {
+            sessionId: session.id,
+            status: 'awaiting_merchant_confirmation',
+            actionId: action.id,
+            at: new Date().toISOString()
+          }
+        });
+        return { sessionId: session.id, status: 'awaiting_merchant_confirmation', waiting: true };
+      }
       if (action.type === 'pause') {
         const boundary = stopForBoundary(report, plan, action);
         if (boundary) {
