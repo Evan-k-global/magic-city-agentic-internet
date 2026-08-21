@@ -355,6 +355,38 @@
     return summaryText ? last4FromText(summaryText) : '';
   }
 
+  function expectedPaymentCardIsSelected(expectedLast4 = '') {
+    const expected = String(expectedLast4 || '').replace(/\D/g, '').slice(-4);
+    if (!expected) return false;
+    const root = interactionRoot();
+    const paymentChoices = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+      .filter((input) => visible(paymentChoiceClickTarget(input)))
+      .map((input) => ({
+        input,
+        text: compactText([
+          radioContainer(input)?.innerText || '',
+          input.labels?.[0]?.innerText || '',
+          input.getAttribute?.('aria-label') || '',
+          ariaLabelledText(input)
+        ].filter(Boolean).join('\n'), 900)
+      }))
+      .filter(({ text }) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text)
+        && /\d{4}/.test(text));
+    // When the merchant presents card choices, trust only the checked card
+    // row. A stale summary must never override an explicit selection.
+    if (paymentChoices.length) {
+      return paymentChoices.some(({ input, text }) => input.checked && last4FromText(text) === expected);
+    }
+
+    const summaryText = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"], [id*="payment" i], [data-testid*="payment" i]'))
+      .filter(visible)
+      .map((element) => compactText(element.innerText || element.textContent || '', 800))
+      .find((text) => /\b(?:paying with|selected payment|payment method)\b/i.test(text)
+        && /\b(?:visa|mastercard|amex|american express|discover|card)\b/i.test(text)
+        && last4FromText(text) === expected);
+    return Boolean(summaryText);
+  }
+
   function addressLooksLikeProfile(text = '', profile = {}) {
     const profileStreet = profile.streetAddress || profile.shippingStreetAddress || '';
     const profileAddress = `${profileStreet} ${profile.zipCode || profile.shippingZipCode || ''}`;
@@ -1568,7 +1600,12 @@
     const optionalOfferVisible = classification.state === 'offer';
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     const cardSelectionVisible = checkoutOpen && !optionalOfferVisible && (/select a payment method|payment method|paying with|add a credit or debit card|add a payment method/i.test(rawPageText) || /\b(?:visa|mastercard|amex|american express|discover)\D{0,32}\d{4}\b/i.test(rawPageText));
-    const currentLast4 = cardSelectionVisible ? selectedCardLast4() : '';
+    // A checkout page can have unrelated selected radios (delivery, offers,
+    // account choices) before the payment card. Prefer the exact selected
+    // card row when the mission specifies one.
+    const currentLast4 = cardSelectionVisible
+      ? (expectedLast4 && expectedPaymentCardIsSelected(expectedLast4) ? expectedLast4 : selectedCardLast4())
+      : '';
     const cardMatches = Boolean(expectedLast4 && currentLast4 && expectedLast4 === currentLast4);
     const cardMismatch = Boolean(expectedLast4 && currentLast4 && expectedLast4 !== currentLast4);
     const expectedAddressText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
@@ -2214,8 +2251,18 @@
   }
 
   function findPaymentMethodConfirmControl() {
-    const entries = interactiveControls()
+    const candidates = [
+      ...interactiveControls(),
+      ...Array.from(interactionRoot().querySelectorAll('.a-button, .a-button-inner')).map((root) =>
+        root.querySelector?.('input[type="submit"], input[type="button"], button, [role="button"]') || root
+      )
+    ];
+    const seen = new Set();
+    const entries = candidates
       .map((control, index) => {
+        if (!control || seen.has(control)) return null;
+        seen.add(control);
+        if (!visible(control) || control.disabled || control.getAttribute?.('aria-disabled') === 'true') return null;
         const directLabel = compactText([
           control?.innerText,
           control?.textContent,
@@ -2226,15 +2273,19 @@
         const visibleLabel = visibleControlLabel(control, 180);
         const descriptor = controlDescriptor(control);
         const label = directLabel || visibleLabel || compactText(textFor(control), 180).replace(/\s+/g, ' ').trim();
-        const exactConfirmation = /^use this payment method$/i.test(directLabel)
-          || /^continue with (?:this|selected) payment method$/i.test(directLabel);
-        const containsConfirmation = /\buse this payment method\b/i.test(directLabel)
-          || /\bcontinue with (?:this|selected) payment method\b/i.test(directLabel);
-        const unsafeLabel = /\b(add (?:a )?(?:new )?(?:credit|debit|payment)|gift card|promo code|prime|trial|subscribe)\b/i.test(directLabel);
+        // Do not use the parent-derived visible label for matching here. On
+        // Amazon it can include the whole payment section, causing a nearby
+        // Change link to inherit "Use this payment method" text.
+        const confirmationText = directLabel;
+        const exactConfirmation = /^(?:use this payment method|continue with (?:this|selected) payment method)$/im.test(confirmationText);
+        const containsConfirmation = /\buse this payment method\b/i.test(confirmationText)
+          || /\bcontinue with (?:this|selected) payment method\b/i.test(confirmationText);
+        const unsafeLabel = /\b(add (?:a )?(?:new )?(?:credit|debit|payment)|gift card|promo code|prime|trial|subscribe)\b/i.test(confirmationText);
         const unsafeDescriptor = /\b(gift card|promo code|prime|trial|subscribe)\b/i.test(descriptor);
         const unsafe = FINAL_ACTION_PATTERN.test(directLabel || label) || unsafeLabel || unsafeDescriptor;
         return { control, label, score: (exactConfirmation ? 280 : containsConfirmation ? 240 : 0) - (unsafe ? 500 : 0), index };
       })
+      .filter(Boolean)
       .filter((entry) => entry.score >= 220)
       .sort((left, right) => right.score - left.score || left.index - right.index);
     return entries[0] || null;
@@ -2803,6 +2854,26 @@
     const addToCartAvailable = Boolean(canonicalAddToCartControl())
       || controls.some((control) => /add to (cart|bag)|add item/i.test(textFor(control)));
     let browserState = classifyBrowserState({ rawPageText, controlText, addToCartAvailable, sensitiveField });
+    // "Use this payment method" is not a final spending action. It only
+    // confirms a card that is already selected in the merchant UI. Handle it
+    // before the generic payment boundary so the continuation action cannot
+    // strand a checkout between selection and final review.
+    if (intent === 'checkout') {
+      const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
+      const confirmPayment = expectedLast4 && expectedPaymentCardIsSelected(expectedLast4)
+        ? findPaymentMethodConfirmControl()
+        : null;
+      if (confirmPayment && immediateSafeClick(confirmPayment.control)) {
+        return {
+          completed: true,
+          navigationRequested: true,
+          paymentMethodConfirmed: true,
+          label: compactText(confirmPayment.label || 'Use this payment method', 140),
+          browserState: browserState.state,
+          controlStrategy: 'selected_payment_method_confirmation'
+        };
+      }
+    }
     if (['challenge', 'login', 'payment', 'final_review'].includes(browserState.state)) {
       return {
         completed: false,
@@ -3058,11 +3129,13 @@
 
     // Confirming an exact saved-card selection is a non-final checkout step.
     // Raw card entry and the final order action remain hard boundaries.
-    const selectedLast4 = selectedCardLast4();
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
+    const selectedLast4 = expectedPaymentCardIsSelected(expectedLast4)
+      ? expectedLast4
+      : selectedCardLast4();
     if (expectedLast4 && selectedLast4 === expectedLast4) {
       const confirmPayment = findPaymentMethodConfirmControl();
-      if (confirmPayment && scheduleSafeClick(confirmPayment.control)) {
+      if (confirmPayment && immediateSafeClick(confirmPayment.control)) {
         return {
           completed: true,
           skipped: false,

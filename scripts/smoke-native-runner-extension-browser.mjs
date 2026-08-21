@@ -637,7 +637,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<a href="#add-card">Add a credit or debit card</a>',
       '<a href="#gift-card">Use a gift card, voucher, or promo code</a>',
       '</div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent" name="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent" type="submit" aria-labelledby="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="ppw-widgetEvent:SetPaymentPlanSelectContinueEvent-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<div style="height: 300px"></div>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
       '</section>',
       '<section aria-label="Delivery address">',
       '<h2>Delivering to Test User</h2>',
@@ -1253,6 +1255,39 @@ async function main() {
       label: paymentConfirmAction.label
     });
     await paymentConfirmPage.close();
+
+    const paymentConfirmContinuationPage = await context.newPage();
+    await paymentConfirmContinuationPage.goto(`${baseUrl}/checkout/pay-confirm`);
+    const paymentConfirmContinuationAction = await commandPage(paymentConfirmContinuationPage, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'click_intent', intent: 'checkout', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Test User',
+        streetAddress: '1 Magic City Way',
+        shippingCity: 'San Francisco',
+        shippingState: 'CA',
+        zipCode: '94107',
+        contactPhone: '4155550100',
+        billingStreetAddress: '99 Billing Plaza',
+        billingZipCode: '10001',
+        paymentCardLast4: '6383'
+      }
+    });
+    await paymentConfirmContinuationPage.waitForURL(/\/checkout\/final-review/, { timeout: 5_000 }).catch(() => null);
+    if (!paymentConfirmContinuationAction?.completed
+      || paymentConfirmContinuationAction?.controlStrategy !== 'selected_payment_method_confirmation'
+      || !/use this payment method/i.test(String(paymentConfirmContinuationAction.label || ''))
+      || !paymentConfirmContinuationPage.url().includes('/checkout/final-review')) {
+      fail(`browser_extension_did_not_continue_matching_payment_method:${JSON.stringify({
+        action: paymentConfirmContinuationAction,
+        url: paymentConfirmContinuationPage.url()
+      })}`);
+    }
+    recordPurchaseScenario('Checkout continuation confirms the selected matching card with duplicate merchant controls', {
+      strategy: paymentConfirmContinuationAction.controlStrategy,
+      label: paymentConfirmContinuationAction.label
+    });
+    await paymentConfirmContinuationPage.close();
 
     await popup.close();
     const externalWakePage = await context.newPage();
