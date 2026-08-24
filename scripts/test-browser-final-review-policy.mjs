@@ -60,15 +60,20 @@ const reviewPlan = buildBrowserExtensionMissionPlan({
 assert.equal(validateBrowserExtensionPlan(reviewPlan).valid, true);
 assert.equal(reviewPlan.limits.stopBeforeFinalSubmit, true);
 assert.equal(reviewPlan.actions.some((action) => action.type === 'final_submit'), false);
+const continueCheckoutIndex = reviewPlan.actions.findIndex((action) => action.id === 'continue-checkout');
+const paymentReconcileIndex = reviewPlan.actions.findIndex((action) => action.id === 'reconcile-payment-profile');
+const inspectReviewIndex = reviewPlan.actions.findIndex((action) => action.id === 'inspect-review');
 assert.ok(
-  reviewPlan.actions.findIndex((action) => action.id === 'inspect-review')
-    > reviewPlan.actions.findIndex((action) => action.id === 'continue-checkout'),
+  inspectReviewIndex > continueCheckoutIndex,
   'the lean checkout plan must still verify final review after the checkout transition'
 );
-assert.equal(
-  reviewPlan.actions.some((action) => action.id === 'reconcile-payment-profile'),
-  false,
-  'single-item Amazon happy path uses the checkout transition reconcile instead of a duplicate visible step'
+assert.ok(
+  paymentReconcileIndex > continueCheckoutIndex,
+  'single-item checkout must reconcile address/card cues after Amazon enters its payment page'
+);
+assert.ok(
+  inspectReviewIndex > paymentReconcileIndex,
+  'final review may be inspected only after the post-navigation payment reconciliation'
 );
 
 const approvedResumePlan = buildBrowserExtensionMissionPlan({

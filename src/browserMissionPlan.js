@@ -572,6 +572,10 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('open-checkout', 'click_intent', 'browser_click', { intent: 'checkout', expectedMilestone: 'checkout_open' }),
           ...(fillLocalCheckoutProfile ? [buildAction('fill-checkout-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
+          // Amazon can reveal the saved-card selector only after it advances from
+          // delivery to its dedicated payment page. Re-observe that transition
+          // before asking for final-review evidence.
+          ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
           ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })

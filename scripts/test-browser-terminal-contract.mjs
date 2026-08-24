@@ -63,6 +63,7 @@ assert.equal(prematurePaymentClaim.proofEligible, false);
 const plan = buildBrowserExtensionMissionPlan({
   id: 'cs-terminal-contract',
   handoffData: { kind: 'browser' },
+  extensionCheckoutProfileEnabled: true,
   selections: {
     targetUrl: 'https://www.amazon.com/',
     goal: 'Buy Nature Valley granola bars for $4 max',
@@ -92,6 +93,11 @@ assert.equal(plan.actions.find((entry) => entry.id === 'inspect-cart')?.expected
 assert.equal(plan.actions.find((entry) => entry.id === 'select-match')?.expectedMilestone, 'candidate_selected');
 assert.equal(plan.actions.find((entry) => entry.id === 'inspect-cart')?.expectedMilestone, 'cart_confirmed');
 assert.equal(plan.actions.find((entry) => entry.id === 'open-checkout')?.expectedMilestone, 'checkout_open');
+const planContinueCheckoutIndex = plan.actions.findIndex((entry) => entry.id === 'continue-checkout');
+const planPaymentReconcileIndex = plan.actions.findIndex((entry) => entry.id === 'reconcile-payment-profile');
+const planInspectReviewIndex = plan.actions.findIndex((entry) => entry.id === 'inspect-review');
+assert.ok(planPaymentReconcileIndex > planContinueCheckoutIndex, 'single-item Amazon missions must reconcile after payment-page navigation');
+assert.ok(planInspectReviewIndex > planPaymentReconcileIndex, 'final review must follow payment reconciliation');
 assert.equal(plan.actions.find((entry) => entry.id === 'inspect-review')?.expectedMilestone, 'final_review_ready');
 
 let milestoneState = initialBrowserExtensionPlanState(plan);

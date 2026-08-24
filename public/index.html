@@ -10233,6 +10233,7 @@
       const detail = String(row?.detail || '').toLowerCase();
       const source = `${statusValue} ${label} ${detail}`;
       if (fulfillment?.status === 'failed' || /failed|error/.test(source)) return { label: 'Failed', cls: 'failed' };
+      if (isBrowserHandoffPaused(fulfillment)) return { label: 'Paused', cls: 'queued' };
       if (fulfillment?.result?.needsFinalOrderConfirmation || fulfillment?.fundingDisposition === 'hold') {
         return { label: 'Awaiting confirmation', cls: 'queued' };
       }
@@ -10250,6 +10251,15 @@
       if (/sync|calendar|gmail|contact/.test(source)) return { label: 'Syncing', cls: 'running' };
       if (/checkout|provider|launch|browser|cart|reservation|apply/.test(source)) return { label: 'Working', cls: 'running' };
       return { label: fulfillment ? 'Completed' : 'Working', cls: fulfillment ? 'completed' : 'running' };
+    }
+
+    function isBrowserHandoffPaused(fulfillment = null) {
+      if (String(fulfillment?.status || '').toLowerCase() !== 'fulfilled') return false;
+      const result = fulfillment?.result || {};
+      const completionState = String(result.completionState || '').toLowerCase();
+      const stopState = String(result?.browserExecution?.stopState || result.stopState || '').toLowerCase();
+      return completionState === 'waiting_on_user'
+        || ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'login_required', 'needs_login', 'captcha_or_challenge_required', 'needs_captcha', 'final_approval_required', 'needs_final_approval', 'review_ready'].includes(stopState);
     }
 
     function getScopedStorageKey(baseKey, scope = getStorageScope()) {
@@ -16828,7 +16838,8 @@
         return '<div class="execution-muted">No steps yet.</div>';
       }
       const terminalNeedsLocalRunner = String(fulfillment?.result?.completionState || '').toLowerCase() === 'needs_local_runner';
-      const terminalLabel = fulfillment?.status === 'failed' ? 'Failed' : terminalNeedsLocalRunner ? 'Local runner needed' : 'Fulfilled';
+      const terminalPaused = isBrowserHandoffPaused(fulfillment);
+      const terminalLabel = fulfillment?.status === 'failed' ? 'Failed' : terminalNeedsLocalRunner ? 'Local runner needed' : terminalPaused ? 'Paused' : 'Fulfilled';
       const conciseTrace = trace.reduce((rows, row) => {
         const previous = rows[rows.length - 1];
         const fingerprint = [row?.state, row?.label, row?.detail, row?.browser?.url].map((value) => String(value || '')).join('|');
@@ -16853,7 +16864,7 @@
       const terminalHtml = fulfillment ? `
         <div class="trace-row">
           <div class="trace-head">
-            <span class="trace-phase ${fulfillment?.status === 'failed' ? 'failed' : terminalNeedsLocalRunner ? 'queued' : 'completed'}">${terminalLabel === 'Fulfilled' ? 'Completed' : terminalLabel}</span>
+            <span class="trace-phase ${fulfillment?.status === 'failed' ? 'failed' : terminalNeedsLocalRunner || terminalPaused ? 'queued' : 'completed'}">${terminalLabel === 'Fulfilled' ? 'Completed' : terminalLabel}</span>
             <div class="trace-label">${terminalLabel}</div>
           </div>
 	          <div class="trace-meta">${escapeExecutionValue(compactExecutionCompletionNote(session, 'Done.'))}</div>
@@ -18291,7 +18302,8 @@
       const artifactLinks = Array.isArray(session.fulfillment?.result?.artifacts) ? session.fulfillment.result.artifacts : [];
       const executionBusy = executionPendingSessions.has(session.id) || ['queued', 'claimed', 'executing'].includes(String(session.status || ''));
       const executionNeedsLocalRunner = String(session.fulfillment?.result?.completionState || '').toLowerCase() === 'needs_local_runner';
-      const executionFulfilled = String(session.status || '') === 'fulfilled' && !executionNeedsLocalRunner;
+      const executionPaused = isBrowserHandoffPaused(session.fulfillment);
+      const executionFulfilled = String(session.status || '') === 'fulfilled' && !executionNeedsLocalRunner && !executionPaused;
       const executionFailed = String(session.status || '') === 'failed';
       const directX402Payment = session.santaclawzDirectPayment || null;
       const santaClawzRetryBlocked = directX402Payment?.summary?.retryBlocked === true
@@ -18348,7 +18360,7 @@
         ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
         : actionNeedsFunds
           ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(actionFundingLabel)}</button>`
-		          : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
+          : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || executionPaused || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionPaused ? 'Paused in checkout' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
 	      const providerActionLabel = squareCheckoutUrl
         ? 'Open direct Square checkout'
         : kind === 'travel'
