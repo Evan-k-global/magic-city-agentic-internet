@@ -1833,8 +1833,15 @@ async function main() {
       })))}:payment_radios=${JSON.stringify(paymentRadios)}:address=${JSON.stringify(addressFixtureState)}:execution=${JSON.stringify(fulfillment.result?.browserExecution || {})}`);
     }
     const merchantDefaultCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
-    if (merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault?.saved !== true) {
+    const merchantCheckoutDefault = merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault || {};
+    // The smoke merchant is localhost. The Amazon-only preference checkbox is
+    // intentionally unavailable there, so assert the behavior that is valid
+    // for this fixture while preserving the strict assertion for an Amazon DOM.
+    if (merchantCheckoutDefault.attempted === true && merchantCheckoutDefault.saved !== true) {
       fail(`browser_extension_merchant_checkout_default_not_saved:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
+    }
+    if (merchantCheckoutDefault.attempted !== true && merchantCheckoutDefault.reason !== 'not_amazon') {
+      fail(`browser_extension_merchant_checkout_default_state_unexpected:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
     }
     const merchantConfirmationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-merchant-order');
     if (merchantConfirmationCheckpoint?.browser?.runnerStep?.merchantOrderConfirmation?.confirmed !== true) {
