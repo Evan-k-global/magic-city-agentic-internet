@@ -10,6 +10,7 @@ function resolveMissionProofNetworkId() {
 
 const ZEKO_SUBMIT_MODE = process.env.ZEKO_SUBMIT_MODE || 'record';
 const ZEKO_NETWORK_ID = resolveMissionProofNetworkId();
+const ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = String(process.env.ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK || '').trim();
 const ZEKO_O1JS_NETWORK_ID =
   process.env.ZEKO_O1JS_NETWORK_ID ||
   (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'zeko-mainnet' : 'testnet');
@@ -58,6 +59,8 @@ export function getAnchorConfig() {
   return {
     mode: ZEKO_SUBMIT_MODE,
     networkId: ZEKO_NETWORK_ID,
+    offchain: ZEKO_SUBMIT_MODE !== 'relay',
+    offchainTargetNetwork: ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK || null,
     o1jsNetworkId: ZEKO_O1JS_NETWORK_ID,
     explorerTxBase: ZEKO_EXPLORER_TX_BASE,
     relayerMode: ZEKO_RELAYER_MODE,

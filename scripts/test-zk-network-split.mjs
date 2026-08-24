@@ -6,18 +6,27 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 process.env.ZEKO_NETWORK_ID = 'zeko:testnet';
+process.env.ZEKO_SUBMIT_MODE = 'record';
+process.env.ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = 'zeko:sepolia';
 delete process.env.MAGIC_CITY_MISSION_PROOF_NETWORK_ID;
 delete process.env.ZEKO_GRAPHQL;
 delete process.env.ZEKO_ARCHIVE;
 delete process.env.ZEKO_EXPLORER_TX_BASE;
 
-const { getAnchorConfig } = await import('../src/zekoAnchor.js');
+const { getAnchorConfig, submitAnchorPayload } = await import('../src/zekoAnchor.js');
 const { buildMbaDiscoveryDocument, buildMbaRegistryAnchor } = await import('../src/agentMissionBoundAuth.js');
 
 const anchorConfig = getAnchorConfig();
 assert.equal(anchorConfig.networkId, 'zeko:testnet');
 assert.equal(anchorConfig.o1jsNetworkId, 'testnet');
 assert.match(anchorConfig.explorerTxBase, /zekoscan\.io\/testnet/);
+assert.equal(anchorConfig.offchain, true);
+assert.equal(anchorConfig.offchainTargetNetwork, 'zeko:sepolia');
+
+const offchainSubmission = await submitAnchorPayload({ statementHash: '0x01', network: 'offchain' });
+assert.equal(offchainSubmission.mode, 'record');
+assert.equal(offchainSubmission.status, 'prepared');
+assert.equal(offchainSubmission.txHash, null);
 
 const discovery = buildMbaDiscoveryDocument({ baseUrl: 'https://magic-city-staging.fly.dev' });
 assert.deepEqual(discovery.capabilities.anchoring, [
@@ -42,6 +51,8 @@ assert.match(envExample, /^SANTACLAWZ_PROOF_NETWORK=zeko:testnet$/m);
 const flyToml = fs.readFileSync(path.join(rootDir, 'fly.toml'), 'utf8');
 assert.match(flyToml, /MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:testnet"/);
 assert.match(flyToml, /SANTACLAWZ_PROOF_NETWORK = "zeko:testnet"/);
+assert.match(flyToml, /ZEKO_SUBMIT_MODE = "record"/);
+assert.match(flyToml, /ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = "zeko:sepolia"/);
 
 const serverSource = fs.readFileSync(path.join(rootDir, 'src', 'server.js'), 'utf8');
 assert.match(serverSource, /Boolean\(String\(process\.env\.ZEKO_PROOF_WORKER_URL/);

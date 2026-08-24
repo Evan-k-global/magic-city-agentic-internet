@@ -310,12 +310,63 @@
     return input?.closest?.('label, [role="radio"], [role="option"], li, [data-testid*="address" i], [data-testid*="payment" i], [data-testid*="delivery" i], [id*="address" i], [id*="payment" i], [id*="delivery" i], [class*="address" i], [class*="payment" i], [class*="delivery" i]') || nearbyContainer(input);
   }
 
+  function visibleChoiceInput(input) {
+    return Boolean(input && (visible(input) || visible(radioContainer(input)) || visible(input.parentElement)));
+  }
+
+  function cardEndingMentions(value = '') {
+    const text = String(value || '');
+    const matches = [
+      ...text.matchAll(/(?:ending|ends in|last(?:\s*4)?|card)\D{0,24}(\d{4})(?!\d)/gi),
+      ...text.matchAll(/\b(?:visa|mastercard|amex|american express|discover)\D{0,32}(\d{4})(?!\d)/gi)
+    ];
+    return [...new Set(matches.map((match) => match[1]).filter(Boolean))];
+  }
+
+  function paymentChoiceContext(input, expectedLast4 = '') {
+    const expected = String(expectedLast4 || '').replace(/\D/g, '').slice(-4);
+    let fallback = null;
+    let node = input;
+    // Amazon's inputs are sometimes nested under a large payment container
+    // without an associated label. Walk outward and use the smallest visible
+    // row that names exactly one saved card, never the whole payment section.
+    for (let depth = 0; node && depth < 9; depth += 1) {
+      const text = compactText([
+        node.innerText || node.textContent || '',
+        node.getAttribute?.('aria-label') || '',
+        node.getAttribute?.('data-testid') || ''
+      ].filter(Boolean).join('\n'), 1400);
+      const endings = cardEndingMentions(text);
+      const paymentLike = /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text);
+      const hasExpected = !expected || endings.includes(expected);
+      if (paymentLike && endings.length && hasExpected) {
+        const candidate = { node, text, endings };
+        if (!expected || endings.length === 1 || endings.every((ending) => ending === expected)) return candidate;
+        fallback ||= candidate;
+      }
+      node = node.parentElement;
+    }
+    return fallback;
+  }
+
+  function selectPaymentChoiceInput(input) {
+    if (!input || input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) return false;
+    if (input.checked || input.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      input.scrollIntoView({ block: 'center', inline: 'center' });
+      input.click();
+      return Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true');
+    } catch {
+      return false;
+    }
+  }
+
   function last4FromText(value = '') {
     const text = String(value || '');
     const patterns = [
-      /(?:ending|ends in|last(?:\s*4)?|card)\D{0,24}(\d{4})/i,
-      /\b(?:visa|mastercard|amex|american express|discover)\D{0,32}(\d{4})\b/i,
-      /\b(\d{4})\b/
+      /(?:ending|ends in|last(?:\s*4)?|card)\D{0,24}(\d{4})(?!\d)/i,
+      /\b(?:visa|mastercard|amex|american express|discover)\D{0,32}(\d{4})(?!\d)/i,
+      /(?<!\d)(\d{4})(?!\d)/
     ];
     for (const pattern of patterns) {
       const match = text.match(pattern);
@@ -327,8 +378,8 @@
   function selectedCardLast4() {
     const root = interactionRoot();
     const checked = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => input.checked && visible(paymentChoiceClickTarget(input)))
-      .map((input) => compactText(radioContainer(input)?.innerText || '', 500))
+      .filter((input) => input.checked && visibleChoiceInput(input))
+      .map((input) => paymentChoiceContext(input)?.text || compactText(radioContainer(input)?.innerText || '', 500))
       .find((text) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && /\d{4}/.test(text));
     if (checked) return last4FromText(checked);
 
@@ -360,10 +411,10 @@
     if (!expected) return false;
     const root = interactionRoot();
     const paymentChoices = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visible(paymentChoiceClickTarget(input)))
+      .filter((input) => visibleChoiceInput(input))
       .map((input) => ({
         input,
-        text: compactText([
+        text: paymentChoiceContext(input, expected)?.text || compactText([
           radioContainer(input)?.innerText || '',
           input.labels?.[0]?.innerText || '',
           input.getAttribute?.('aria-label') || '',
@@ -2103,13 +2154,13 @@
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     const shippingText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
     const candidateInputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visible(paymentChoiceClickTarget(input)));
+      .filter((input) => visibleChoiceInput(input));
     for (const input of candidateInputs) {
       const container = radioContainer(input);
       const text = compactText(container?.innerText || '', 1000);
-      if (expectedLast4 && !input.checked && /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && last4FromText(text) === expectedLast4) {
-        const target = paymentChoiceClickTarget(input);
-        if (immediateSafeClick(target)) {
+      const paymentChoice = expectedLast4 ? paymentChoiceContext(input, expectedLast4) : null;
+      if (expectedLast4 && !input.checked && paymentChoice?.endings?.includes(expectedLast4)) {
+        if (selectPaymentChoiceInput(input)) {
           selected.push('matching payment card');
         }
         continue;
@@ -2163,9 +2214,9 @@
 
   function savedPaymentChoiceVisible() {
     return Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visible(paymentChoiceClickTarget(input)))
+      .filter((input) => visibleChoiceInput(input))
       .some((input) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(
-        compactText(radioContainer(input)?.innerText || '', 700)
+        paymentChoiceContext(input)?.text || compactText(radioContainer(input)?.innerText || '', 700)
       ));
   }
 
@@ -2197,57 +2248,18 @@
   function findMatchingStoredPaymentChoice(profile = {}) {
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     if (!expectedLast4) return null;
-    const candidates = [];
-    const seen = new Set();
-    const add = (control, index) => {
-      const target = paymentChoiceClickTarget(control);
-      if (!target || seen.has(target)) return;
-      seen.add(target);
-      if (!visible(target) || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return;
-      const label = textFor(target);
-      const descriptor = controlDescriptor(target);
-      const localText = compactText([
-        label,
-        descriptor,
-        control?.labels?.[0]?.innerText || '',
-        control?.closest?.('label, [role="radio"], [role="option"]')?.innerText || ''
-      ].filter(Boolean).join('\n'), 1200);
-      const context = compactText([
-        localText,
-        sectionTextForControl(target),
-        sameRowTextForControl(target),
-        nearbyTextForControl(target)
-      ].filter(Boolean).join('\n'), 3200);
-      // Match and risk-check the card row itself. Amazon's surrounding payment
-      // section contains every saved card plus Add Card, which otherwise makes
-      // the first card or the add-card text invalidate an exact last-four match.
-      const hasExpectedCard = last4FromText(localText) === expectedLast4;
-      const paymentLike = /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(localText);
-      const unsafe = /\b(?:add a credit|add credit|add debit|add a new card|card number|security code|cvv|cvc|gift card|voucher|promo code)\b/i.test(localText)
-        || FINAL_ACTION_PATTERN.test(label);
-      const selectable = /\b(?:select|choose|use|paying with|ending|card|payment)\b/i.test(localText)
-        || String(control?.type || '').toLowerCase() === 'radio'
-        || target.getAttribute?.('role') === 'radio';
-      if (!hasExpectedCard || !paymentLike || unsafe || !selectable) return;
-      candidates.push({ target, label, index, score: 240 + (target.getAttribute?.('role') === 'radio' ? 20 : 0) });
-    };
-    const controls = Array.from(interactionRoot().querySelectorAll([
-      'input[type="radio"]',
-      'input[type="checkbox"]',
-      'label',
-      '[role="radio"]',
-      '[role="option"]',
-      '[role="button"]',
-      'button',
-      'a'
-    ].join(',')));
-    controls.forEach((control, index) => add(control, index));
-    candidates.sort((left, right) => right.score - left.score || left.index - right.index);
-    if (!candidates.length) return null;
-    if (candidates.length > 1 && candidates[0].score === candidates[1].score) {
-      return null;
+    const inputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'));
+    for (const input of inputs) {
+      if (input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) continue;
+      const context = paymentChoiceContext(input, expectedLast4);
+      if (!context?.endings?.includes(expectedLast4)) continue;
+      return {
+        target: input,
+        label: compactText(context.text, 180),
+        score: 280
+      };
     }
-    return candidates[0];
+    return null;
   }
 
   function findPaymentMethodConfirmControl() {

@@ -15145,6 +15145,9 @@
       const anchorUrl = verification?.anchorSubmissionId ? `/anchors/status/${encodeURIComponent(verification.anchorSubmissionId)}` : '';
       const txExplorerUrl = verification?.txExplorerUrl || verification?.explorerUrl || verification?.zekoScanUrl || '';
       const txHash = verification?.txHash || '';
+      const offchainProof = String(verification?.submitMode || '').toLowerCase() === 'record'
+        || String(verification?.network || '').toLowerCase() === 'offchain';
+      const offchainTarget = verification?.offchainTargetNetwork ? ` Zeko ${String(verification.offchainTargetNetwork).replace(/^zeko:/i, '')} anchoring is deferred.` : '';
       const bits = [target ? target : '', budget ? `cap ${budget}` : '', merchants ? merchants : ''].filter(Boolean).join(' · ');
       return `
         <div class="execution-mission-note">
@@ -15158,10 +15161,10 @@
           <div class="execution-proof-links">
             ${missionTraceUrl ? `<a href="${missionTraceUrl}" target="_blank" rel="noopener noreferrer">Trace</a>` : ''}
             ${receiptUrl ? `<a href="${receiptUrl}" target="_blank" rel="noopener noreferrer">Receipt</a>` : ''}
-            ${anchorUrl ? `<a href="${anchorUrl}" target="_blank" rel="noopener noreferrer">Anchor</a>` : ''}
+            ${anchorUrl ? `<a href="${anchorUrl}" target="_blank" rel="noopener noreferrer">${offchainProof ? 'Proof record' : 'Anchor'}</a>` : ''}
             ${txHash && txExplorerUrl ? `<a href="${escapeExecutionValue(txExplorerUrl)}" target="_blank" rel="noopener noreferrer">Zeko tx</a>` : ''}
           </div>
-          ${!txHash ? `<div class="execution-inline-note">Zeko anchor after receipt.</div>` : ''}
+          ${!txHash ? `<div class="execution-inline-note">${offchainProof ? `Off-chain proof retained locally.${escapeExecutionValue(offchainTarget)}` : 'Zeko anchor after receipt.'}</div>` : ''}
         </div>
       `;
     }
@@ -17059,6 +17062,8 @@
       if (!verification) return '';
       const proofStatus = String(verification.proofStatus || '').toLowerCase();
       const anchorStatus = String(verification.anchorStatus || '').toLowerCase();
+      const offchainProof = String(verification.submitMode || '').toLowerCase() === 'record'
+        || String(verification.network || '').toLowerCase() === 'offchain';
       const proofBadgeClass = ['ready', 'verified'].includes(proofStatus) ? 'ready' : proofStatus === 'failed' ? 'failed' : '';
       const anchorBadgeClass = ['failed', 'submission_unknown'].includes(anchorStatus)
         ? 'failed'
@@ -17067,7 +17072,13 @@
           : ['queued', 'preparing', 'prepared', 'pending'].includes(anchorStatus)
             ? 'prepared'
             : '';
-      const anchorLabel = anchorStatus === 'failed'
+      const anchorLabel = offchainProof && anchorStatus === 'prepared'
+        ? 'Off-chain receipt ready'
+        : offchainProof && anchorStatus === 'preparing'
+          ? 'Preparing off-chain proof'
+          : offchainProof && anchorStatus === 'queued'
+            ? 'Queued for local proof'
+            : anchorStatus === 'failed'
         ? 'Zeko submit failed'
         : anchorStatus === 'submission_unknown'
           ? 'Zeko submit uncertain'
@@ -17093,6 +17104,9 @@
           : '';
       const normalizedProofLabel = proofLabel || 'Proof pending';
       const txExplorerUrl = zekoScanTxUrl(verification.txHash, verification.txExplorerUrl || verification.explorerUrl || verification.zekoScanUrl || '');
+      const networkLabel = offchainProof
+        ? `off-chain${verification.offchainTargetNetwork ? ` · ${verification.offchainTargetNetwork} planned` : ''}`
+        : String(verification.network || 'zeko:zeko-mainnet');
       return `
         <div class="trace-row">
           <div class="trace-label">Verification</div>
@@ -17103,7 +17117,7 @@
             </div>
             ${verification.statementHash ? `<div style="margin-top:10px">statement: ${escapeExecutionValue(String(verification.statementHash).slice(0, 28))}…</div>` : ''}
             ${verification.txHash ? `<div style="margin-top:6px">tx: ${escapeExecutionValue(shortenHex(verification.txHash))}</div>` : ''}
-            <div style="margin-top:6px">${escapeExecutionValue(verification.network || 'zeko:zeko-mainnet')}${verification.submitMode ? ` · ${escapeExecutionValue(verification.submitMode)} mode` : ''}</div>
+            <div style="margin-top:6px">${escapeExecutionValue(networkLabel)}${verification.submitMode ? ` · ${escapeExecutionValue(verification.submitMode)} mode` : ''}</div>
             <div style="margin-top:6px">Private inputs stay local.</div>
             ${verification.error ? `<div style="margin-top:6px;color:#ffb0b0">${escapeExecutionValue(verification.error)}</div>` : ''}
             <div class="execution-proof-links">

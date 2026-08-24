@@ -689,7 +689,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.5'
+  '0.4.6'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -11096,6 +11096,7 @@ function requireOwnedProofContext(req, context) {
 
 function resolveZekoNetworkLabel() {
   const config = getAnchorConfig();
+  if (config.offchain) return 'offchain';
   const networkId = String(config.networkId || 'zeko:testnet');
   return networkId.startsWith('zeko:') ? networkId : `zeko:${networkId}`;
 }
@@ -11165,6 +11166,7 @@ function buildExecutionVerificationSummary({
     anchorStatus: error ? 'failed' : (submission?.status ?? (anchorPayload ? 'prepared' : null)),
     submitMode: submission?.submitMode ?? submission?.mode ?? anchorConfig?.mode ?? null,
     network: anchorPayload?.network ?? resolveZekoNetworkLabel(),
+    offchainTargetNetwork: anchorConfig?.offchainTargetNetwork ?? null,
     statementHash: zkProof?.publicInput?.statementHash ?? anchorPayload?.statementHash ?? null,
     verificationKeyHash: anchorPayload?.verificationKeyHash ?? null,
     anchorPayloadHash: submission?.payloadHash ?? null,
@@ -11373,6 +11375,7 @@ function buildQueuedExecutionVerificationSummary({
     anchorStatus: anchorStatus ?? submission?.status ?? 'queued',
     submitMode: submission?.submitMode ?? submission?.mode ?? anchorConfig?.mode ?? null,
     network: resolveZekoNetworkLabel(),
+    offchainTargetNetwork: anchorConfig?.offchainTargetNetwork ?? null,
     statementHash: null,
     verificationKeyHash: null,
     anchorPayloadHash: submission?.payloadHash ?? null,

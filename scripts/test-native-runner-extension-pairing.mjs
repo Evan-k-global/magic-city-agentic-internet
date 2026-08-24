@@ -174,7 +174,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.4.5-test',
+        extensionVersion: '0.4.6-test',
         extensionId: 'test-extension-id'
       }
     });
