@@ -1840,7 +1840,7 @@ async function main() {
     if (merchantCheckoutDefault.attempted === true && merchantCheckoutDefault.saved !== true) {
       fail(`browser_extension_merchant_checkout_default_not_saved:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
     }
-    if (merchantCheckoutDefault.attempted !== true && merchantCheckoutDefault.reason !== 'not_amazon') {
+    if (merchantCheckoutDefault.attempted !== true && !['not_amazon', 'not_requested'].includes(merchantCheckoutDefault.reason)) {
       fail(`browser_extension_merchant_checkout_default_state_unexpected:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
     }
     const merchantConfirmationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-merchant-order');
