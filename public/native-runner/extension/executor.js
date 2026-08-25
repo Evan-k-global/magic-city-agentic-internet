@@ -361,6 +361,47 @@
     }
   }
 
+  function addressChoiceContext(input) {
+    const label = input?.labels?.[0];
+    if (label) {
+      const text = compactText(label.innerText || label.textContent || '', 1200);
+      if (addressChoiceText(text)) return { node: label, text };
+    }
+    let fallback = null;
+    let node = input;
+    // Amazon nests the actual radio inside a row of address details. Walk up to
+    // the smallest visible node containing one address choice, never the whole
+    // address book (which may include a dozen unrelated addresses).
+    for (let depth = 0; node && depth < 10; depth += 1) {
+      const text = compactText([
+        node.innerText || node.textContent || '',
+        node.getAttribute?.('aria-label') || '',
+        node.getAttribute?.('data-testid') || ''
+      ].filter(Boolean).join('\n'), 1400);
+      if (addressChoiceText(text)) {
+        const candidate = { node, text };
+        const choiceCount = Array.from(node.querySelectorAll?.('input[type="radio"], input[type="checkbox"]') || [])
+          .filter((choice) => visibleChoiceInput(choice)).length;
+        if (choiceCount <= 1) return candidate;
+        fallback ||= candidate;
+      }
+      node = node.parentElement;
+    }
+    return fallback;
+  }
+
+  function selectAddressChoiceInput(input) {
+    if (!input || input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) return false;
+    if (input.checked || input.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      radioContainer(input)?.scrollIntoView?.({ block: 'center', inline: 'center' });
+      input.click();
+      return Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true');
+    } catch {
+      return false;
+    }
+  }
+
   function last4FromText(value = '') {
     const text = String(value || '');
     const patterns = [
@@ -447,7 +488,10 @@
     const candidateZip = addressZip5(text);
     const candidateUnit = addressUnit(text);
     if (!candidateTokens.has(expected.houseNumber) || candidateZip !== expected.zip) return false;
-    if ((expected.unit || candidateUnit) && expected.unit !== candidateUnit) return false;
+    // The unit is a useful tie-breaker when both sources have one. It must not
+    // invalidate the same street/ZIP when Amazon puts a suite on its own line
+    // or the local vault intentionally omits it.
+    if (expected.unit && candidateUnit && expected.unit !== candidateUnit) return false;
     const matchedTokens = expected.streetTokens.filter((token) => candidateTokens.has(token));
     const coverage = matchedTokens.length / expected.streetTokens.length;
     const hasDistinctiveStreetToken = expected.streetTokens
@@ -461,20 +505,19 @@
     const hasAddressShape = /\b\d{5}(?:\s*\d{4})?\b/.test(text)
       || /\bunited states\b|\bphone number\b/.test(text);
     const paymentOrDeliverySpeed = /\b(?:visa|mastercard|amex|american express|discover|card ending|payment method|fastest|one day|amazon day|delivery option)\b/.test(text);
-    return Boolean(hasAddressShape && !paymentOrDeliverySpeed);
+    const pickupLocation = /\b(?:pickup locations?|amazon locker|locker|counter location|free pickup)\b/.test(text);
+    return Boolean(hasAddressShape && !paymentOrDeliverySpeed && !pickupLocation);
   }
 
   function selectedAddressMatches(profile = {}) {
     const visibleChoices = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter(visible)
-      .map((input) => ({ input, text: compactText(radioContainer(input)?.innerText || '', 900) }));
-    const addressChoices = visibleChoices.filter(({ text }) => {
-      return addressChoiceText(text);
-    });
+      .filter((input) => visibleChoiceInput(input))
+      .map((input) => ({ input, context: addressChoiceContext(input) }))
+      .filter(({ context }) => Boolean(context));
     // On an address picker, only the checked row is authoritative. Looking at
     // the whole page would incorrectly treat any listed vault address as selected.
-    if (addressChoices.length) {
-      return addressChoices.some(({ input, text }) => input.checked && addressLooksLikeProfile(text, profile));
+    if (visibleChoices.length) {
+      return visibleChoices.some(({ input, context }) => input.checked && addressLooksLikeProfile(context.text, profile));
     }
     // Once the picker closes, the rendered delivery summary becomes the source
     // of truth. It is safe to compare its public text to the local fingerprint.
@@ -2156,9 +2199,8 @@
     const candidateInputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
       .filter((input) => visibleChoiceInput(input));
     for (const input of candidateInputs) {
-      const container = radioContainer(input);
-      const text = compactText(container?.innerText || '', 1000);
       const paymentChoice = expectedLast4 ? paymentChoiceContext(input, expectedLast4) : null;
+      const addressChoice = shippingText ? addressChoiceContext(input) : null;
       if (expectedLast4 && !input.checked && paymentChoice?.endings?.includes(expectedLast4)) {
         if (selectPaymentChoiceInput(input)) {
           selected.push('matching payment card');
@@ -2166,10 +2208,11 @@
         continue;
       }
       if (shippingText && !input.checked
-        && addressChoiceText(text)
-        && addressLooksLikeProfile(text, profile)) {
-        immediateSafeClick(input);
-        selected.push('matching delivery address');
+        && addressChoice
+        && addressLooksLikeProfile(addressChoice.text, profile)) {
+        if (selectAddressChoiceInput(input)) {
+          selected.push('matching delivery address');
+        }
       }
     }
     const selectedKinds = new Set(selected);
