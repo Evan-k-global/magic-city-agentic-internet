@@ -389,46 +389,60 @@
     return null;
   }
 
-  function addressPickerDetailRows(scope) {
-    if (!scope?.querySelectorAll) return [];
-    const selectors = [
-      'article',
-      'li',
-      '[role="listitem"]',
-      '[data-testid*="address" i]',
-      '[id*="address" i]',
-      '[class*="address" i]',
-      '[class*="delivery" i]',
-      '[class*="shipping" i]'
-    ].join(',');
-    const candidates = Array.from(scope.querySelectorAll(selectors))
-      .filter((node) => node !== scope && visible(node))
-      .filter((node) => {
-        const text = compactText(node.innerText || node.textContent || '', 1400);
-        return /\b\d{5}(?:\s*\d{4})?\b|\b(?:amazon locker|pickup locations?|counter location)\b/i.test(text);
-      });
-    return candidates
-      .filter((node) => !candidates.some((child) => child !== node && node.contains(child)))
-      .sort((left, right) => {
-        const position = left.compareDocumentPosition(right);
-        return position & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-      });
+  function isAmazonAddressPickerHost() {
+    const host = String(location.hostname || '').toLowerCase();
+    // Loopback is used only by the packaged extension fixture. Production
+    // address reconciliation remains intentionally Amazon-specific.
+    return /(^|\.)amazon\.com$/.test(host) || host === '127.0.0.1' || host === 'localhost';
   }
 
-  function ordinalAddressChoiceContext(input) {
+  function amazonAddressRowContext(input) {
+    if (!isAmazonAddressPickerHost()) return null;
     const scope = addressPickerScope(input);
-    if (!scope) return null;
-    const choices = Array.from(scope.querySelectorAll('input[type="radio"]'))
-      .filter((choice) => visibleChoiceInput(choice));
-    const rows = addressPickerDetailRows(scope);
-    const choiceIndex = choices.indexOf(input);
-    // A one-to-one layout is the only safe basis for positional association.
-    // Anything else is unreadable, never a reason to infer a mismatched address.
-    if (choiceIndex < 0 || !rows.length || rows.length !== choices.length) return null;
-    const row = rows[choiceIndex];
-    const text = compactText(row?.innerText || row?.textContent || '', 1400);
-    if (!addressChoiceText(text)) return null;
-    return { node: row, text, source: 'ordinal_layout' };
+    const anchor = radioContainer(input);
+    if (!scope || !anchor) return null;
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorCenterY = (anchorRect.top + anchorRect.bottom) / 2;
+    if (!Number.isFinite(anchorCenterY)) return null;
+
+    // Amazon's address picker frequently renders the radio and its text in
+    // separate columns. Read the one visible address-sized element on the
+    // same visual row; never scan the entire address book for a match.
+    const candidates = Array.from(scope.querySelectorAll('div, li, p, span, address, section'))
+      .filter((node) => node !== scope && visible(node))
+      .map((node) => ({
+        node,
+        text: compactText(node.innerText || node.textContent || '', 1200)
+      }))
+      .filter(({ node, text }) => {
+        if (!addressChoiceText(text)) return false;
+        const visibleRadios = Array.from(node.querySelectorAll('input[type="radio"]'))
+          .filter((choice) => visibleChoiceInput(choice)).length;
+        // A detail element can describe one address but must not aggregate
+        // the whole selector or another radio row.
+        return visibleRadios === 0 && (text.match(/\b\d{5}(?:\s*\d{4})?\b/g) || []).length === 1;
+      })
+      .filter(({ node, text }) => !Array.from(node.querySelectorAll('div, li, p, span, address, section'))
+        .some((child) => child !== node
+          && visible(child)
+          && addressChoiceText(compactText(child.innerText || child.textContent || '', 1200))
+          && compactText(child.innerText || child.textContent || '', 1200) !== text));
+
+    const closest = candidates
+      .map(({ node, text }) => {
+        const rect = node.getBoundingClientRect();
+        const distance = anchorCenterY < rect.top
+          ? rect.top - anchorCenterY
+          : anchorCenterY > rect.bottom
+            ? anchorCenterY - rect.bottom
+            : 0;
+        return { node, text, distance };
+      })
+      .filter(({ distance }) => distance <= 72)
+      .sort((left, right) => left.distance - right.distance
+        || left.node.getBoundingClientRect().width - right.node.getBoundingClientRect().width);
+    const match = closest[0];
+    return match ? { ...match, source: 'amazon_visual_row' } : null;
   }
 
   function addressChoiceContext(input) {
@@ -446,6 +460,8 @@
       ariaDescribedText(input)
     ].filter(Boolean).join('\n'), 1200);
     if (addressChoiceText(ariaText)) return { node: input, text: ariaText, source: 'aria' };
+    const amazonVisualRow = amazonAddressRowContext(input);
+    if (amazonVisualRow) return amazonVisualRow;
     let node = input;
     // Walk only to a row with exactly one visible choice. Never use an address
     // book as fallback: its text can make an unrelated checked radio look like
@@ -468,7 +484,7 @@
       if (choiceCount <= 1 && addressChoiceText(text)) return { node, text, source: 'row' };
       node = node.parentElement;
     }
-    return ordinalAddressChoiceContext(input);
+    return null;
   }
 
   function selectAddressChoiceInput(input) {

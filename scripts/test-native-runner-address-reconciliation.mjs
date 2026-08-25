@@ -11,7 +11,7 @@ function fail(message) {
   throw new Error(message);
 }
 
-function savedAddressRow({ id, checked = false, name, address, phone, pickup = false, unreadable = false, noAria = false }) {
+function savedAddressRow({ id, checked = false, name, address, phone, pickup = false, unreadable = false, noAria = false, visualOnly = false }) {
   const detailId = `address-details-${id}`;
   return {
     choice: [
@@ -21,13 +21,17 @@ function savedAddressRow({ id, checked = false, name, address, phone, pickup = f
     ].join(''),
     detail: unreadable
       ? [
-        '<div class="detail">',
-        `<span>${name}</span>`,
-        `<span>${address}</span>`,
-        `<span>${pickup ? 'This item is ineligible for this Pickup Location.' : `Phone number: ${phone}`}</span>`,
-        '</div>'
+        '<div class="detail">Saved delivery choice</div>'
       ].join('')
-      : [
+      : visualOnly
+        ? [
+          '<div class="merchant-detail">',
+          `<span>${name}</span>`,
+          `<span>${address}</span>`,
+          `<span>${pickup ? 'This item is ineligible for this Pickup Location.' : `Phone number: ${phone}`}</span>`,
+          '</div>'
+        ].join('')
+        : [
         `<article class="${pickup ? 'pickup-row' : 'address-row'}" id="${detailId}">`,
         `<strong>${name}</strong>`,
         `<p>${address}</p>`,
@@ -37,7 +41,7 @@ function savedAddressRow({ id, checked = false, name, address, phone, pickup = f
   };
 }
 
-function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowitz', selectedPhone = '(650) 798-5800', unreadable = false, noAria = false }) {
+function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowitz', selectedPhone = '(650) 798-5800', unreadable = false, noAria = false, visualOnly = false }) {
   const otherRows = [
     ['townsend', 'Andreessen Horowitz', '180 TOWNSEND ST, SAN FRANCISCO, CA, 94107-2588, United States', '(650) 798-5800'],
     ['valiant', 'Chris Hamman', '314 VALIANT DR, ROCKWALL, TX, 75032-8403, United States', '972-533-0862'],
@@ -52,15 +56,16 @@ function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowit
     ['orchard', 'Riley Example', '9 ORCHARD ROAD, BOSTON, MA, 02108, United States', '617-555-0177']
   ];
   const rows = [
-    savedAddressRow({ id: 'saved-selected-address', checked: true, name: selectedName, address: selectedAddress, phone: selectedPhone, unreadable, noAria }),
-    ...otherRows.map(([id, name, address, phone]) => savedAddressRow({ id, name, address, phone, unreadable, noAria })),
+    savedAddressRow({ id: 'saved-selected-address', checked: true, name: selectedName, address: selectedAddress, phone: selectedPhone, unreadable, noAria, visualOnly }),
+    ...otherRows.map(([id, name, address, phone]) => savedAddressRow({ id, name, address, phone, unreadable, noAria, visualOnly })),
     savedAddressRow({
       id: 'pickup-charon',
       name: 'Amazon Locker - Charon',
       address: '7-Eleven, 535 8th Ave, New York, NY, 10018-4305, United States',
       pickup: true,
       unreadable,
-      noAria
+      noAria,
+      visualOnly
     })
   ];
   return `<!doctype html>
@@ -125,7 +130,8 @@ async function main() {
         ? '2865 SAND HILL RD STE 102, MENLO PARK, CA, 94025-7022, United States'
         : '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
       unreadable: pathname === '/unverified',
-      noAria: pathname === '/ordinal'
+      noAria: pathname === '/ordinal' || pathname === '/visual-row',
+      visualOnly: pathname === '/visual-row'
     }));
   });
 
@@ -227,8 +233,29 @@ async function main() {
       || ordinalConfirmed !== 'true'
       || ordinalSummary.addressMatches !== true
       || ordinalSummary.addressVerification !== 'matched'
-      || !ordinalSummary.addressVerificationDiagnostics?.selectedChoiceSources?.includes('ordinal_layout')) {
+      || !ordinalSummary.addressVerificationDiagnostics?.selectedChoiceSources?.includes('amazon_visual_row')) {
       fail(`address_reconciliation_sibling_columns_not_matched:${JSON.stringify({ ordinalOutcome, ordinalSummary, ordinalConfirmed })}`);
+    }
+    await page.goto(`${baseUrl}/visual-row`);
+    const visualRowOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025'
+      }
+    });
+    await page.waitForTimeout(250);
+    const visualRowSummary = visualRowOutcome?.state?.checkoutSummary || {};
+    const visualRowConfirmed = await page.locator('body').getAttribute('data-address-confirmed');
+    if (!visualRowOutcome?.completed
+      || visualRowConfirmed !== 'true'
+      || visualRowSummary.addressMatches !== true
+      || !visualRowSummary.addressVerificationDiagnostics?.selectedChoiceSources?.includes('amazon_visual_row')) {
+      fail(`address_reconciliation_visual_row_not_matched:${JSON.stringify({ visualRowOutcome, visualRowSummary, visualRowConfirmed })}`);
     }
     await page.goto(`${baseUrl}/unverified`);
     const unreadableOutcome = await execute({
@@ -275,6 +302,7 @@ async function main() {
       zipVariantAccepted: true,
       selectedAddressRecognizedWithoutReselecting: true,
       siblingRadioAndAddressColumnsHandled: true,
+      realWorldSiblingRowWithoutSemanticMarkupHandled: true,
       unreadableRowIsNotMisreportedAsMismatch: true,
       closedDeliverySummaryPreferredOverUnrelatedDefaultCheckbox: true,
       pickupLocationExcluded: true,
