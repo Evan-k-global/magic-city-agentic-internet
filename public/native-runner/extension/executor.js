@@ -509,13 +509,22 @@
     return Boolean(hasAddressShape && !paymentOrDeliverySpeed && !pickupLocation);
   }
 
-  function selectedAddressMatches(profile = {}) {
-    const visibleChoices = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+  function visibleAddressChoices() {
+    return Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
       .filter((input) => visibleChoiceInput(input))
       .map((input) => ({ input, context: addressChoiceContext(input) }))
       .filter(({ context }) => Boolean(context));
+  }
+
+  function selectedVisibleAddressChoiceMatches(profile = {}) {
+    return visibleAddressChoices()
+      .some(({ input, context }) => input.checked && addressLooksLikeProfile(context.text, profile));
+  }
+
+  function selectedAddressMatches(profile = {}) {
     // On an address picker, only the checked row is authoritative. Looking at
     // the whole page would incorrectly treat any listed vault address as selected.
+    const visibleChoices = visibleAddressChoices();
     if (visibleChoices.length) {
       return visibleChoices.some(({ input, context }) => input.checked && addressLooksLikeProfile(context.text, profile));
     }
@@ -2196,6 +2205,11 @@
     const selected = [];
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     const shippingText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
+    // A merchant can render several variants of one address (for example,
+    // different saved suites). If the currently checked row already matches
+    // the vault's address identity, preserve that user/merchant selection
+    // instead of clicking a later approximate sibling.
+    const selectedShippingAddressAlreadyMatches = Boolean(shippingText) && selectedVisibleAddressChoiceMatches(profile);
     const candidateInputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
       .filter((input) => visibleChoiceInput(input));
     for (const input of candidateInputs) {
@@ -2207,7 +2221,7 @@
         }
         continue;
       }
-      if (shippingText && !input.checked
+      if (shippingText && !selectedShippingAddressAlreadyMatches && !input.checked
         && addressChoice
         && addressLooksLikeProfile(addressChoice.text, profile)) {
         if (selectAddressChoiceInput(input)) {
@@ -2216,6 +2230,7 @@
       }
     }
     const selectedKinds = new Set(selected);
+    if (selectedShippingAddressAlreadyMatches) selectedKinds.add('matching delivery address');
     const riskyPattern = /\b(add a credit|add credit|add debit|add a new card|card number|security code|cvv|cvc|gift card|promo code|add a new address|add new address|new address|prime|trial|subscribe)\b/i;
     for (const control of interactiveControls()) {
       const label = textFor(control);

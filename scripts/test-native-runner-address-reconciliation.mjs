@@ -11,37 +11,81 @@ function fail(message) {
   throw new Error(message);
 }
 
+function savedAddressRow({ id, checked = false, name, address, phone, pickup = false }) {
+  return [
+    `<article class="${pickup ? 'pickup-row' : 'address-row'}" data-address-id="${id}">`,
+    `<div class="choice-cell"><input type="radio" name="address" ${checked ? 'checked' : ''} style="position:absolute;opacity:0;width:1px;height:1px" /></div>`,
+    '<div class="address-details">',
+    `<strong>${name}</strong>`,
+    `<p>${address}</p>`,
+    `<p>${pickup ? 'This item is ineligible for this Pickup Location.' : `Phone number: ${phone}`}</p>`,
+    '</div>',
+    '</article>'
+  ].join('');
+}
+
+function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowitz', selectedPhone = '(650) 798-5800' }) {
+  const otherRows = [
+    ['townsend', 'Andreessen Horowitz', '180 TOWNSEND ST, SAN FRANCISCO, CA, 94107-2588, United States', '(650) 798-5800'],
+    ['valiant', 'Chris Hamman', '314 VALIANT DR, ROCKWALL, TX, 75032-8403, United States', '972-533-0862'],
+    ['coastal', 'EVAN KEREIAKES', '16192 COASTAL HWY, LEWES, DE, 19958-3608, United States', '646-691-5137'],
+    ['coastal-phone', 'Evan Kereiakes', '16192 COASTAL HWY, LEWES, DE, 19958-3608, United States', '+16466915137'],
+    ['sand-hill-wrong-suite', 'Andreessen Horowitz', '2865 SAND HILL RD STE 102, MENLO PARK, CA, 94025-7022, United States', '(650) 798-5800'],
+    ['oak', 'Taylor Example', '42 OAK STREET, AUSTIN, TX, 78701, United States', '512-555-0199'],
+    ['market', 'Jordan Example', '1 MARKET STREET, SAN FRANCISCO, CA, 94105, United States', '415-555-0188'],
+    ['palm', 'Avery Example', '530 PALM DRIVE, LOS ANGELES, CA, 90001, United States', '323-555-0118'],
+    ['cedar', 'Casey Example', '700 CEDAR AVENUE, SEATTLE, WA, 98101, United States', '206-555-0133'],
+    ['lakeshore', 'Morgan Example', '11 LAKESHORE DRIVE, CHICAGO, IL, 60601, United States', '312-555-0144'],
+    ['orchard', 'Riley Example', '9 ORCHARD ROAD, BOSTON, MA, 02108, United States', '617-555-0177']
+  ];
+  const rows = [
+    savedAddressRow({ id: 'saved-selected-address', checked: true, name: selectedName, address: selectedAddress, phone: selectedPhone }),
+    ...otherRows.map(([id, name, address, phone]) => savedAddressRow({ id, name, address, phone })),
+    savedAddressRow({
+      id: 'pickup-charon',
+      name: 'Amazon Locker - Charon',
+      address: '7-Eleven, 535 8th Ave, New York, NY, 10018-4305, United States',
+      pickup: true
+    })
+  ].join('');
+  return `<!doctype html>
+    <style>
+      main { font: 16px/1.4 Arial, sans-serif; max-width: 1100px; margin: 24px auto; }
+      .address-row, .pickup-row { display: grid; grid-template-columns: 36px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid #d5d9d9; }
+      .choice-cell { min-height: 24px; position: relative; }
+      button { background: #ffd814; border: 0; border-radius: 18px; padding: 10px 24px; font-weight: 700; }
+      aside { float: right; width: 280px; padding: 18px; background: #f7f8f8; }
+      #delivery-addresses { max-width: 700px; }
+    </style>
+    <main>
+      <aside>
+        <button class="address-confirm" onclick="confirmAddress()">Deliver to this address</button>
+        <p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p>
+      </aside>
+      <h1>Select a delivery address</h1>
+      <section id="delivery-addresses" aria-label="Delivery addresses">${rows}</section>
+      <section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2><label><input type="radio" name="payment" checked /> Mastercard ending in 6383</label></section>
+      <button class="address-confirm" onclick="confirmAddress()">Deliver to this address</button>
+      <p id="delivery-summary">Select a delivery address</p>
+    </main>
+    <script>
+      function confirmAddress() {
+        document.body.dataset.addressConfirmed = 'true';
+        document.body.dataset.addressConfirmClicks = String(Number(document.body.dataset.addressConfirmClicks || 0) + 1);
+        document.querySelector('#delivery-summary').textContent = 'Delivering to Andreessen Horowitz, 2865 Sand Hill Road, Menlo Park, CA 94025';
+      }
+    </script>`;
+}
+
 async function main() {
-  const server = http.createServer((_request, response) => {
+  const server = http.createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/html' });
-    response.end(`<!doctype html>
-      <main>
-        <h1>Select a delivery address</h1>
-        <section id="delivery-addresses" aria-label="Delivery addresses">
-          <div class="address-choice" data-address-id="saved-matching-address">
-            <input type="radio" name="address" checked style="display:none" />
-            <div>
-              <strong>Andreessen Horowitz</strong>
-              <p>2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States</p>
-              <p>Phone number: (650) 798-5800</p>
-            </div>
-          </div>
-          <div class="address-choice" data-address-id="other-address">
-            <input type="radio" name="address" style="display:none" />
-            <div>
-              <strong>Other Recipient</strong>
-              <p>180 TOWNSEND ST, SAN FRANCISCO, CA, 94107-2588, United States</p>
-            </div>
-          </div>
-        </section>
-        <button id="deliver-address" onclick="document.body.dataset.addressConfirmed='true'; document.querySelector('#delivery-summary').textContent='Delivering to Andreessen Horowitz, 2865 Sand Hill Road, Menlo Park, CA 94025'">Deliver to this address</button>
-        <aside>
-          <p id="delivery-summary">Select a delivery address</p>
-          <p>Items: $2.97</p>
-          <p>Shipping &amp; handling: $0.00</p>
-          <p>Order total: $2.97</p>
-        </aside>
-      </main>`);
+    const conflict = new URL(request.url, 'http://127.0.0.1').pathname === '/different-unit';
+    response.end(addressPickerHtml({
+      selectedAddress: conflict
+        ? '2865 SAND HILL RD STE 102, MENLO PARK, CA, 94025-7022, United States'
+        : '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States'
+    }));
   });
 
   let context = null;
@@ -67,7 +111,7 @@ async function main() {
     });
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     const page = await context.newPage();
-    await page.goto(baseUrl);
+    await page.goto(`${baseUrl}/selected`);
     const tab = await worker.evaluate(async (url) => {
       const tabs = await chrome.tabs.query({});
       return tabs.find((candidate) => candidate.url === url) || null;
@@ -92,14 +136,36 @@ async function main() {
     });
     await page.waitForTimeout(250);
     const confirmed = await page.locator('body').getAttribute('data-address-confirmed');
-    const matchingInputChecked = await page.locator('[data-address-id="saved-matching-address"] input').isChecked();
-    const otherInputChecked = await page.locator('[data-address-id="other-address"] input').isChecked();
+    const matchingInputChecked = await page.locator('[data-address-id="saved-selected-address"] input').isChecked();
+    const pickupInputChecked = await page.locator('[data-address-id="pickup-charon"] input').isChecked();
+    const confirmClicks = await page.locator('body').getAttribute('data-address-confirm-clicks');
     const summary = await page.locator('#delivery-summary').textContent();
     if (!outcome?.completed || !/deliver to this address/i.test(String(outcome.label || ''))) {
       fail(`address_reconciliation_did_not_confirm_selected_address:${JSON.stringify(outcome)}`);
     }
-    if (confirmed !== 'true' || !matchingInputChecked || otherInputChecked || !/2865 Sand Hill/i.test(String(summary || ''))) {
-      fail(`address_reconciliation_dom_not_settled:${JSON.stringify({ confirmed, matchingInputChecked, otherInputChecked, summary, outcome })}`);
+    if (confirmed !== 'true' || confirmClicks !== '1' || !matchingInputChecked || pickupInputChecked || !/2865 Sand Hill/i.test(String(summary || ''))) {
+      fail(`address_reconciliation_dom_not_settled:${JSON.stringify({ confirmed, confirmClicks, matchingInputChecked, pickupInputChecked, summary, outcome })}`);
+    }
+    await page.goto(`${baseUrl}/different-unit`);
+    const strictMismatchOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025'
+      }
+    });
+    await page.waitForTimeout(250);
+    const strictMismatchConfirmed = await page.locator('body').getAttribute('data-address-confirmed');
+    const strictMismatchState = strictMismatchOutcome?.state?.checkoutSummary || {};
+    if (strictMismatchConfirmed === 'true'
+      || strictMismatchOutcome?.navigationRequested === true
+      || strictMismatchOutcome?.profileCorrection !== 'address'
+      || strictMismatchState.addressMatches !== false) {
+      fail(`address_reconciliation_allowed_different_unit:${JSON.stringify({ strictMismatchConfirmed, strictMismatchOutcome, strictMismatchState })}`);
     }
     console.log(JSON.stringify({
       ok: true,
@@ -107,7 +173,10 @@ async function main() {
       selectedAddress: '2865 SAND HILL RD STE 101',
       vaultAddress: '2865 Sand Hill Road',
       zipVariantAccepted: true,
-      addressConfirmationClicked: true
+      selectedAddressRecognizedWithoutReselecting: true,
+      pickupLocationExcluded: true,
+      duplicateAddressConfirmationHandled: true,
+      differentSuiteRejected: true
     }, null, 2));
   } finally {
     await context?.close().catch(() => null);
