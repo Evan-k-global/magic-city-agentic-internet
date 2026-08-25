@@ -689,7 +689,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.8'
+  '0.4.9'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -18035,12 +18035,13 @@ const server = http.createServer(async (req, res) => {
           'payment_required',
           'needs_payment',
           'checkout_profile_mismatch',
+          'address_verification_required',
           'review_ready',
           'final_approval_required',
           'needs_final_approval'
         ].includes(stopState);
         if (
-          String(session.status || '').trim().toLowerCase() !== 'fulfilled'
+          !['fulfilled', 'failed'].includes(String(session.status || '').trim().toLowerCase())
           || !checkoutNeedsReconcile
           || String(session.preferredExecutionAgentId || '').trim() !== RUNNER_EXTENSION_PLUGIN_ID
           || !checkoutReconcileUrl
@@ -18518,6 +18519,15 @@ const server = http.createServer(async (req, res) => {
             nativeRunnerDeviceId: extensionDispatchDeviceId
           })
         : null;
+      // A checkout-reconciliation continuation is confined to the preserved
+      // merchant tab. It can re-observe/select saved address and card cues, but
+      // it cannot add items or submit an order. A previous false mismatch may
+      // already have released the original execution hold, so this recovery
+      // must never create a second credit reservation.
+      const checkoutReconcileWithoutAdditionalCharge = checkoutReconcileResumeRequested
+        && !directSantaClawzX402Payment
+        && String(session.handoffData?.kind || '').trim() === 'browser'
+        && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun);
       if (extensionSitePermissionPause) nextTrace.push({
         pluginId: selectedExecutionAgentIdForRun,
         ...extensionSitePermissionPause
@@ -18554,7 +18564,7 @@ const server = http.createServer(async (req, res) => {
         paymentRail: directSantaClawzX402Payment
           ? (santaclawzDirectWalletPayment ? 'base_usdc_x402' : 'magic_city_credits_to_base_usdc_x402')
           : paymentOrchestration?.paymentRail || paymentOrchestration?.fundingMode || '',
-        spendCredits: paymentOrchestration?.requiredCredits || 0,
+        spendCredits: checkoutReconcileWithoutAdditionalCharge ? 0 : (paymentOrchestration?.requiredCredits || 0),
         dataAccess: Object.keys(localPrivateInputs).length || browserLocalCheckoutProfileReady ? ['local_vault'] : [],
         userApproved: true,
         detail: directSantaClawzX402Payment
@@ -18566,7 +18576,10 @@ const server = http.createServer(async (req, res) => {
             : 'Magic City approved the bounded Magic Internet Agent execution start.'
       });
       let creditReservation = session.creditReservation ?? null;
-      if (paymentOrchestration && Number(paymentOrchestration.requiredCredits || 0) > 0 && (!creditAuthUser || !requesterId)) {
+      if (!checkoutReconcileWithoutAdditionalCharge
+        && paymentOrchestration
+        && Number(paymentOrchestration.requiredCredits || 0) > 0
+        && (!creditAuthUser || !requesterId)) {
         console.warn('[agent-verification] execution credit auth missing', JSON.stringify({
           sessionId,
           kind: session.handoffData?.kind || null,
@@ -18582,7 +18595,41 @@ const server = http.createServer(async (req, res) => {
           session: getConnectorSession(sessionId) || session
         });
       }
-      if (paymentOrchestration && Number(paymentOrchestration.requiredCredits || 0) > 0 && requesterId) {
+      if (checkoutReconcileWithoutAdditionalCharge) {
+        const existingLock = getEscrowLock(sessionId);
+        const continuationRequesterHash = existingLock?.userHash
+          || session.creditReservation?.requesterHash
+          || session.requesterHash
+          || (requesterId ? hashIdentifier(requesterId) : null);
+        const existingHoldMatchesSession = existingLock?.status === 'locked'
+          && (!continuationRequesterHash || existingLock.userHash === continuationRequesterHash);
+        if (existingHoldMatchesSession) {
+          creditReservation = {
+            sessionId,
+            requesterId: requesterId || session.creditReservation?.requesterId || null,
+            requesterHash: existingLock.userHash,
+            status: 'locked',
+            requiredCredits: paymentOrchestration?.requiredCredits || 0,
+            amountUnits: existingLock.amount,
+            reservedAt: existingLock.createdAt,
+            account: formatUserAccountForApi(getUserAccount(existingLock.userHash)),
+            continuation: 'reused_existing_hold'
+          };
+        } else {
+          creditReservation = {
+            ...(session.creditReservation || {}),
+            sessionId,
+            requesterId: requesterId || session.creditReservation?.requesterId || null,
+            requesterHash: continuationRequesterHash,
+            status: 'continuation_no_additional_hold',
+            requiredCredits: paymentOrchestration?.requiredCredits || session.creditReservation?.requiredCredits || 0,
+            amountUnits: 0,
+            continuation: 'checkout_reconcile',
+            continuedAt: new Date().toISOString(),
+            account: continuationRequesterHash ? formatUserAccountForApi(getUserAccount(continuationRequesterHash)) : null
+          };
+        }
+      } else if (paymentOrchestration && Number(paymentOrchestration.requiredCredits || 0) > 0 && requesterId) {
         const userHash = hashIdentifier(requesterId);
         const amountUnits = toUnits(paymentOrchestration.requiredCredits);
         const existingLock = getEscrowLock(sessionId);

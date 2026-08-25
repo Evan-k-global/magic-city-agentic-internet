@@ -17,6 +17,10 @@
 
   function visible(element) {
     if (!element) return false;
+    // Merchant checkout panels commonly remain mounted while their parent is
+    // hidden. A child can retain dimensions in some layouts, but it is never a
+    // valid target while an ancestor is explicitly hidden from the user.
+    if (element.hidden || element.closest?.('[hidden], [aria-hidden="true"]')) return false;
     const style = window.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 4 && rect.height > 4;
@@ -43,10 +47,18 @@
     ].filter(Boolean).join(' '));
   }
 
-  function ariaLabelledText(element) {
-    const ids = String(element?.getAttribute?.('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+  function ariaReferenceText(element, attribute = 'aria-labelledby') {
+    const ids = String(element?.getAttribute?.(attribute) || '').split(/\s+/).filter(Boolean);
     if (!ids.length) return '';
     return compactText(ids.map((id) => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || '').join(' '), 240);
+  }
+
+  function ariaLabelledText(element) {
+    return ariaReferenceText(element, 'aria-labelledby');
+  }
+
+  function ariaDescribedText(element) {
+    return ariaReferenceText(element, 'aria-describedby');
   }
 
   function visibleControlLabel(element, limit = 180) {
@@ -361,33 +373,102 @@
     }
   }
 
+  function addressPickerScope(input) {
+    let node = input;
+    for (let depth = 0; node && depth < 12; depth += 1) {
+      const text = compactText([
+        node.innerText || node.textContent || '',
+        node.getAttribute?.('aria-label') || '',
+        ariaLabelledText(node)
+      ].filter(Boolean).join('\n'), 12000);
+      const choiceCount = Array.from(node.querySelectorAll?.('input[type="radio"]') || [])
+        .filter((choice) => visibleChoiceInput(choice)).length;
+      if (choiceCount >= 2 && /select a (?:delivery|shipping) address|delivery addresses|shipping addresses/i.test(text)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function addressPickerDetailRows(scope) {
+    if (!scope?.querySelectorAll) return [];
+    const selectors = [
+      'article',
+      'li',
+      '[role="listitem"]',
+      '[data-testid*="address" i]',
+      '[id*="address" i]',
+      '[class*="address" i]',
+      '[class*="delivery" i]',
+      '[class*="shipping" i]'
+    ].join(',');
+    const candidates = Array.from(scope.querySelectorAll(selectors))
+      .filter((node) => node !== scope && visible(node))
+      .filter((node) => {
+        const text = compactText(node.innerText || node.textContent || '', 1400);
+        return /\b\d{5}(?:\s*\d{4})?\b|\b(?:amazon locker|pickup locations?|counter location)\b/i.test(text);
+      });
+    return candidates
+      .filter((node) => !candidates.some((child) => child !== node && node.contains(child)))
+      .sort((left, right) => {
+        const position = left.compareDocumentPosition(right);
+        return position & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+      });
+  }
+
+  function ordinalAddressChoiceContext(input) {
+    const scope = addressPickerScope(input);
+    if (!scope) return null;
+    const choices = Array.from(scope.querySelectorAll('input[type="radio"]'))
+      .filter((choice) => visibleChoiceInput(choice));
+    const rows = addressPickerDetailRows(scope);
+    const choiceIndex = choices.indexOf(input);
+    // A one-to-one layout is the only safe basis for positional association.
+    // Anything else is unreadable, never a reason to infer a mismatched address.
+    if (choiceIndex < 0 || !rows.length || rows.length !== choices.length) return null;
+    const row = rows[choiceIndex];
+    const text = compactText(row?.innerText || row?.textContent || '', 1400);
+    if (!addressChoiceText(text)) return null;
+    return { node: row, text, source: 'ordinal_layout' };
+  }
+
   function addressChoiceContext(input) {
     const label = input?.labels?.[0];
     if (label) {
       const text = compactText(label.innerText || label.textContent || '', 1200);
-      if (addressChoiceText(text)) return { node: label, text };
+      if (addressChoiceText(text)) return { node: label, text, source: 'label' };
     }
-    let fallback = null;
+    // Amazon's real picker may keep the radio in one column and the address
+    // detail in a sibling column. ARIA references are the most precise link;
+    // use them before inspecting layout containers.
+    const ariaText = compactText([
+      input?.getAttribute?.('aria-label') || '',
+      ariaLabelledText(input),
+      ariaDescribedText(input)
+    ].filter(Boolean).join('\n'), 1200);
+    if (addressChoiceText(ariaText)) return { node: input, text: ariaText, source: 'aria' };
     let node = input;
-    // Amazon nests the actual radio inside a row of address details. Walk up to
-    // the smallest visible node containing one address choice, never the whole
-    // address book (which may include a dozen unrelated addresses).
+    // Walk only to a row with exactly one visible choice. Never use an address
+    // book as fallback: its text can make an unrelated checked radio look like
+    // the saved address.
     for (let depth = 0; node && depth < 10; depth += 1) {
+      const choiceCount = Array.from(node.querySelectorAll?.('input[type="radio"]') || [])
+        .filter((choice) => visibleChoiceInput(choice)).length;
+      const siblingText = Array.from(node.children || [])
+        .filter((child) => child !== input && !child.contains?.(input))
+        .map((child) => child.innerText || child.textContent || '')
+        .join('\n');
       const text = compactText([
         node.innerText || node.textContent || '',
+        siblingText,
         node.getAttribute?.('aria-label') || '',
+        ariaLabelledText(node),
+        ariaDescribedText(node),
         node.getAttribute?.('data-testid') || ''
       ].filter(Boolean).join('\n'), 1400);
-      if (addressChoiceText(text)) {
-        const candidate = { node, text };
-        const choiceCount = Array.from(node.querySelectorAll?.('input[type="radio"], input[type="checkbox"]') || [])
-          .filter((choice) => visibleChoiceInput(choice)).length;
-        if (choiceCount <= 1) return candidate;
-        fallback ||= candidate;
-      }
+      if (choiceCount <= 1 && addressChoiceText(text)) return { node, text, source: 'row' };
       node = node.parentElement;
     }
-    return fallback;
+    return ordinalAddressChoiceContext(input);
   }
 
   function selectAddressChoiceInput(input) {
@@ -509,28 +590,90 @@
     return Boolean(hasAddressShape && !paymentOrDeliverySpeed && !pickupLocation);
   }
 
+  function closedDeliverySummaryObservation(profile = {}) {
+    const root = interactionRoot();
+    const candidates = Array.from(root.querySelectorAll([
+      'h1', 'h2', 'h3', '[role="heading"]',
+      '[aria-label*="delivery" i]', '[aria-label*="shipping" i]',
+      '[data-testid*="delivery" i]', '[data-testid*="shipping" i]',
+      '[id*="delivery" i]', '[id*="shipping" i]',
+      '[class*="delivery" i]', '[class*="shipping" i]'
+    ].join(','))).filter(visible);
+    for (const candidate of candidates) {
+      let node = candidate;
+      for (let depth = 0; node && depth < 4; depth += 1) {
+        const text = compactText(node.innerText || node.textContent || '', 1800);
+        // This is deliberately a closed-summary signal, not a generic address
+        // search. The address chooser has "Select a delivery address" and must
+        // continue to rely on its selected radio row.
+        if (/\b(?:delivering|shipping)\s+to\b/i.test(text)) {
+          return {
+            visible: true,
+            matches: addressLooksLikeProfile(text, profile)
+          };
+        }
+        node = node.parentElement;
+      }
+    }
+    return { visible: false, matches: false };
+  }
+
   function visibleAddressChoices() {
-    return Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+    return Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
       .filter((input) => visibleChoiceInput(input))
       .map((input) => ({ input, context: addressChoiceContext(input) }))
       .filter(({ context }) => Boolean(context));
   }
 
   function selectedVisibleAddressChoiceMatches(profile = {}) {
-    return visibleAddressChoices()
-      .some(({ input, context }) => input.checked && addressLooksLikeProfile(context.text, profile));
+    return observeSelectedAddress(profile).status === 'matched';
+  }
+
+  function observeSelectedAddress(profile = {}) {
+    const rawVisibleChoices = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
+      .filter((input) => visibleChoiceInput(input));
+    const visibleChoices = visibleAddressChoices();
+    const addressPickerVisible = /select a (?:delivery|shipping) address|delivery addresses|shipping addresses/i.test(pagePlainText(12000));
+    const closedSummary = closedDeliverySummaryObservation(profile);
+    if (addressPickerVisible && rawVisibleChoices.length && !visibleChoices.length) {
+      return {
+        status: 'unverified',
+        source: 'address_picker',
+        diagnostics: {
+          visibleChoiceCount: rawVisibleChoices.length,
+          selectedChoiceCount: rawVisibleChoices.filter((input) => input.checked || input.getAttribute?.('aria-checked') === 'true').length,
+          readableSelectedChoiceCount: 0,
+          matchingSelectedChoiceCount: 0
+        }
+      };
+    }
+    if (visibleChoices.length) {
+      const selectedChoices = visibleChoices.filter(({ input }) => input.checked || input.getAttribute?.('aria-checked') === 'true');
+      const readableSelectedChoices = selectedChoices.filter(({ context }) => addressChoiceText(context?.text || ''));
+      const matchingSelectedChoices = readableSelectedChoices.filter(({ context }) => addressLooksLikeProfile(context.text, profile));
+      const directMismatchObserved = readableSelectedChoices
+        .some(({ context }) => context?.source !== 'ordinal_layout');
+      return {
+        status: matchingSelectedChoices.length ? 'matched' : directMismatchObserved ? 'mismatched' : closedSummary.matches ? 'matched' : 'unverified',
+        source: matchingSelectedChoices.length || directMismatchObserved || !closedSummary.matches ? 'address_picker' : 'checkout_summary',
+        diagnostics: {
+          visibleChoiceCount: visibleChoices.length,
+          selectedChoiceCount: selectedChoices.length,
+          readableSelectedChoiceCount: readableSelectedChoices.length,
+          matchingSelectedChoiceCount: matchingSelectedChoices.length,
+          selectedChoiceSources: readableSelectedChoices.map(({ context }) => context?.source || 'unknown')
+        }
+      };
+    }
+    return {
+      status: closedSummary.visible ? (closedSummary.matches ? 'matched' : 'mismatched') : 'unverified',
+      source: 'checkout_summary',
+      diagnostics: { visibleChoiceCount: 0, selectedChoiceCount: 0, readableSelectedChoiceCount: 0, matchingSelectedChoiceCount: 0 }
+    };
   }
 
   function selectedAddressMatches(profile = {}) {
-    // On an address picker, only the checked row is authoritative. Looking at
-    // the whole page would incorrectly treat any listed vault address as selected.
-    const visibleChoices = visibleAddressChoices();
-    if (visibleChoices.length) {
-      return visibleChoices.some(({ input, context }) => input.checked && addressLooksLikeProfile(context.text, profile));
-    }
-    // Once the picker closes, the rendered delivery summary becomes the source
-    // of truth. It is safe to compare its public text to the local fingerprint.
-    return addressLooksLikeProfile(pagePlainText(12000), profile);
+    return observeSelectedAddress(profile).status === 'matched';
   }
 
   function searchControl() {
@@ -1714,10 +1857,22 @@
     const expectedAddressText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
     const hasAddressPreset = Boolean(expectedAddressText);
     const hasCardPreset = Boolean(expectedLast4);
-    const addressMatch = checkoutOpen ? selectedAddressMatches(profile) : false;
-    const addressSelectionVisible = checkoutOpen && /delivering to|delivery address|shipping address|ship to|use this address|add a new address|change address/i.test(rawPageText);
-    const addressMismatch = Boolean(addressSelectionVisible && expectedAddressText && !addressMatch);
-    const addressConfirmationRequired = Boolean(checkoutOpen && findAddressConfirmControl());
+    const addressObservation = checkoutOpen && hasAddressPreset
+      ? observeSelectedAddress(profile)
+      // An address profile is not an address-verification problem while the
+      // shopper is still on a catalog or cart surface. Emitting "unverified"
+      // here made the runner stop after add-to-cart before checkout existed.
+      : { status: 'not_requested', source: 'none', diagnostics: {} };
+    // A closed "Delivering to" summary and an open address picker both contain
+    // address language. Only the picker exposes a pending address selection.
+    // Never let a mounted-but-inactive picker turn a verified summary into a
+    // second address-confirmation loop.
+    const addressPickerOpen = checkoutOpen && addressObservation.source === 'address_picker';
+    const addressMatch = addressObservation.status === 'matched';
+    // Do not conflate an unreadable Amazon row with a different address. Only
+    // a readable, selected row that fails the exact fingerprint is a mismatch.
+    const addressMismatch = Boolean(addressPickerOpen && addressObservation.status === 'mismatched');
+    const addressConfirmationRequired = Boolean(addressPickerOpen && findAddressConfirmControl());
     const paymentMethodConfirmationRequired = Boolean(checkoutOpen && findPaymentMethodConfirmControl());
     const shippingFormOpen = checkoutOpen && shippingAddressFormVisible(checkoutFields);
     const deliveryState = checkoutOpen
@@ -1781,7 +1936,10 @@
       selectedCardLast4: currentLast4,
       expectedCardLast4: expectedLast4,
       cardMatches,
-      addressMatches: addressSelectionVisible ? addressMatch : null,
+      addressMatches: addressObservation.status === 'matched' ? true : addressObservation.status === 'mismatched' ? false : null,
+      addressVerification: addressObservation.status,
+      addressVerificationSource: addressObservation.source,
+      addressVerificationDiagnostics: addressObservation.diagnostics,
       addressConfirmationRequired,
       paymentMethodConfirmationRequired,
       addressConfirmed,
@@ -3223,7 +3381,7 @@
     const summary = state.checkoutSummary || {};
     const selections = [...selectedOptions, deliverySelection].filter(Boolean);
     const addressMatches = summary.addressMatches;
-    const selectedMatchingAddress = selectedOptions.includes('matching delivery address');
+    const addressVerification = String(summary.addressVerification || '');
     const completeShippingProfile = fullShippingAddressAvailable(profile);
 
     // Confirming an exact saved-card selection is a non-final checkout step.
@@ -3280,7 +3438,7 @@
     // Selecting an address can update Amazon's checkout state asynchronously.
     // Treat the exact profile match as sufficient evidence to continue through
     // the non-sensitive "Deliver to this address" confirmation.
-    if (addressMatches === true || selectedMatchingAddress) {
+    if (addressMatches === true && summary.addressConfirmationRequired) {
       const confirmAddress = findAddressConfirmControl();
       if (confirmAddress && scheduleSafeClick(confirmAddress.control)) {
         return {
@@ -3290,17 +3448,6 @@
           label: compactText(confirmAddress.label || 'Use this address', 140),
           safeFieldsFilled: [...new Set(filled)],
           checkoutSelections: [...selections, 'confirm matching delivery address'],
-          state
-        };
-      }
-      if (selectedMatchingAddress && addressMatches !== true) {
-        return {
-          completed: true,
-          skipped: false,
-          navigationRequested: true,
-          label: 'Selected matching delivery address',
-          safeFieldsFilled: [...new Set(filled)],
-          checkoutSelections: selections,
           state
         };
       }
@@ -3384,6 +3531,17 @@
           state
         };
       }
+    }
+
+    if (addressVerification === 'unverified') {
+      return {
+        completed: false,
+        profileCorrection: 'address_verification',
+        reason: 'Amazon showed a selected delivery-address row, but the local runner could not verify that row against the saved address fingerprint.',
+        safeFieldsFilled: [...new Set(filled)],
+        checkoutSelections: selections,
+        state
+      };
     }
 
     const correctionKind = checkoutProfileCorrection(summary) ||

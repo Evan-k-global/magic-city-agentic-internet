@@ -11,20 +11,33 @@ function fail(message) {
   throw new Error(message);
 }
 
-function savedAddressRow({ id, checked = false, name, address, phone, pickup = false }) {
-  return [
-    `<article class="${pickup ? 'pickup-row' : 'address-row'}" data-address-id="${id}">`,
-    `<div class="choice-cell"><input type="radio" name="address" ${checked ? 'checked' : ''} style="position:absolute;opacity:0;width:1px;height:1px" /></div>`,
-    '<div class="address-details">',
-    `<strong>${name}</strong>`,
-    `<p>${address}</p>`,
-    `<p>${pickup ? 'This item is ineligible for this Pickup Location.' : `Phone number: ${phone}`}</p>`,
-    '</div>',
-    '</article>'
-  ].join('');
+function savedAddressRow({ id, checked = false, name, address, phone, pickup = false, unreadable = false, noAria = false }) {
+  const detailId = `address-details-${id}`;
+  return {
+    choice: [
+      `<div class="choice-cell" data-address-id="${id}">`,
+      `<input type="radio" name="address" ${checked ? 'checked' : ''} ${(unreadable || noAria) ? '' : `aria-describedby="${detailId}"`} style="position:absolute;opacity:0;width:1px;height:1px" />`,
+      '</div>'
+    ].join(''),
+    detail: unreadable
+      ? [
+        '<div class="detail">',
+        `<span>${name}</span>`,
+        `<span>${address}</span>`,
+        `<span>${pickup ? 'This item is ineligible for this Pickup Location.' : `Phone number: ${phone}`}</span>`,
+        '</div>'
+      ].join('')
+      : [
+        `<article class="${pickup ? 'pickup-row' : 'address-row'}" id="${detailId}">`,
+        `<strong>${name}</strong>`,
+        `<p>${address}</p>`,
+        `<p>${pickup ? 'This item is ineligible for this Pickup Location.' : `Phone number: ${phone}`}</p>`,
+        '</article>'
+      ].join('')
+  };
 }
 
-function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowitz', selectedPhone = '(650) 798-5800' }) {
+function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowitz', selectedPhone = '(650) 798-5800', unreadable = false, noAria = false }) {
   const otherRows = [
     ['townsend', 'Andreessen Horowitz', '180 TOWNSEND ST, SAN FRANCISCO, CA, 94107-2588, United States', '(650) 798-5800'],
     ['valiant', 'Chris Hamman', '314 VALIANT DR, ROCKWALL, TX, 75032-8403, United States', '972-533-0862'],
@@ -39,20 +52,23 @@ function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowit
     ['orchard', 'Riley Example', '9 ORCHARD ROAD, BOSTON, MA, 02108, United States', '617-555-0177']
   ];
   const rows = [
-    savedAddressRow({ id: 'saved-selected-address', checked: true, name: selectedName, address: selectedAddress, phone: selectedPhone }),
-    ...otherRows.map(([id, name, address, phone]) => savedAddressRow({ id, name, address, phone })),
+    savedAddressRow({ id: 'saved-selected-address', checked: true, name: selectedName, address: selectedAddress, phone: selectedPhone, unreadable, noAria }),
+    ...otherRows.map(([id, name, address, phone]) => savedAddressRow({ id, name, address, phone, unreadable, noAria })),
     savedAddressRow({
       id: 'pickup-charon',
       name: 'Amazon Locker - Charon',
       address: '7-Eleven, 535 8th Ave, New York, NY, 10018-4305, United States',
-      pickup: true
+      pickup: true,
+      unreadable,
+      noAria
     })
-  ].join('');
+  ];
   return `<!doctype html>
     <style>
       main { font: 16px/1.4 Arial, sans-serif; max-width: 1100px; margin: 24px auto; }
-      .address-row, .pickup-row { display: grid; grid-template-columns: 36px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid #d5d9d9; }
+      .address-row, .pickup-row { padding: 12px 0; border-bottom: 1px solid #d5d9d9; }
       .choice-cell { min-height: 24px; position: relative; }
+      .address-picker-grid { display: grid; grid-template-columns: 36px 1fr; gap: 12px; }
       button { background: #ffd814; border: 0; border-radius: 18px; padding: 10px 24px; font-weight: 700; }
       aside { float: right; width: 280px; padding: 18px; background: #f7f8f8; }
       #delivery-addresses { max-width: 700px; }
@@ -63,7 +79,12 @@ function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowit
         <p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p>
       </aside>
       <h1>Select a delivery address</h1>
-      <section id="delivery-addresses" aria-label="Delivery addresses">${rows}</section>
+      <section id="delivery-addresses" aria-label="Delivery addresses">
+        <div class="address-picker-grid">
+          <div class="address-choice-column">${rows.map((row) => row.choice).join('')}</div>
+          <div class="address-details-column">${rows.map((row) => row.detail).join('')}</div>
+        </div>
+      </section>
       <section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2><label><input type="radio" name="payment" checked /> Mastercard ending in 6383</label></section>
       <button class="address-confirm" onclick="confirmAddress()">Deliver to this address</button>
       <p id="delivery-summary">Select a delivery address</p>
@@ -77,14 +98,34 @@ function addressPickerHtml({ selectedAddress, selectedName = 'Andreessen Horowit
     </script>`;
 }
 
+function closedCheckoutSummaryHtml() {
+  return `<!doctype html>
+    <main>
+      <section aria-label="Delivery address">
+        <h2>Delivering to Andreessen Horowitz</h2>
+        <p>2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States</p>
+      </section>
+      <section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>
+      <label><input type="checkbox" /> Default to this delivery address and payment method.</label>
+      <button>Place your order</button>
+    </main>`;
+}
+
 async function main() {
   const server = http.createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/html' });
-    const conflict = new URL(request.url, 'http://127.0.0.1').pathname === '/different-unit';
+    const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
+    if (pathname === '/closed-summary') {
+      response.end(closedCheckoutSummaryHtml());
+      return;
+    }
+    const conflict = pathname === '/different-unit';
     response.end(addressPickerHtml({
       selectedAddress: conflict
         ? '2865 SAND HILL RD STE 102, MENLO PARK, CA, 94025-7022, United States'
-        : '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States'
+        : '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
+      unreadable: pathname === '/unverified',
+      noAria: pathname === '/ordinal'
     }));
   });
 
@@ -167,6 +208,65 @@ async function main() {
       || strictMismatchState.addressMatches !== false) {
       fail(`address_reconciliation_allowed_different_unit:${JSON.stringify({ strictMismatchConfirmed, strictMismatchOutcome, strictMismatchState })}`);
     }
+    await page.goto(`${baseUrl}/ordinal`);
+    const ordinalOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025'
+      }
+    });
+    await page.waitForTimeout(250);
+    const ordinalSummary = ordinalOutcome?.state?.checkoutSummary || {};
+    const ordinalConfirmed = await page.locator('body').getAttribute('data-address-confirmed');
+    if (!ordinalOutcome?.completed
+      || ordinalConfirmed !== 'true'
+      || ordinalSummary.addressMatches !== true
+      || ordinalSummary.addressVerification !== 'matched'
+      || !ordinalSummary.addressVerificationDiagnostics?.selectedChoiceSources?.includes('ordinal_layout')) {
+      fail(`address_reconciliation_sibling_columns_not_matched:${JSON.stringify({ ordinalOutcome, ordinalSummary, ordinalConfirmed })}`);
+    }
+    await page.goto(`${baseUrl}/unverified`);
+    const unreadableOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025'
+      }
+    });
+    const unreadableSummary = unreadableOutcome?.state?.checkoutSummary || {};
+    if (unreadableOutcome?.profileCorrection !== 'address_verification'
+      || unreadableSummary.addressMatches !== null
+      || unreadableSummary.addressVerification !== 'unverified') {
+      fail(`address_reconciliation_unreadable_row_was_not_tri_state:${JSON.stringify({ unreadableOutcome, unreadableSummary })}`);
+    }
+    await page.goto(`${baseUrl}/closed-summary`);
+    const closedSummaryOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'inspect' },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025',
+        paymentCardLast4: '6383'
+      }
+    });
+    const closedSummary = closedSummaryOutcome?.state?.checkoutSummary || {};
+    if (closedSummary.addressMatches !== true
+      || closedSummary.addressVerification !== 'matched'
+      || closedSummary.addressVerificationSource !== 'checkout_summary') {
+      fail(`address_reconciliation_closed_summary_misclassified:${JSON.stringify({ closedSummaryOutcome, closedSummary })}`);
+    }
     console.log(JSON.stringify({
       ok: true,
       version: manifest.version,
@@ -174,6 +274,9 @@ async function main() {
       vaultAddress: '2865 Sand Hill Road',
       zipVariantAccepted: true,
       selectedAddressRecognizedWithoutReselecting: true,
+      siblingRadioAndAddressColumnsHandled: true,
+      unreadableRowIsNotMisreportedAsMismatch: true,
+      closedDeliverySummaryPreferredOverUnrelatedDefaultCheckbox: true,
       pickupLocationExcluded: true,
       duplicateAddressConfirmationHandled: true,
       differentSuiteRejected: true

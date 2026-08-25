@@ -116,6 +116,8 @@ assert.deepEqual(
   checkoutReconcilePlan.actions.map((action) => action.type),
   ['navigate', 'fill_checkout_profile', 'inspect', 'pause']
 );
+assert.equal(checkoutReconcilePlan.actions[0].preserveExistingCheckout, true);
+assert.equal(checkoutReconcilePlan.actions[0].resumeCheckoutReconcile, true);
 assert.equal(checkoutReconcilePlan.actions.some((action) => action.type === 'final_submit'), false);
 
 const clickedButUnconfirmed = evaluateBrowserExtensionFulfillment({

@@ -127,6 +127,19 @@ function isAmazonCheckoutPreludeUrl(value = '', plan = {}) {
   }
 }
 
+function isAmazonCheckoutResumeUrl(value = '', plan = {}) {
+  try {
+    const url = new URL(String(value || ''));
+    const domain = domainForUrl(url.href);
+    const fixtureHost = domain === '127.0.0.1' || domain === 'localhost';
+    const targetDomain = String(plan.targetDomain || '').toLowerCase().replace(/^www\./, '');
+    const trustedTarget = (targetDomain === 'amazon.com' && domain === 'amazon.com') || (fixtureHost && targetDomain === domain);
+    return trustedTarget && /^(?:\/checkout(?:\/|$)|\/gp\/cart\/view|\/cart(?:\/|$)|\/alm\/(?:byg|substitution)(?:\/|$))/i.test(String(url.pathname || ''));
+  } catch {
+    return false;
+  }
+}
+
 function amazonCheckoutPreludeRecoveryUrl(value = '') {
   let url = null;
   try {
@@ -1715,7 +1728,13 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
       };
     }
   }
-  if (checkoutish && summary.addressMatches === false) {
+  if (checkoutish && summary.addressVerification === 'unverified') {
+    return {
+      state: 'address_verification_required',
+      evidence: 'Amazon showed a delivery-address selection, but the runner could not verify the selected row. The checkout tab is preserved; no address mismatch was inferred.'
+    };
+  }
+  if (checkoutish && (summary.addressVerification === 'mismatched' || (summary.addressVerification == null && summary.addressMatches === false))) {
     return {
       state: 'checkout_profile_mismatch',
       failed: true,
@@ -1858,7 +1877,7 @@ async function clearMissionTab(sessionId) {
   await saveConfig({ activeMissionTabs });
 }
 
-async function acquireMissionTab(sessionId, startUrl = '') {
+async function acquireMissionTab(sessionId, startUrl = '', { preferExistingCheckout = false, plan = null } = {}) {
   const existing = await activeMissionTab(sessionId);
   if (existing?.id) return existing;
   const targetDomain = domainForUrl(startUrl);
@@ -1881,10 +1900,22 @@ async function acquireMissionTab(sessionId, startUrl = '') {
       continue;
     }
     if (domainForUrl(tab.url || '') !== targetDomain) continue;
+    if (preferExistingCheckout && !isAmazonCheckoutResumeUrl(tab.url || '', plan || { targetDomain })) continue;
     delete activeMissionTabs[ownerSessionId];
     activeMissionTabs[sessionId] = tab.id;
     await saveConfig({ activeMissionTabs });
     return tab;
+  }
+  if (preferExistingCheckout) {
+    const browserTabs = await chrome.tabs.query({}).catch(() => []);
+    const resumableTab = browserTabs
+      .filter((tab) => domainForUrl(tab.url || '') === targetDomain && isAmazonCheckoutResumeUrl(tab.url || '', plan || { targetDomain }))
+      .sort((left, right) => Number(Boolean(right.active)) - Number(Boolean(left.active)) || Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
+    if (resumableTab?.id) {
+      activeMissionTabs[sessionId] = resumableTab.id;
+      await saveConfig({ activeMissionTabs });
+      return resumableTab;
+    }
   }
   if (changed) await saveConfig({ activeMissionTabs });
   return null;
@@ -1927,15 +1958,26 @@ async function reportAndStop(session, plan, report, note = '') {
       report.fundingDisposition = 'release';
     }
   }
-  const preserveForFinalReview = plan?.limits?.stopBeforeFinalSubmit !== false
-    && ['final_approval_required', 'needs_final_approval', 'review_ready'].includes(String(report.stopState || '').toLowerCase());
+  // The local fixture hosts exercise the same checkout-resume behavior in the
+  // smoke suite. Production profile retention remains Amazon-only.
+  const preserveCheckoutContext = ['amazon.com', '127.0.0.1', 'localhost'].includes(String(plan?.targetDomain || '').toLowerCase())
+    && [
+      'final_approval_required',
+      'needs_final_approval',
+      'review_ready',
+      'address_verification_required',
+      'checkout_profile_mismatch',
+      'payment_required',
+      'needs_payment',
+      'final_submit_unconfirmed'
+    ].includes(String(report.stopState || '').toLowerCase());
   await fulfillSession(session, report, note, plan);
   await clearPendingPaymentWait(session.id);
   await clearActiveRun(session.id);
   // Keep ownership while the prepared merchant tab remains open. The UI can
   // focus it directly, and retries/new missions can reuse it instead of
   // creating a duplicate checkout tab.
-  if (!preserveForFinalReview) await clearLocalCheckoutProfile(session.id);
+  if (!preserveCheckoutContext) await clearLocalCheckoutProfile(session.id);
   await saveConfig({ lastExecution: { sessionId: session.id, status: report.stopState, at: new Date().toISOString() }, lastError: '' });
   return { sessionId: session.id, status: report.stopState };
 }
@@ -2068,7 +2110,15 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       completed: Boolean(outcome?.completed),
       skipped: Boolean(outcome?.skipped),
       safeFieldsFilled: Array.isArray(outcome?.safeFieldsFilled) ? outcome.safeFieldsFilled : [],
-      checkoutSelections: Array.isArray(outcome?.checkoutSelections) ? outcome.checkoutSelections : []
+      checkoutSelections: Array.isArray(outcome?.checkoutSelections) ? outcome.checkoutSelections : [],
+      checkoutObservation: {
+        addressMatches: outcome?.state?.checkoutSummary?.addressMatches ?? null,
+        addressVerification: outcome?.state?.checkoutSummary?.addressVerification || null,
+        addressConfirmationRequired: Boolean(outcome?.state?.checkoutSummary?.addressConfirmationRequired),
+        cardMatches: Boolean(outcome?.state?.checkoutSummary?.cardMatches),
+        paymentMethodConfirmationRequired: Boolean(outcome?.state?.checkoutSummary?.paymentMethodConfirmationRequired),
+        deliveryConfirmed: Boolean(outcome?.state?.checkoutSummary?.deliveryConfirmed)
+      }
     });
     if (!outcome?.completed) break;
     const observedSummary = outcome?.state?.checkoutSummary || {};
@@ -2098,6 +2148,27 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
         await delay(Math.min(450, Math.max(0, reconcileDeadline - Date.now())));
       } else {
         await delay(Math.min(180, Math.max(0, reconcileDeadline - Date.now())));
+      }
+      // A merchant can settle an address, card, or delivery choice without a
+      // URL change. Re-observe before issuing another primitive so a completed
+      // checkout profile is not reopened by a stale selector still in the DOM.
+      const remainingForVerificationMs = reconcileDeadline - Date.now();
+      const verifiedState = remainingForVerificationMs > 900
+        ? await tabBrowserState(tabId, checkoutProfile, {
+          attempts: 2,
+          delayMs: 160,
+          deadlineMs: reconcileDeadline
+        }).catch(() => null)
+        : null;
+      if (verifiedState?.checkoutSummary?.checkoutProfileVerified === true
+        || verifiedState?.checkoutSummary?.finalReviewReady === true) {
+        return {
+          ...outcome,
+          ...merged,
+          completed: true,
+          skipped: false,
+          state: verifiedState
+        };
       }
       continue;
     }
@@ -2179,6 +2250,23 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     };
   }
   if (action.type === 'navigate') {
+    const existingTab = await chrome.tabs.get(tabId).catch(() => null);
+    if (action.preserveExistingCheckout === true && existingTab && isAmazonCheckoutResumeUrl(existingTab.url || '', plan)) {
+      return {
+        completed: true,
+        navigationRequested: false,
+        reusedExistingCheckout: true,
+        state: {
+          url: existingTab.url || action.url,
+          title: existingTab.title || '',
+          browserState: 'checkout',
+          browserStateConfidence: 1,
+          browserStateReason: 'The existing checkout tab was preserved for profile reconciliation.',
+          checkoutSummary: { stage: 'checkout', nextAction: 'Rechecking checkout' },
+          navigationReady: true
+        }
+      };
+    }
     const navigationUrl = plan.targetDomain === 'amazon.com'
       ? withAmazonEnglishLocale(action.url)
       : action.url;
@@ -2626,7 +2714,10 @@ async function runSession(rawSession) {
     }
 
     await chrome.action.setBadgeText({ text: '' });
-    let tab = await acquireMissionTab(session.id, startUrl);
+    let tab = await acquireMissionTab(session.id, startUrl, {
+      preferExistingCheckout: plan.resumeCheckoutReconcile === true,
+      plan
+    });
     await saveActiveRun({
       sessionId: session.id,
       planHash: plan.planHash,
@@ -3113,7 +3204,7 @@ async function runSession(rawSession) {
       }
       const boundary = stopForBoundary(report, plan, action);
       const nextPlanAction = plan.actions[index + 1] || null;
-      const canFillBeforeSensitiveStop = ['payment_required', 'final_approval_required', 'checkout_profile_mismatch'].includes(String(boundary?.state || ''))
+      const canFillBeforeSensitiveStop = ['payment_required', 'final_approval_required', 'checkout_profile_mismatch', 'address_verification_required'].includes(String(boundary?.state || ''))
         && nextPlanAction?.type === 'fill_checkout_profile'
         && Boolean(checkoutProfile);
       const canOpenPaymentAutofill = boundary?.state === 'payment_required'

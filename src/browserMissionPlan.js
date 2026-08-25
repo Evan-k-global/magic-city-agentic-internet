@@ -516,7 +516,11 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   // merchant checkout URL, reconciles saved address/card cues, then pauses. It
   // contains no search, cart, credential, or final-submit action.
   const reviewReconcileActions = [
-    buildAction('open-reviewed-checkout', 'navigate', 'browser_open', { url: startUrl, resumeCheckoutReconcile: true }),
+    buildAction('open-reviewed-checkout', 'navigate', 'browser_open', {
+      url: startUrl,
+      resumeCheckoutReconcile: true,
+      preserveExistingCheckout: true
+    }),
     buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeCheckoutReconcile: true }),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeCheckoutReconcile: true, expectedMilestone: 'checkout_profile_verified' }),
     buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_profile_reconciled' })

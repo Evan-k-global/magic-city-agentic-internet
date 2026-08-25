@@ -560,13 +560,14 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       ? '<label><input type="radio" name="address" data-summary="1 MAGIC CITY ST, UNIT 999, SAN FRANCISCO, CA 94107" /> Test User 1 MAGIC CITY ST Unit 999 San Francisco, CA 94107 United States</label>'
       : '';
     const matchingAddressChoice = checkoutFixture.matchingAddressAvailable
-      ? `<label><input type="radio" name="address" data-summary="${matchingAddressSummary}" /> ${matchingAddressText}</label>`
+      ? `<label><input type="radio" name="address" data-summary="${matchingAddressSummary}"${checkoutFixture.matchingAddressChecked ? ' checked' : ''} /> ${matchingAddressText}</label>`
       : '';
+    const selectedFreeDelivery = checkoutFixture.selectedFreeDelivery === true;
     const freeDeliveryOptions = checkoutFixture.freeDeliveryAvailable === false
       ? ''
       : [
           '<label><input type="radio" name="delivery" /> Standard delivery FREE</label>',
-          '<label><input type="radio" name="delivery" /> One-Day delivery FREE</label>'
+          `<label><input type="radio" name="delivery"${selectedFreeDelivery ? ' checked' : ''} /> One-Day delivery FREE</label>`
         ].join('');
     return [
       addressPrimeModal,
@@ -579,13 +580,13 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<h2>Delivering to Test User</h2>',
       '<p id="delivery-summary">99 Wrong Road, New York, NY 10001</p>',
       '<p>Add delivery instructions</p></div>',
-      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); document.querySelector(\'#address-options\').hidden=false">Change</a></div>',
+      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); (window.__checkoutEvents ||= []).push(\'open-address\'); document.querySelector(\'#address-options\').hidden=false">Change</a></div>',
       '<div id="address-options" hidden>',
       '<label><input type="radio" name="address" /> 99 Wrong Road, 10001</label>',
       conflictingUnitChoice,
       matchingAddressChoice,
-      '<button onclick="const selected=document.querySelector(\'input[name=address]:checked\'); if(selected?.dataset.summary){document.querySelector(\'#delivery-summary\').textContent=selected.dataset.summary; document.querySelector(\'#address-options\').hidden=true}">Deliver to this address</button>',
-      '<button onclick="document.querySelector(\'#new-address-form\').hidden=false">Add a new delivery address</button></div>',
+      '<button onclick="(window.__checkoutEvents ||= []).push(\'confirm-address-choice\'); const selected=document.querySelector(\'input[name=address]:checked\'); if(selected?.dataset.summary){document.querySelector(\'#delivery-summary\').textContent=selected.dataset.summary; document.querySelector(\'#address-options\').hidden=true}">Deliver to this address</button>',
+      '<button onclick="(window.__checkoutEvents ||= []).push(\'open-new-address\'); document.querySelector(\'#new-address-form\').hidden=false">Add a new delivery address</button></div>',
       `<div id="new-address-form" role="dialog" aria-modal="true" style="position:fixed;inset:24px;z-index:10;background:white;overflow:auto" ${checkoutFixture.startWithNewAddressModal ? '' : 'hidden'}><h2>Add a new delivery address</h2>`,
       '<input aria-label="Full name" value="Wrong Name" />',
       '<input aria-label="Phone number" value="2125550100" />',
@@ -593,21 +594,21 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<input aria-label="City" value="New York" />',
       '<select aria-label="State"><option value="CA">California</option><option value="NY" selected>New York</option></select>',
       '<input aria-label="ZIP code" value="10001" />',
-      '<button onclick="const street=document.querySelector(\'[aria-label=\\\'Street address\\\']\').value; const city=document.querySelector(\'[aria-label=\\\'City\\\']\').value; const state=document.querySelector(\'[aria-label=\\\'State\\\']\').value; const zip=document.querySelector(\'[aria-label=\\\'ZIP code\\\']\').value; document.querySelector(\'#delivery-summary\').textContent=`${street}, ${city}, ${state} ${zip}`; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true">Deliver to this address</button></div></div>',
+      '<button onclick="(window.__checkoutEvents ||= []).push(\'confirm-new-address\'); const street=document.querySelector(\'[aria-label=\\\'Street address\\\']\').value; const city=document.querySelector(\'[aria-label=\\\'City\\\']\').value; const state=document.querySelector(\'[aria-label=\\\'State\\\']\').value; const zip=document.querySelector(\'[aria-label=\\\'ZIP code\\\']\').value; document.querySelector(\'#delivery-summary\').textContent=`${street}, ${city}, ${state} ${zip}`; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true">Deliver to this address</button></div></div>',
       '<div class="checkout-card"><div class="checkout-card-copy">',
       `<h2 id="payment-summary">Paying with ${selectedCardBrand} ${selectedCardLast4}</h2>`,
       '<p>Use a gift card, voucher, or promo code</p></div>',
-      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); document.querySelector(\'#payment-options\').hidden=false">Change</a></div>',
+      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); (window.__checkoutEvents ||= []).push(\'open-payment\'); document.querySelector(\'#payment-options\').hidden=false">Change</a></div>',
       '<div id="payment-options" hidden>',
       `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '0109' ? 'checked' : ''} /> Visa ending in 0109</label>`,
       `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '1817' ? 'checked' : ''} /> Mastercard ending 1817</label>`,
       '<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" /> Visa ending in 6383</label>',
       '<a href="#" onclick="event.preventDefault(); document.querySelector(\'#add-card-form\').hidden=false">Add a credit or debit card</a>',
-      '<button id="use-payment-method" onclick="const selected=document.querySelector(\'input[name=payment]:checked\'); const text=selected?.closest(\'label\')?.innerText || \'\'; if(selected && /(?:visa|mastercard|amex|discover)/i.test(text)){document.querySelector(\'#payment-summary\').textContent=`Paying with ${text.replace(/ ending in /i, \' \')}`; document.querySelector(\'#payment-options\').hidden=true}">Use this payment method</button></div>',
+      '<button id="use-payment-method" onclick="(window.__checkoutEvents ||= []).push(\'confirm-payment\'); const selected=document.querySelector(\'input[name=payment]:checked\'); const text=selected?.closest(\'label\')?.innerText || \'\'; if(selected && /(?:visa|mastercard|amex|discover)/i.test(text)){document.querySelector(\'#payment-summary\').textContent=`Paying with ${text.replace(/ ending in /i, \' \')}`; document.querySelector(\'#payment-options\').hidden=true}">Use this payment method</button></div>',
       '<div id="add-card-form" hidden><h2>Add a credit or debit card</h2><input id="card-number-input" aria-label="Card number" autocomplete="cc-number" /><input aria-label="Name on card" autocomplete="cc-name" /><button onclick="const number=document.querySelector(\'#card-number-input\').value.replace(/\\D/g,\'\'); const last4=number.slice(-4); document.querySelector(\'#payment-summary\').textContent=`Paying with Mastercard ${last4}`; document.querySelector(\'#add-card-form\').hidden=true; document.querySelector(\'#payment-options\').hidden=true">Add your card</button></div></div>',
       '<div class="checkout-card"><div class="checkout-card-copy">',
       '<h2>Shipping speed</h2>',
-      '<p>Fast delivery $3.99</p></div>',
+      `<p>${selectedFreeDelivery ? 'One-Day delivery FREE' : 'Fast delivery $3.99'}</p></div>`,
       '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); document.querySelector(\'#delivery-options\').hidden=false">Change</a></div>',
       '<div id="delivery-options" hidden>',
       '<label><input type="radio" name="delivery" /> Fast delivery $3.99</label>',
@@ -1821,7 +1822,8 @@ async function main() {
         summary: document.querySelector('#delivery-summary')?.textContent || '',
         optionsHidden: document.querySelector('#address-options')?.hidden,
         newFormHidden: document.querySelector('#new-address-form')?.hidden,
-        shippingValues: Array.from(document.querySelectorAll('#new-address-form input, #new-address-form select')).map((field) => ({ label: field.getAttribute('aria-label'), value: field.value }))
+        shippingValues: Array.from(document.querySelectorAll('#new-address-form input, #new-address-form select')).map((field) => ({ label: field.getAttribute('aria-label'), value: field.value })),
+        events: window.__checkoutEvents || []
       })) : null;
       fail(`browser_extension_auto_submit_not_verified:steps=${JSON.stringify(checkpoints.map((checkpoint) => ({
         id: checkpoint.planActionId,
@@ -1990,7 +1992,10 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressSummary: '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
+      matchingAddressText: 'Test User 2865 SAND HILL RD STE 101 Menlo Park, CA 94025-7022 United States Phone number: 415-555-0100'
     };
     brandCandidateVisits = [];
     brandCartItem = null;
@@ -2113,7 +2118,10 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressSummary: '1 MAGIC CITY WAY, SAN FRANCISCO, CA, 94107, United States',
+      matchingAddressText: 'Test User 1 MAGIC CITY WAY San Francisco, CA 94107 United States Phone number: 415-555-0100'
     };
     conditionalCandidateVisits = [];
     brandCartItem = null;
@@ -2274,7 +2282,7 @@ async function main() {
       'inspect-cart', 'open-checkout'
     ]) {
       if (!multiItemCompletedIds.includes(actionId)) {
-        fail(`browser_extension_multi_item_missing_step:${actionId}:${multiItemCompletedIds.join(',')}`);
+        fail(`browser_extension_multi_item_missing_step:${actionId}:${multiItemCompletedIds.join(',')}:cursor=${JSON.stringify(session.extensionMissionPlanState)}:result=${JSON.stringify(fulfillment.result?.browserExecution || {})}`);
       }
     }
     if (multiBasketItems.length !== 3
@@ -2375,7 +2383,10 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressSummary: '1 MAGIC CITY WAY, SAN FRANCISCO, CA, 94107, United States',
+      matchingAddressText: 'Test User 1 MAGIC CITY WAY San Francisco, CA 94107 United States Phone number: 415-555-0100'
     };
     checkpoints.length = 0;
     fulfillment = null;
@@ -2794,7 +2805,12 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressChecked: true,
+      matchingAddressSummary: '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
+      matchingAddressText: 'Test User 2865 SAND HILL RD STE 101 Menlo Park, CA 94025-7022 United States Phone number: 415-555-0100',
+      selectedFreeDelivery: true
     };
     checkpoints.length = 0;
     fulfillment = null;

@@ -174,7 +174,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.4.8-test',
+        extensionVersion: '0.4.9-test',
         extensionId: 'test-extension-id'
       }
     });
@@ -1132,6 +1132,127 @@ async function main() {
     if (!watchdogOutcome.response.ok || watchdogOutcome.data.session?.status !== 'failed'
       || watchdogOutcome.data.session?.executionWatchdog?.lastReason !== 'executing_timeout') {
       throw new Error(`watchdog_claimed_device_heartbeat_not_enforced:${watchdogOutcome.response.status}:${JSON.stringify(watchdogOutcome.data)}`);
+    }
+
+    // A false checkout-profile mismatch used to release the initial credit hold,
+    // clear the runner context, then make the user-facing repair button attempt
+    // a second full credit reservation. Reconciliation must instead issue a
+    // fresh, checkout-only capability against the preserved Amazon tab with no
+    // additional debit or hold.
+    await stopServer();
+    const reconciliationState = JSON.parse(fs.readFileSync(watchdogStatePath, 'utf8'));
+    const reconciliationSession = reconciliationState.connectorSessions.find((entry) => entry.id === watchdogSessionId);
+    const reconciliationLock = reconciliationState.escrowLocks?.[watchdogSessionId] || null;
+    const reconciliationDevice = reconciliationState.nativeRunnerDevices.find((device) => device.id === watchdogClaimedDeviceId);
+    if (!reconciliationSession || !reconciliationDevice || reconciliationLock?.status !== 'released') {
+      throw new Error(`checkout_reconcile_fixture_missing_released_hold:${JSON.stringify({
+        session: reconciliationSession?.id || null,
+        device: reconciliationDevice?.id || null,
+        lock: reconciliationLock?.status || null
+      })}`);
+    }
+    const reconciliationUserHash = reconciliationLock.userHash;
+    const availableBeforeReconcile = Number(reconciliationState.userAccounts?.[reconciliationUserHash]?.available || 0);
+    const recoveryNow = new Date().toISOString();
+    Object.assign(reconciliationDevice, {
+      lastPollAt: recoveryNow,
+      lastSeenAt: recoveryNow,
+      updatedAt: recoveryNow
+    });
+    reconciliationState.nativeRunnerDevices = reconciliationState.nativeRunnerDevices
+      .filter((device) => device.id !== `${watchdogClaimedDeviceId}-fresh-other`);
+    Object.assign(reconciliationSession, {
+      status: 'failed',
+      failedAt: recoveryNow,
+      claimedAt: null,
+      claimedByPluginId: null,
+      claimedByRegistrationId: null,
+      claimedByNativeRunnerDeviceId: null,
+      pluginEndpoint: null,
+      missionRuntimeHolder: null,
+      extensionMissionPlan: null,
+      extensionMissionPlanState: null,
+      extensionRunDispatch: null,
+      executionLive: null,
+      preferredExecutionAgentId: 'magic-city-runner-extension',
+      fulfillment: {
+        status: 'failed',
+        result: {
+          browserExecution: {
+            stopState: 'address_verification_required',
+            finalUrl: 'https://www.amazon.com/checkout/p/p-reconcile/address?pipelineType=Chewbacca',
+            checkoutSummary: {
+              stage: 'checkout',
+              addressVerification: 'unverified'
+            }
+          }
+        }
+      }
+    });
+    fs.writeFileSync(watchdogStatePath, JSON.stringify(reconciliationState));
+    child = startServer();
+    await waitForServer(baseUrl);
+
+    const checkoutReconcileResume = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/start-execution`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        mode: 'agent_checkout',
+        requesterId: email,
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        localCheckoutProfileReady: true,
+        extensionCheckoutProfileEnabled: true,
+        resumeCheckoutReconcile: true
+      }
+    });
+    const resumedCheckoutSession = checkoutReconcileResume.data.session || {};
+    if (!checkoutReconcileResume.response.ok
+      || resumedCheckoutSession.status !== 'queued'
+      || resumedCheckoutSession.creditReservation?.status !== 'continuation_no_additional_hold'
+      || resumedCheckoutSession.creditReservation?.amountUnits !== 0
+      || resumedCheckoutSession.extensionCheckoutReconcileResume !== true
+      || !resumedCheckoutSession.extensionRunDispatch?.nonce
+      || !resumedCheckoutSession.missionBoundAuth?.token) {
+      throw new Error(`checkout_reconcile_resume_not_credit_idempotent:${checkoutReconcileResume.response.status}:${JSON.stringify(checkoutReconcileResume.data)}`);
+    }
+    const reconciliationStateAfterStart = JSON.parse(fs.readFileSync(watchdogStatePath, 'utf8'));
+    const availableAfterReconcile = Number(reconciliationStateAfterStart.userAccounts?.[reconciliationUserHash]?.available || 0);
+    if (availableAfterReconcile !== availableBeforeReconcile
+      || reconciliationStateAfterStart.escrowLocks?.[watchdogSessionId]?.status === 'locked') {
+      throw new Error(`checkout_reconcile_changed_credit_balance:${JSON.stringify({
+        availableBeforeReconcile,
+        availableAfterReconcile,
+        lock: reconciliationStateAfterStart.escrowLocks?.[watchdogSessionId]?.status || null
+      })}`);
+    }
+    const reconcilePoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension'
+    });
+    const reconcileMission = (reconcilePoll.data.sessions || []).find((entry) => entry.id === watchdogSessionId);
+    if (!reconcilePoll.response.ok || !reconcileMission?.extensionRunDispatch?.nonce) {
+      throw new Error(`checkout_reconcile_not_visible_to_runner:${JSON.stringify(reconcilePoll.data)}`);
+    }
+    const reconcileHolderKey = crypto.generateKeyPairSync('ed25519');
+    const reconcileClaim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/claim`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        holderPublicKeyJwk: reconcileHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: reconcileMission.extensionRunDispatch.nonce
+      }
+    });
+    const reconcilePlan = reconcileClaim.data.session?.extensionMissionPlan || {};
+    if (!reconcileClaim.response.ok
+      || reconcilePlan.resumeCheckoutReconcile !== true
+      || reconcilePlan.startUrl !== 'https://www.amazon.com/checkout/p/p-reconcile/address?pipelineType=Chewbacca'
+      || reconcilePlan.actions?.map((action) => action.type).join(',') !== 'navigate,fill_checkout_profile,inspect,pause'
+      || reconcilePlan.actions?.[0]?.preserveExistingCheckout !== true
+      || reconcilePlan.actions?.some((action) => ['prepare_cart', 'final_submit'].includes(action.type))) {
+      throw new Error(`checkout_reconcile_plan_not_narrow:${reconcileClaim.response.status}:${JSON.stringify(reconcilePlan)}`);
     }
 
     console.log('native-runner extension pairing regression passed');

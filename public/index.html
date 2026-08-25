@@ -6066,7 +6066,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.0';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.9';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -10259,7 +10259,7 @@
       const completionState = String(result.completionState || '').toLowerCase();
       const stopState = String(result?.browserExecution?.stopState || result.stopState || '').toLowerCase();
       return completionState === 'waiting_on_user'
-        || ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'login_required', 'needs_login', 'captcha_or_challenge_required', 'needs_captcha', 'final_approval_required', 'needs_final_approval', 'review_ready'].includes(stopState);
+        || ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required', 'login_required', 'needs_login', 'captcha_or_challenge_required', 'needs_captcha', 'final_approval_required', 'needs_final_approval', 'review_ready'].includes(stopState);
     }
 
     function getScopedStorageKey(baseKey, scope = getStorageScope()) {
@@ -15003,6 +15003,7 @@
         return compactExecutionSentence(browserExecution.stopEvidence, 96);
       }
       if (stopState === 'checkout_profile_mismatch') return 'Delivery address needs update before checkout can continue.';
+      if (stopState === 'address_verification_required') return 'Recheck the selected delivery address in the preserved Amazon tab.';
       if (stopState === 'payment_required' || stopState === 'needs_payment') return 'Select the saved payment method in Chrome to continue.';
       if (stopState === 'final_approval_required' || stopState === 'needs_final_approval') return 'Order is ready for final approval.';
       if (/Magic City Runner prepared the browser task locally and stopped before login, payment, or final order approval/i.test(note)) {
@@ -15042,6 +15043,9 @@
             ? { title: 'Unlock delivery address', detail: 'Unlock Local Data Vault, then retry checkout.', badgeLabel: 'Address needed' }
             : { title: 'Confirm delivery address', detail: 'Open Amazon, confirm or add the saved address, then retry.', badgeLabel: 'Address needed', actionLabel: 'Open delivery address' };
         }
+        if (kind === 'browser' && (browserStopState === 'address_verification_required' || browserSummary.addressVerification === 'unverified')) {
+          return { title: 'Recheck delivery address', detail: 'Amazon kept the selected address, but Magic City could not verify its row. Open the preserved checkout tab, then recheck it.', badgeLabel: 'Review needed', actionLabel: 'Open checkout' };
+        }
         if (kind === 'browser' && (browserStopState === 'payment_required' || browserStopState === 'needs_payment')) {
           const expectedLast4 = String(browserSummary.expectedCardLast4 || '').replace(/\D/g, '').slice(-4);
           return {
@@ -15070,6 +15074,9 @@
         const stopState = browserStopState;
         if (kind === 'browser' && stopState === 'checkout_profile_mismatch') {
           return { title: 'Confirm delivery address', detail: 'Open Amazon, confirm or add the saved address, then continue.', badgeLabel: 'Address needed', actionLabel: 'Open delivery address' };
+        }
+        if (kind === 'browser' && stopState === 'address_verification_required') {
+          return { title: 'Recheck delivery address', detail: 'Amazon kept the selected address, but Magic City could not verify its row. Recheck the preserved checkout tab.', badgeLabel: 'Review needed', actionLabel: 'Open checkout' };
         }
         if (kind === 'browser' && (stopState === 'payment_required' || stopState === 'needs_payment')) {
           return { title: 'Choose payment method', detail: 'Select your saved card or use Chrome autofill.', badgeLabel: 'Payment needed', actionLabel: 'Open payment' };
@@ -15281,6 +15288,21 @@
 	          && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusBadge.statusValue);
 	        const agentMissingInputs = isAgentExecutionSheet ? getMissingAgentInputLabels(session) : [];
 	        const browserExecution = session.fulfillment?.result?.browserExecution || {};
+	        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
+	        const browserSummary = browserExecution.checkoutSummary || {};
+	        const browserNeedsCheckoutReconcile = [
+	          'payment_required',
+	          'needs_payment',
+	          'checkout_profile_mismatch',
+	          'address_verification_required'
+	        ].includes(browserStopState)
+	          || browserSummary.cardMatches === false
+	          || browserSummary.addressMatches === false
+	          || browserSummary.addressVerification === 'unverified';
+	        const browserCanResumeCheckoutReconcile = isBrowserExecutionSheet
+	          && browserNeedsCheckoutReconcile
+	          && nativeRunnerSupportsLocalCheckoutProfile()
+	          && ['fulfilled', 'failed'].includes(String(session.status || '').toLowerCase());
 	        const browserActionUrl = latestStep?.browser?.url
 	          || browserExecution.finalUrl
 	          || session.fulfillment?.handoff?.url
@@ -15294,16 +15316,19 @@
 	        const browserRetryLabel = runState.title === 'Unlock delivery address'
 	          ? 'Unlock and retry'
 	          : (localExecutionError ? 'Retry agent' : 'Run agent');
-	        const browserRunButtonHtml = browserNeedsAuth
+	        const browserResumeButtonHtml = browserCanResumeCheckoutReconcile
+	          ? `<button class="execution-primary" type="button" data-execution-continue-checkout="${escapeExecutionValue(session.id)}">Recheck checkout</button>`
+	          : '';
+	        const browserRunButtonHtml = browserResumeButtonHtml || (browserNeedsAuth
 	          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
 		          : browserNeedsFunds
 		            ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(browserFundingLabel)}</button>`
-	            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`;
-		        const browserQuickButtonHtml = browserNeedsAuth
-		          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
+	            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
+	        const browserQuickButtonHtml = browserResumeButtonHtml || (browserNeedsAuth
+	          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
 		          : browserNeedsFunds
 		            ? `<button class="execution-secondary" id="executionTopupQuickBtn" data-execution-topup="true" type="button">${escapeExecutionValue(browserFundingLabel)}</button>`
-	            : `<button class="execution-primary" id="executionQuickAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`;
+	            : `<button class="execution-primary" id="executionQuickAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
 	        const browserHandoffButtonHtml = isBrowserExecutionSheet && runState.actionLabel && browserActionUrl
 	          ? `<button class="execution-primary" type="button" data-native-runner-focus-tab="${escapeExecutionValue(session.id)}" data-fallback-url="${escapeExecutionValue(browserActionUrl)}">${escapeExecutionValue(runState.actionLabel)}</button>`
 	          : '';
@@ -15316,7 +15341,7 @@
 	        const browserRunSummaryActions = browserFinalSubmitButtonHtml
 	          ? `${browserFinalSubmitButtonHtml}${browserOpenTabButtonHtml}`
 	          : browserHandoffButtonHtml
-	          ? `${browserHandoffButtonHtml}${browserCanRunNow ? `<button class="execution-secondary" type="button" data-execution-run-agent="true">Retry after fixing</button>` : ''}`
+	          ? `${browserHandoffButtonHtml}${browserResumeButtonHtml || (browserCanRunNow ? `<button class="execution-secondary" type="button" data-execution-run-agent="true">Retry agent</button>` : '')}`
 	          : (browserCanRunNow ? browserQuickButtonHtml : '');
 	        const agentRunButtonHtml = santaClawzRetryBlocked
 	          ? '<button class="execution-secondary" type="button" disabled>Agent update required</button>'
@@ -16887,6 +16912,7 @@
       if (stopState === 'needs_captcha' || stopState === 'captcha_or_challenge_required') return 'Needs captcha.';
       if (stopState === 'budget_exceeded') return 'Budget exceeded.';
       if (stopState === 'checkout_profile_mismatch') return 'Delivery address needs update.';
+      if (stopState === 'address_verification_required') return 'Recheck delivery address.';
       if (stopState === 'browser_ready') return 'Browser ready.';
       if (stopState) return `Paused: ${stopState.replace(/_/g, ' ')}.`;
       return 'Browser finished.';
@@ -16903,11 +16929,13 @@
             ? `Card ${summary.selectedCardLast4}; need ${summary.expectedCardLast4}`
             : `Need card ${summary.expectedCardLast4}`)
         : (summary.paymentIssue || '');
-      const address = summary.addressMatches == null
-        ? ''
-        : summary.addressMatches
-          ? 'Address ready'
-          : 'Address mismatch';
+      const address = summary.addressVerification === 'unverified'
+        ? 'Address not yet verified'
+        : summary.addressMatches == null
+          ? ''
+          : summary.addressMatches
+            ? 'Address ready'
+            : 'Address mismatch';
       const facts = [
         stage ? ['Page', stage] : null,
         summary.likelyTotal ? ['Likely total', summary.likelyTotal] : null,
@@ -16944,12 +16972,13 @@
       const selections = session.selections || session.finalSelections || {};
       const finalReviewReady = ['needs_final_approval', 'final_approval_required', 'review_ready'].includes(stopState);
       const canPlaceReviewedOrder = finalReviewReady && canPlaceReviewedOrderFromSession(session);
-      const checkoutDetailsNeedReconcile = ['payment_required', 'needs_payment', 'checkout_profile_mismatch'].includes(stopState)
+      const checkoutDetailsNeedReconcile = ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required'].includes(stopState)
         || checkoutSummary.cardMatches === false
-        || checkoutSummary.addressMatches === false;
+        || checkoutSummary.addressMatches === false
+        || checkoutSummary.addressVerification === 'unverified';
       const canResumeCheckoutReconcile = checkoutDetailsNeedReconcile
         && nativeRunnerSupportsLocalCheckoutProfile()
-        && String(session.status || '').trim().toLowerCase() === 'fulfilled';
+        && ['fulfilled', 'failed'].includes(String(session.status || '').trim().toLowerCase());
       const automaticFinalSubmitUnavailable = String(selections.finalApprovalPolicy || '').trim().toLowerCase() === 'auto_submit_after_verified_checkout'
         && !nativeRunnerSupportsAutomaticFinalSubmit();
       const cardLabel = paymentProfile.paymentCardLabel || selections.paymentCardLabel || paymentProfile.cardName || 'Saved card';
@@ -16960,6 +16989,8 @@
         : 'No local payment card cue was available to this run';
       const progressLabel = milestoneStatus.completedLabel || (stopState === 'checkout_profile_mismatch'
         ? 'Delivery address needs update'
+        : stopState === 'address_verification_required'
+          ? 'Recheck delivery address'
         : stopState === 'needs_payment' || stopState === 'payment_required'
           ? 'Payment needs selection'
           : stopState === 'needs_final_approval' || stopState === 'final_approval_required'
@@ -16981,6 +17012,8 @@
             ? 'Reduce cart or raise max spend.'
           : stopState === 'checkout_profile_mismatch'
             ? 'Save a complete delivery address in Settings, then retry.'
+            : stopState === 'address_verification_required'
+              ? 'Open Amazon, then recheck this checkout tab.'
           : stopState === 'needs_final_approval' || stopState === 'final_approval_required' || stopState === 'review_ready'
             ? automaticFinalSubmitUnavailable
               ? 'Checkout is prepared. Place the final order in Chrome.'
