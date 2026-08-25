@@ -110,15 +110,44 @@ const checkoutReconcilePlan = buildBrowserExtensionMissionPlan({
 
 assert.equal(validateBrowserExtensionPlan(checkoutReconcilePlan).valid, true);
 assert.equal(checkoutReconcilePlan.resumeCheckoutReconcile, true);
+assert.equal(checkoutReconcilePlan.resumeCheckoutAutoSubmit, false);
 assert.equal(checkoutReconcilePlan.startUrl, 'https://www.amazon.com/checkout/p/example?pipelineType=Chewbacca');
 assert.equal(checkoutReconcilePlan.limits.stopBeforeFinalSubmit, true);
 assert.deepEqual(
   checkoutReconcilePlan.actions.map((action) => action.type),
-  ['navigate', 'fill_checkout_profile', 'inspect', 'pause']
+  ['navigate', 'fill_checkout_profile', 'click_intent', 'fill_checkout_profile', 'inspect', 'pause']
 );
 assert.equal(checkoutReconcilePlan.actions[0].preserveExistingCheckout, true);
 assert.equal(checkoutReconcilePlan.actions[0].resumeCheckoutReconcile, true);
 assert.equal(checkoutReconcilePlan.actions.some((action) => action.type === 'final_submit'), false);
+
+const automaticCheckoutReconcilePlan = buildBrowserExtensionMissionPlan({
+  ...baseSession,
+  extensionCheckoutReconcileResume: true,
+  extensionCheckoutReconcileUrl: 'https://www.amazon.com/checkout/p/example?pipelineType=Chewbacca',
+  fulfillment: {
+    result: {
+      browserExecution: {
+        finalUrl: 'https://www.amazon.com/checkout/p/example?pipelineType=Chewbacca'
+      }
+    }
+  },
+  selections: {
+    ...baseSession.selections,
+    finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+  }
+});
+
+assert.equal(validateBrowserExtensionPlan(automaticCheckoutReconcilePlan).valid, true);
+assert.equal(automaticCheckoutReconcilePlan.resumeCheckoutReconcile, true);
+assert.equal(automaticCheckoutReconcilePlan.resumeCheckoutAutoSubmit, true);
+assert.equal(automaticCheckoutReconcilePlan.limits.stopBeforeFinalSubmit, false);
+assert.deepEqual(
+  automaticCheckoutReconcilePlan.actions.map((action) => action.type),
+  ['navigate', 'fill_checkout_profile', 'click_intent', 'fill_checkout_profile', 'inspect', 'final_submit', 'inspect', 'pause']
+);
+assert.equal(automaticCheckoutReconcilePlan.actions[0].preserveExistingCheckout, true);
+assert.equal(automaticCheckoutReconcilePlan.actions.find((action) => action.type === 'final_submit')?.maxPrice, 4);
 
 const clickedButUnconfirmed = evaluateBrowserExtensionFulfillment({
   status: 'fulfilled',

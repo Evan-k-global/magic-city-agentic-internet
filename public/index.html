@@ -10529,7 +10529,8 @@
 
     function nativeRunnerExtensionNeedsUpgrade(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
-      if (!normalized.extensionVersion) return false;
+      if (!NATIVE_RUNNER_MIN_EXTENSION_VERSION) return false;
+      if (!normalized.extensionVersion) return true;
       return compareDottedVersions(normalized.extensionVersion, NATIVE_RUNNER_MIN_EXTENSION_VERSION) < 0;
     }
 

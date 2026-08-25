@@ -6839,7 +6839,11 @@ function nativeRunnerDeviceNeedsExtensionUpgrade(device = null) {
   // version floor protects our packaged DOM executor, not the protocol itself.
   if (!isMagicCityRunnerExtensionDevice(device)) return false;
   const version = String(device?.metadata?.extensionVersion || '').trim();
-  if (!version || !NATIVE_RUNNER_MIN_EXTENSION_VERSION) return false;
+  // A paired built-in runner without a reported version cannot prove it has
+  // the released DOM executor. Treat it as outdated rather than silently
+  // allowing it through the current-version gate.
+  if (!NATIVE_RUNNER_MIN_EXTENSION_VERSION) return false;
+  if (!version) return true;
   return compareDottedVersions(version, NATIVE_RUNNER_MIN_EXTENSION_VERSION) < 0;
 }
 
@@ -17978,6 +17982,24 @@ const server = http.createServer(async (req, res) => {
       );
       const finalSubmitResumeRequested = isBrowserSession && body.resumeFinalSubmit === true;
       const checkoutReconcileResumeRequested = isBrowserSession && body.resumeCheckoutReconcile === true;
+      const existingFinalApprovalPolicy = String(
+        session.finalSelections?.finalApprovalPolicy
+        || session.selections?.finalApprovalPolicy
+        || ''
+      ).trim().toLowerCase();
+      const previousPlanAuthorizedAutoSubmit = session.extensionMissionPlan?.limits?.stopBeforeFinalSubmit === false;
+      // A repair action may reuse automatic submit only when it was already
+      // part of this stored mission. Never let the retry request escalate a
+      // review-only session into a spending authority.
+      const checkoutReconcileAutoSubmitAuthorized = checkoutReconcileResumeRequested
+        && (existingFinalApprovalPolicy === 'auto_submit_after_verified_checkout' || previousPlanAuthorizedAutoSubmit);
+      if (checkoutReconcileAutoSubmitAuthorized) {
+        selections = sanitizeMetadata({
+          ...selections,
+          checkoutRunnerStopBeforeFinalSubmit: false,
+          finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+        });
+      }
       if (finalSubmitResumeRequested && checkoutReconcileResumeRequested) {
         return sendJson(res, 400, {
           error: 'browser_resume_mode_conflict',
@@ -18237,7 +18259,9 @@ const server = http.createServer(async (req, res) => {
           extensionFinalSubmitEnabled: Boolean(body.extensionFinalSubmitEnabled),
           extensionFinalSubmitResume: finalSubmitResumeRequested,
           extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
-          extensionCheckoutReconcileUrl: checkoutReconcileUrl
+          extensionCheckoutReconcileUrl: checkoutReconcileUrl,
+          selections,
+          finalSelections: selections
         });
         const missionPlanValidation = validateBrowserExtensionPlan(missionPlanPreview);
         if (!missionPlanValidation.valid) {
@@ -18442,7 +18466,9 @@ const server = http.createServer(async (req, res) => {
               : 'Execution requested')
           : 'Checkout opened',
         detail: checkoutReconcileResumeRequested
-          ? 'Magic City will reopen the prepared checkout and reconcile only the saved delivery and card cues. It will not submit an order.'
+          ? (checkoutReconcileAutoSubmitAuthorized
+            ? 'Magic City will reopen the prepared checkout, re-verify saved delivery and card cues, then submit only if final review still matches the original authorized order.'
+            : 'Magic City will reopen the prepared checkout and reconcile only the saved delivery and card cues. It will not submit an order.')
           : completionMode === 'agent_checkout'
           ? (directPersonalAgentTravelHandoff
               ? `${userAgentProfile?.name || 'Your Agent'} is now the preferred travel checkout continuation layer. Magic City will keep the funding and task package aligned while your agent handles browser continuity and live supplier steps.`
@@ -18490,7 +18516,9 @@ const server = http.createServer(async (req, res) => {
         nextTrace.push({
           pluginId: RUNNER_EXTENSION_PLUGIN_ID,
           label: 'Saved checkout details approved',
-          detail: 'The user approved a narrow continuation to select the saved address and existing merchant card cue. No final order action is included.',
+          detail: checkoutReconcileAutoSubmitAuthorized
+            ? 'The user resumed the same auto-submit mission. Magic City will verify the saved address, selected card, delivery, and final review before one order-submit action.'
+            : 'The user approved a narrow continuation to select the saved address and existing merchant card cue. No final order action is included.',
           state: 'checkout_reconcile_authorized',
           createdAt: new Date().toISOString()
         });
@@ -18521,7 +18549,8 @@ const server = http.createServer(async (req, res) => {
         : null;
       // A checkout-reconciliation continuation is confined to the preserved
       // merchant tab. It can re-observe/select saved address and card cues, but
-      // it cannot add items or submit an order. A previous false mismatch may
+      // never adds items. A final submit is permitted only when the stored
+      // mission already authorized auto-submit. A previous false mismatch may
       // already have released the original execution hold, so this recovery
       // must never create a second credit reservation.
       const checkoutReconcileWithoutAdditionalCharge = checkoutReconcileResumeRequested
@@ -18572,7 +18601,9 @@ const server = http.createServer(async (req, res) => {
           : finalSubmitResumeRequested
             ? `Magic City approved a fresh, one-time final-submit capability for the verified browser checkout${finalSubmitApprovalReceipt?.approvalHash ? ` (${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)})` : ''}.`
             : checkoutReconcileResumeRequested
-              ? 'Magic City approved a fresh, checkout-only capability to select saved delivery and payment cues. No final submit is authorized.'
+              ? (checkoutReconcileAutoSubmitAuthorized
+                ? 'Magic City renewed the same one-order checkout capability. It may submit only after the saved address, card, delivery, and final review verify again.'
+                : 'Magic City approved a fresh, checkout-only capability to select saved delivery and payment cues. No final submit is authorized.')
             : 'Magic City approved the bounded Magic Internet Agent execution start.'
       });
       let creditReservation = session.creditReservation ?? null;

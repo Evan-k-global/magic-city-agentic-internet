@@ -859,6 +859,42 @@ async function main() {
     if (!status.data.checkoutReady || !status.data.executableReady) {
       throw new Error(`runner_status_missing_checkout_ready:${JSON.stringify(status.data)}`);
     }
+
+    // The Magic City packaged executor has a release floor. A pairing created
+    // by an older client can lack a version entirely, which must block only the
+    // built-in runner rather than silently dispatching an unverified executor.
+    await stopServer();
+    const versionGateStatePath = path.join(tmpDir, 'data', 'state.json');
+    const versionGateState = JSON.parse(fs.readFileSync(versionGateStatePath, 'utf8'));
+    const versionGateDevice = versionGateState.nativeRunnerDevices.find((device) => device.id === claim.data.device?.id);
+    if (!versionGateDevice) throw new Error('version_gate_fixture_device_missing');
+    const expectedExtensionVersion = versionGateDevice.metadata?.extensionVersion;
+    delete versionGateDevice.metadata.extensionVersion;
+    fs.writeFileSync(versionGateStatePath, JSON.stringify(versionGateState));
+    child = startServer();
+    await waitForServer(baseUrl);
+    const unversionedRunnerStatus = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(versionGateDevice.id)}`, {
+      cookie: auth.cookie
+    });
+    if (!unversionedRunnerStatus.response.ok
+      || unversionedRunnerStatus.data.readiness?.extensionUpdateRequired !== true
+      || unversionedRunnerStatus.data.readiness?.reason !== 'runner_extension_outdated'
+      || unversionedRunnerStatus.data.ready !== false
+      || unversionedRunnerStatus.data.checkoutReady !== false) {
+      throw new Error(`unversioned_builtin_runner_not_blocked:${JSON.stringify(unversionedRunnerStatus.data)}`);
+    }
+    await stopServer();
+    const restoredVersionGateState = JSON.parse(fs.readFileSync(versionGateStatePath, 'utf8'));
+    const restoredVersionGateDevice = restoredVersionGateState.nativeRunnerDevices.find((device) => device.id === versionGateDevice.id);
+    if (!restoredVersionGateDevice) throw new Error('version_gate_restore_device_missing');
+    restoredVersionGateDevice.metadata = {
+      ...(restoredVersionGateDevice.metadata || {}),
+      extensionVersion: expectedExtensionVersion
+    };
+    fs.writeFileSync(versionGateStatePath, JSON.stringify(restoredVersionGateState));
+    child = startServer();
+    await waitForServer(baseUrl);
+
     // A watchdog failure can leave a persisted browser session with an expired capability.
     // An owner retry must create a fresh same-scope bearer capability and reset the stale
     // declarative plan before the extension binds its holder key again.
@@ -1175,6 +1211,14 @@ async function main() {
       extensionRunDispatch: null,
       executionLive: null,
       preferredExecutionAgentId: 'magic-city-runner-extension',
+      selections: {
+        ...(reconciliationSession.selections || {}),
+        finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+      },
+      finalSelections: {
+        ...(reconciliationSession.finalSelections || reconciliationSession.selections || {}),
+        finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+      },
       fulfillment: {
         status: 'failed',
         result: {
@@ -1202,6 +1246,7 @@ async function main() {
         preferredExecutionAgentId: 'magic-city-runner-extension',
         localCheckoutProfileReady: true,
         extensionCheckoutProfileEnabled: true,
+        extensionFinalSubmitEnabled: true,
         resumeCheckoutReconcile: true
       }
     });
@@ -1211,6 +1256,7 @@ async function main() {
       || resumedCheckoutSession.creditReservation?.status !== 'continuation_no_additional_hold'
       || resumedCheckoutSession.creditReservation?.amountUnits !== 0
       || resumedCheckoutSession.extensionCheckoutReconcileResume !== true
+      || resumedCheckoutSession.extensionFinalSubmitEnabled !== true
       || !resumedCheckoutSession.extensionRunDispatch?.nonce
       || !resumedCheckoutSession.missionBoundAuth?.token) {
       throw new Error(`checkout_reconcile_resume_not_credit_idempotent:${checkoutReconcileResume.response.status}:${JSON.stringify(checkoutReconcileResume.data)}`);
@@ -1248,11 +1294,13 @@ async function main() {
     const reconcilePlan = reconcileClaim.data.session?.extensionMissionPlan || {};
     if (!reconcileClaim.response.ok
       || reconcilePlan.resumeCheckoutReconcile !== true
+      || reconcilePlan.resumeCheckoutAutoSubmit !== true
       || reconcilePlan.startUrl !== 'https://www.amazon.com/checkout/p/p-reconcile/address?pipelineType=Chewbacca'
-      || reconcilePlan.actions?.map((action) => action.type).join(',') !== 'navigate,fill_checkout_profile,inspect,pause'
+      || reconcilePlan.actions?.map((action) => action.type).join(',') !== 'navigate,fill_checkout_profile,click_intent,fill_checkout_profile,inspect,final_submit,inspect,pause'
       || reconcilePlan.actions?.[0]?.preserveExistingCheckout !== true
-      || reconcilePlan.actions?.some((action) => ['prepare_cart', 'final_submit'].includes(action.type))) {
-      throw new Error(`checkout_reconcile_plan_not_narrow:${reconcileClaim.response.status}:${JSON.stringify(reconcilePlan)}`);
+      || reconcilePlan.limits?.stopBeforeFinalSubmit !== false
+      || reconcilePlan.actions?.some((action) => action.type === 'prepare_cart')) {
+      throw new Error(`checkout_reconcile_auto_submit_plan_invalid:${reconcileClaim.response.status}:${JSON.stringify(reconcilePlan)}`);
     }
 
     console.log('native-runner extension pairing regression passed');
