@@ -689,7 +689,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.10'
+  '0.4.11'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -2580,6 +2580,42 @@ function buildFinalSubmitApprovalReceipt({ req, session = {}, body = {}, authUse
   });
 }
 
+// A normal Run can explicitly authorize one final submit up front. Unlike the
+// review-resume receipt above, this commits to the signed plan rather than to
+// checkout observations that do not exist yet. The server still requires every
+// checkout milestone and a fresh final-review observation at the submit step.
+function buildAutoSubmitMissionApprovalReceipt({ req, session = {}, selections = {}, authUser = null, extensionPlan = null } = {}) {
+  const targetUrl = String(selections.targetUrl || session?.selections?.targetUrl || '').trim();
+  const now = Date.now();
+  const receipt = {
+    schema: 'magic-city-final-submit-approval-v1',
+    action: 'final_submit',
+    authorizationMode: 'mission_auto_submit',
+    sessionId: session?.id || null,
+    connectorId: session?.connectorId || null,
+    approvedAt: new Date(now).toISOString(),
+    // Keep this authority short-lived and never longer than a mission
+    // capability can be valid. A retry issues a fresh capability and receipt.
+    expiresAt: new Date(now + Math.min(MISSION_BOUND_AUTH_TTL_SEC * 1000, 20 * 60 * 1000)).toISOString(),
+    issuer: buildRequestBaseUrl(req),
+    requesterHash: authUser?.requesterId ? hashIdentifier(authUser.requesterId) : (session?.requesterHash || null),
+    targetDomain: normalizeMissionDomain(targetUrl),
+    targetUrlHash: targetUrl ? hashOpaqueValue(targetUrl) : null,
+    planHash: extensionPlan?.planHash || null,
+    itemBudget: selections.budget || selections.maxSpend || selections.maxPrice || null,
+    itemBudgetBasis: 'merchandise_subtotal',
+    maxOrders: 1,
+    requiredMilestones: MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES,
+    verifiedMilestones: [],
+    verifiedMilestonesHash: mbaSha256Hex([]),
+    latestRetailStepReceiptHash: null
+  };
+  return sanitizeMetadata({
+    ...receipt,
+    approvalHash: hashHex(stableJsonStringify(receipt))
+  });
+}
+
 function verifyRetailFinalSubmitApproval(session = {}, {
   targetUrl = '',
   retailCheckoutStep = null
@@ -2604,6 +2640,42 @@ function verifyRetailFinalSubmitApproval(session = {}, {
   if (approvedDomain && requestedDomain && approvedDomain !== requestedDomain) {
     throw createHttpError('mission_final_submit_approval_domain_mismatch', 403);
   }
+  const isMissionAutoSubmit = approval.authorizationMode === 'mission_auto_submit';
+  const hasAuthorizedSubmit = Array.isArray(session.executionTrace)
+    && session.executionTrace.some((event) => (
+      event?.state === 'final_submit_authorized'
+      && String(event?.approval?.approvalHash || '') === approvalHash
+    ));
+  if (!hasAuthorizedSubmit) {
+    throw createHttpError('mission_final_submit_approval_resume_missing', 409);
+  }
+  const refreshedMilestones = new Set(
+    (Array.isArray(retailCheckoutStep?.verifiedMilestones) ? retailCheckoutStep.verifiedMilestones : [])
+      .map((value) => String(value || '').trim())
+  );
+  if (retailCheckoutStep?.actionType !== 'final_submit'
+    || !refreshedMilestones.has('final_review_ready')) {
+    throw createHttpError('mission_final_submit_recheck_required', 409);
+  }
+  if (isMissionAutoSubmit) {
+    const plan = getExtensionMissionPlanForSession(session);
+    const persistedMilestones = new Set(retailCheckoutVerifiedMilestones(session));
+    const latestStep = latestRetailCheckoutStepReceipt(session);
+    if (
+      !plan
+      || plan.planHash !== approval.planHash
+      || plan.limits?.stopBeforeFinalSubmit !== false
+      || session.extensionFinalSubmitEnabled !== true
+      || Number(approval.maxOrders || 0) !== 1
+      || !MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES.every((milestone) => persistedMilestones.has(milestone))
+      || !MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES.every((milestone) => refreshedMilestones.has(milestone))
+      || !latestStep
+      || !verifyMbaRetailCheckoutStepReceipt(latestStep).valid
+    ) {
+      throw createHttpError('mission_final_submit_approval_checkout_unverified', 409);
+    }
+    return approval;
+  }
   const approvedMilestones = new Set(
     (Array.isArray(approval.verifiedMilestones) ? approval.verifiedMilestones : [])
       .map((value) => String(value || '').trim())
@@ -2625,27 +2697,6 @@ function verifyRetailFinalSubmitApproval(session = {}, {
     || !verifyMbaRetailCheckoutStepReceipt(approvedReviewEvent.retailCheckoutStepReceipt).valid
   ) {
     throw createHttpError('mission_final_submit_approval_trace_missing', 409);
-  }
-  const hasAuthorizedResume = Array.isArray(session.executionTrace)
-    && session.executionTrace.some((event) => (
-      event?.state === 'final_submit_authorized'
-      && String(event?.approval?.approvalHash || '') === approvalHash
-    ));
-  if (!hasAuthorizedResume) {
-    throw createHttpError('mission_final_submit_approval_resume_missing', 409);
-  }
-  const refreshedMilestones = new Set(
-    (Array.isArray(retailCheckoutStep?.verifiedMilestones) ? retailCheckoutStep.verifiedMilestones : [])
-      .map((value) => String(value || '').trim())
-  );
-  if (
-    retailCheckoutStep?.actionType !== 'final_submit'
-    // The resume plan begins at the already prepared checkout rather than
-    // replaying catalog/cart work. It must freshly observe final review, while
-    // the approval receipt commits the earlier verified milestones.
-    || !refreshedMilestones.has('final_review_ready')
-  ) {
-    throw createHttpError('mission_final_submit_recheck_required', 409);
   }
   return approval;
 }
@@ -17976,6 +18027,16 @@ const server = http.createServer(async (req, res) => {
         ''
       ).trim();
       const isBrowserSession = String(session.handoffData?.kind || '').trim() === 'browser';
+      const extensionCheckoutProfileRequested = Object.prototype.hasOwnProperty.call(body, 'extensionCheckoutProfileEnabled');
+      const extensionFinalSubmitRequested = Object.prototype.hasOwnProperty.call(body, 'extensionFinalSubmitEnabled');
+      // A retry is not a new authorization request. Keep the signed mission's
+      // execution features unless the user explicitly changes them.
+      const extensionCheckoutProfileEnabled = isBrowserSession && (extensionCheckoutProfileRequested
+        ? body.extensionCheckoutProfileEnabled === true
+        : session.extensionCheckoutProfileEnabled === true);
+      const extensionFinalSubmitEnabled = isBrowserSession && (extensionFinalSubmitRequested
+        ? body.extensionFinalSubmitEnabled === true
+        : session.extensionFinalSubmitEnabled === true);
       let selections = hydrateBrowserExecutionSelections(
         session,
         sanitizeMetadata(body.selections ?? session.selections ?? {})
@@ -18027,7 +18088,7 @@ const server = http.createServer(async (req, res) => {
           finalApprovalPolicy: 'auto_submit_after_verified_checkout'
         });
       }
-      const finalSubmitApprovalReceipt = finalSubmitResumeRequested
+      let finalSubmitApprovalReceipt = finalSubmitResumeRequested
         ? buildFinalSubmitApprovalReceipt({
             req,
             session: {
@@ -18245,18 +18306,20 @@ const server = http.createServer(async (req, res) => {
         });
       }
       let extensionDispatchDeviceId = null;
+      let missionPlanPreview = null;
+      let extensionPlanForRun = null;
       if (
         completionMode === 'agent_checkout'
         && isBrowserSession
         && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun)
       ) {
-        const missionPlanPreview = buildBrowserExtensionMissionPlan({
+        missionPlanPreview = buildBrowserExtensionMissionPlan({
           ...sessionWithPrivateInputs,
           selections,
           finalSelections: selections,
           preferredExecutionAgentId: selectedExecutionAgentIdForRun,
-          extensionCheckoutProfileEnabled: Boolean(body.extensionCheckoutProfileEnabled),
-          extensionFinalSubmitEnabled: Boolean(body.extensionFinalSubmitEnabled),
+          extensionCheckoutProfileEnabled,
+          extensionFinalSubmitEnabled,
           extensionFinalSubmitResume: finalSubmitResumeRequested,
           extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
           extensionCheckoutReconcileUrl: checkoutReconcileUrl,
@@ -18275,6 +18338,28 @@ const server = http.createServer(async (req, res) => {
               ...(getConnectorSession(sessionId) || session),
               selections
             }
+          });
+        }
+        const storedPlan = validateBrowserExtensionPlan(session.extensionMissionPlan || null);
+        const preserveStoredPlan = storedPlan.valid
+          && !finalSubmitResumeRequested
+          && !checkoutReconcileResumeRequested;
+        extensionPlanForRun = preserveStoredPlan ? storedPlan.plan : missionPlanPreview;
+        const freshAutoSubmitAuthorized = !finalSubmitResumeRequested
+          && !checkoutReconcileResumeRequested
+          && extensionPlanForRun.limits?.stopBeforeFinalSubmit === false
+          && extensionFinalSubmitEnabled;
+        if (freshAutoSubmitAuthorized) {
+          finalSubmitApprovalReceipt = buildAutoSubmitMissionApprovalReceipt({
+            req,
+            session: {
+              ...session,
+              selections,
+              finalSelections: selections
+            },
+            selections,
+            authUser: creditAuthUser,
+            extensionPlan: extensionPlanForRun
           });
         }
       }
@@ -18410,7 +18495,9 @@ const server = http.createServer(async (req, res) => {
               finalSelections: selections,
               paymentOrchestration,
               preferredExecutionAgentId: selectedExecutionAgentIdForRun,
-              extensionFinalSubmitEnabled: Boolean(body.extensionFinalSubmitEnabled),
+              extensionMissionPlan: extensionPlanForRun,
+              extensionFinalSubmitEnabled,
+              extensionCheckoutProfileEnabled,
               extensionFinalSubmitResume: finalSubmitResumeRequested,
               extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
               extensionCheckoutReconcileUrl: checkoutReconcileUrl,
@@ -18493,13 +18580,15 @@ const server = http.createServer(async (req, res) => {
           : 'human_checkout',
         createdAt: new Date().toISOString()
       });
-      if (finalSubmitResumeRequested) {
+      if (finalSubmitApprovalReceipt) {
         nextTrace.push({
           pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-          label: 'Final order approved',
+          label: finalSubmitResumeRequested ? 'Final order approved' : 'One-order authority issued',
           detail: finalSubmitApprovalReceipt?.approvalHash
-            ? `The user approved one verified checkout submit. Approval ${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)}.`
-            : 'The user approved one final order submit from the verified Magic City checkout review.',
+            ? (finalSubmitResumeRequested
+              ? `The user approved one verified checkout submit. Approval ${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)}.`
+              : `This Run authorized one submit after the signed checkout plan verifies. Approval ${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)}.`)
+            : 'Magic City authorized one final order submit from the verified checkout review.',
           state: 'final_submit_authorized',
           approval: finalSubmitApprovalReceipt
             ? {
@@ -18789,21 +18878,26 @@ const server = http.createServer(async (req, res) => {
         squarePaymentLink: paymentOrchestration?.fundingMode === 'direct_square' ? session.squarePaymentLink ?? null : null,
         missionBoundAuth: missionBoundAuthForExecution,
         missionRuntimeHolder: resetExpiredBrowserMission ? null : session.missionRuntimeHolder ?? null,
-        extensionMissionPlan: resetExpiredBrowserMission ? null : session.extensionMissionPlan ?? null,
-        extensionMissionPlanState: resetExpiredBrowserMission ? null : session.extensionMissionPlanState ?? null,
+        // Persist the exact plan that was validated and (when enabled) bound to
+        // the one-order approval. Rebuilding it later from mutable session
+        // defaults can change its hash between Run, claim, and final_submit.
+        extensionMissionPlan: extensionPlanForRun || (resetExpiredBrowserMission ? null : session.extensionMissionPlan ?? null),
+        extensionMissionPlanState: extensionPlanForRun
+          ? ((resetExpiredBrowserMission || retryingFailedSession || finalSubmitResumeRequested || checkoutReconcileResumeRequested)
+            ? initialBrowserExtensionPlanState(extensionPlanForRun)
+            : getExtensionMissionPlanStateForSession(session, extensionPlanForRun))
+          : (resetExpiredBrowserMission ? null : session.extensionMissionPlanState ?? null),
         extensionFinalSubmitResume: finalSubmitResumeRequested,
         extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
         extensionCheckoutReconcileUrl: checkoutReconcileResumeRequested ? checkoutReconcileUrl : null,
         extensionFinalSubmitEnabled: isBrowserSession
           && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun)
-          && Boolean(body.extensionFinalSubmitEnabled),
+          && extensionFinalSubmitEnabled,
         extensionCheckoutProfileEnabled: isBrowserSession
           && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun)
-          && Boolean(body.extensionCheckoutProfileEnabled),
+          && extensionCheckoutProfileEnabled,
         extensionRunDispatch,
-        finalSubmitApproval: finalSubmitResumeRequested
-          ? finalSubmitApprovalReceipt
-          : session.finalSubmitApproval ?? null,
+        finalSubmitApproval: finalSubmitApprovalReceipt || session.finalSubmitApproval || null,
         creditReservation,
         merchantSettlement,
         personalAgentProfile: userAgentProfile,
@@ -18884,6 +18978,7 @@ const server = http.createServer(async (req, res) => {
         extensionFinalSubmitEnabled: nextSessionState.extensionFinalSubmitEnabled,
         extensionCheckoutProfileEnabled: nextSessionState.extensionCheckoutProfileEnabled,
         extensionRunDispatch: nextSessionState.extensionRunDispatch,
+        finalSubmitApproval: nextSessionState.finalSubmitApproval,
         creditReservation,
         merchantSettlement,
         personalAgentProfile: userAgentProfile,

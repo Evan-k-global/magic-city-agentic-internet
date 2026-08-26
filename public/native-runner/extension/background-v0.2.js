@@ -687,6 +687,12 @@ function isExecutionCancelledError(error) {
   return String(error?.message || error || '').trim().toLowerCase() === 'execution_cancelled';
 }
 
+function isFinalSubmitPolicyError(error) {
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  return message.startsWith('mission_final_submit_')
+    || message === 'mission_action_requires_user_approval';
+}
+
 async function extensionHostPermissions() {
   const permissions = await chrome.permissions.getAll();
   return (permissions.origins || []).filter((origin) => origin.startsWith('https://'));
@@ -1937,9 +1943,16 @@ async function reportAndStop(session, plan, report, note = '') {
       : 'The final-order click was issued, but Amazon did not confirm the order. The local tab was preserved; no completion receipt was issued.';
     report.fundingDisposition = 'release';
     report.fulfillmentStatus = 'failed';
+  } else if (report.fulfillmentStatus === 'failed' && report.stopState) {
+    // Preserve explicit terminal runner errors. In particular, a server-side
+    // final-submit rejection must be reported as such instead of being
+    // reclassified as a normal checkout boundary and later killed by the
+    // execution watchdog.
+    report.stopEvidence = report.stopEvidence || note || 'The local runner could not complete this approved browser step.';
+    report.fundingDisposition = report.fundingDisposition || 'release';
   } else if (boundary) {
-    report.stopState = boundary.state;
-    report.stopEvidence = boundary.evidence;
+    report.stopState = report.stopState || boundary.state;
+    report.stopEvidence = report.stopEvidence || boundary.evidence;
     if (boundary.failed) {
       report.fulfillmentStatus = 'failed';
       report.fundingDisposition = 'release';
@@ -2122,9 +2135,13 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
     });
     if (!outcome?.completed) break;
     const observedSummary = outcome?.state?.checkoutSummary || {};
-    const cardSelectionNeedsReobserve = Array.isArray(outcome?.checkoutSelections)
+    const paymentConfirmationNeedsReobserve = outcome?.paymentConfirmationPending === true
+      || (Array.isArray(outcome?.checkoutSelections)
+        && outcome.checkoutSelections.some((selection) => /^confirm (matching|already-selected) payment card$/i.test(String(selection || ''))));
+    const cardSelectionNeedsReobserve = (Array.isArray(outcome?.checkoutSelections)
       && outcome.checkoutSelections.includes('matching payment card')
-      && (observedSummary.cardMatches !== true || observedSummary.paymentMethodConfirmationRequired === true);
+      && (observedSummary.cardMatches !== true || observedSummary.paymentMethodConfirmationRequired === true))
+      || paymentConfirmationNeedsReobserve;
     const addressSelectionNeedsReobserve = Array.isArray(outcome?.checkoutSelections)
       && outcome.checkoutSelections.includes('matching delivery address')
       && (observedSummary.addressMatches !== true || observedSummary.addressConfirmationRequired === true);
@@ -2139,7 +2156,7 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       // Address, card, and delivery selectors often change the DOM without a
       // navigation. Re-observe those immediately; reserve the long wait for
       // an actual page transition.
-      await delay(280);
+      await delay(paymentConfirmationNeedsReobserve ? 650 : 280);
       const after = await chrome.tabs.get(tabId).catch(() => before);
       if (after.url !== before.url || after.status === 'loading') {
         const remainingForNavigationMs = reconcileDeadline - Date.now();
@@ -2155,19 +2172,33 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       const remainingForVerificationMs = reconcileDeadline - Date.now();
       const verifiedState = remainingForVerificationMs > 900
         ? await tabBrowserState(tabId, checkoutProfile, {
-          attempts: 2,
-          delayMs: 160,
+          attempts: paymentConfirmationNeedsReobserve ? 3 : 2,
+          delayMs: paymentConfirmationNeedsReobserve ? 240 : 160,
           deadlineMs: reconcileDeadline
         }).catch(() => null)
         : null;
-      if (verifiedState?.checkoutSummary?.checkoutProfileVerified === true
-        || verifiedState?.checkoutSummary?.finalReviewReady === true) {
+      const paymentSettledIntoFinalReview = paymentConfirmationNeedsReobserve
+        && verifiedState?.checkoutSummary?.paymentMethodConfirmationRequired !== true
+        && verifiedState?.checkoutSummary?.cardConfirmed === true
+        && verifiedState?.checkoutSummary?.finalReviewReady === true;
+      if (paymentSettledIntoFinalReview
+        || (!paymentConfirmationNeedsReobserve && (verifiedState?.checkoutSummary?.checkoutProfileVerified === true
+          || verifiedState?.checkoutSummary?.finalReviewReady === true))) {
         return {
           ...outcome,
           ...merged,
           completed: true,
           skipped: false,
           state: verifiedState
+        };
+      }
+      if (paymentConfirmationNeedsReobserve) {
+        latestOutcome = {
+          ...outcome,
+          completed: false,
+          skipped: false,
+          reason: 'Amazon is still applying the selected payment method; final review has not appeared yet.',
+          state: verifiedState || outcome.state
         };
       }
       continue;
@@ -2191,10 +2222,17 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       deadlineMs: reconcileDeadline
       }).catch(() => latestOutcome?.state || null)
     : latestOutcome?.state || null;
+  const finalSummary = merged.state?.checkoutSummary || latestOutcome?.state?.checkoutSummary || {};
+  const paymentStillPending = latestOutcome?.paymentConfirmationPending === true
+    && (finalSummary.paymentMethodConfirmationRequired === true || finalSummary.finalReviewReady !== true);
   return {
     ...(latestOutcome || {}),
     ...merged,
-    reason: latestOutcome?.reason || (Date.now() >= reconcileDeadline
+    completed: paymentStillPending ? false : Boolean(latestOutcome?.completed),
+    skipped: paymentStillPending ? false : Boolean(merged.skipped),
+    reason: paymentStillPending
+      ? 'Amazon did not confirm the selected payment method before final-review verification timed out.'
+      : latestOutcome?.reason || (Date.now() >= reconcileDeadline
       ? 'Checkout preset reconciliation timed out before the next verified state.'
       : 'Checkout preset reconciliation reached its safety limit.'),
     state: merged.state || latestOutcome?.state || null
@@ -3311,6 +3349,19 @@ async function runSession(rawSession) {
     const tab = await activeMissionTab(session.id);
     let browser = null;
     if (tab) browser = await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' }).catch(() => null);
+    if (isFinalSubmitPolicyError(error)) {
+      return reportAndStop(session, plan, {
+        ...(browser || {}),
+        url: browser?.url || plan.startUrl,
+        finalUrl: browser?.url || plan.startUrl,
+        stopState: 'final_submit_authorization_rejected',
+        stopEvidence: `Magic City rejected the final-order authority before Amazon was charged: ${String(message).slice(0, 180)}`,
+        fulfillmentStatus: 'failed',
+        fundingDisposition: 'release',
+        finalSubmitRequested: false,
+        orderSubmitted: false
+      }, 'Final order request rejected by Magic City policy. The order was not placed.');
+    }
     try {
       session = await missionCheckpoint(session, {
         label: 'Browser step needs review',

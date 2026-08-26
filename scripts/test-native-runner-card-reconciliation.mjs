@@ -27,13 +27,14 @@ async function main() {
           <div id="payment-options" class="payment-section" hidden>
             <div class="a-row"><input type="radio" name="payment" checked /><span>Visa ending in 0109</span><span>Evan Kereiakes</span><span>12/2026</span></div>
             <div class="a-row"><input type="radio" name="payment" /><span>Mastercard ending in 6383</span><span>Evan Kereiakes</span><span>07/2031</span></div>
-            <button id="use-payment-method" onclick="const selected=document.querySelector('input[name=payment]:checked'); document.querySelector('#payment-summary').textContent=selected.parentElement.innerText; document.querySelector('#payment-options').hidden=true; document.body.dataset.paymentConfirmed='true'">Use this payment method</button>
-            <button id="use-payment-method-sidebar" onclick="const selected=document.querySelector('input[name=payment]:checked'); document.querySelector('#payment-summary').textContent=selected.parentElement.innerText; document.querySelector('#payment-options').hidden=true; document.body.dataset.paymentConfirmed='true'">Use this payment method</button>
+            <button id="use-payment-method" onclick="const selected=document.querySelector('input[name=payment]:checked'); setTimeout(() => { document.querySelector('#payment-summary').textContent=selected.parentElement.innerText; document.querySelector('#payment-options').hidden=true; document.querySelector('#final-review').hidden=false; document.body.dataset.paymentConfirmed='true' }, 650)">Use this payment method</button>
+            <button id="use-payment-method-sidebar" onclick="const selected=document.querySelector('input[name=payment]:checked'); setTimeout(() => { document.querySelector('#payment-summary').textContent=selected.parentElement.innerText; document.querySelector('#payment-options').hidden=true; document.querySelector('#final-review').hidden=false; document.body.dataset.paymentConfirmed='true' }, 650)">Use this payment method</button>
           </div>
         </section>
         <p>Items: $2.97</p>
         <p>Shipping &amp; handling: $0.00</p>
         <p>Order total: $2.97</p>
+        <button id="final-review" hidden>Place your order</button>
       </main>`);
   });
 
@@ -98,16 +99,22 @@ async function main() {
       action: { type: 'fill_checkout_profile', primeRequired: true },
       checkoutProfile: profile
     });
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(150);
+    const prematurelyHidden = await page.locator('#payment-options').getAttribute('hidden');
+    if (second.paymentConfirmationPending !== true || prematurelyHidden !== null) {
+      fail(`card_reconciliation_did_not_mark_delayed_confirmation_pending:${JSON.stringify({ second, prematurelyHidden })}`);
+    }
+    await page.waitForTimeout(800);
     const summary = await page.locator('#payment-summary').textContent();
     const pickerHidden = await page.locator('#payment-options').getAttribute('hidden');
     const expectedCardSelected = await page.locator('input[name=payment]').nth(1).isChecked();
     const paymentConfirmed = await page.locator('body').getAttribute('data-payment-confirmed');
+    const finalReviewVisible = await page.locator('#final-review').isVisible();
     if (!second.completed || !/use this payment method/i.test(String(second.label || ''))) {
       fail(`card_reconciliation_did_not_confirm_matching_card:${JSON.stringify({ pickerSnapshot, second })}`);
     }
-    if (!/6383/.test(String(summary || '')) || pickerHidden === null || !expectedCardSelected || paymentConfirmed !== 'true') {
-      fail(`card_reconciliation_dom_not_settled:${JSON.stringify({ summary, pickerHidden, expectedCardSelected, paymentConfirmed, second })}`);
+    if (!/6383/.test(String(summary || '')) || pickerHidden === null || !expectedCardSelected || paymentConfirmed !== 'true' || !finalReviewVisible) {
+      fail(`card_reconciliation_dom_not_settled:${JSON.stringify({ summary, pickerHidden, expectedCardSelected, paymentConfirmed, finalReviewVisible, second })}`);
     }
     console.log(JSON.stringify({
       ok: true,

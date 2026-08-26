@@ -638,9 +638,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<a href="#add-card">Add a credit or debit card</a>',
       '<a href="#gift-card">Use a gift card, voucher, or promo code</a>',
       '</div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
       '<div style="height: 300px"></div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
       '</section>',
       '<section aria-label="Delivery address">',
       '<h2>Delivering to Test User</h2>',
@@ -688,6 +688,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
 }
 
 async function main() {
+  const smokeMode = process.env.MAGIC_CITY_BROWSER_SMOKE_FOCUS || 'full';
+  console.log(`native-runner browser smoke starting (${smokeMode})`);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-extension-browser-'));
   let context = null;
   let server = null;
@@ -853,8 +855,10 @@ async function main() {
       headless: false,
       args: ['--ignore-certificate-errors', `--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`]
     };
+    console.log('native-runner browser smoke launching Chrome');
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
     await waitFor(() => context.serviceWorkers()[0], 15_000);
+    console.log('native-runner browser smoke service worker ready');
     let worker = context.serviceWorkers()[0];
     const extensionId = new URL(worker.url()).host;
     let popup = await context.newPage();
@@ -867,7 +871,8 @@ async function main() {
       console.error(`pairing_status_timeout:${status}`);
       throw error;
     });
-    if (process.env.MAGIC_CITY_BROWSER_SMOKE_FOCUS === 'recovery') {
+    console.log(`native-runner browser smoke paired (${smokeMode})`);
+    if (smokeMode === 'recovery') {
       const runRecoveryScenario = async ({ id, startPath, action, selectedCandidate = null, checkoutProfile = null, assertCheckpoint }) => {
         checkpoints.length = 0;
         fulfillment = null;
@@ -1017,6 +1022,7 @@ async function main() {
       console.log('native-runner focused recovery smoke passed');
       return;
     }
+    console.log('native-runner browser smoke running full checkout matrix');
     const commandPage = async (page, message) => {
       const tab = await worker.evaluate(async (url) => {
         const tabs = await chrome.tabs.query({});
@@ -1028,8 +1034,11 @@ async function main() {
         return chrome.tabs.sendMessage(tabId, payload);
       }, { tabId: tab.id, payload: message });
     };
+    console.log('native-runner browser smoke opening signed-out fixture');
     const signedOutPage = await context.newPage();
+    console.log('native-runner browser smoke signed-out fixture tab ready');
     await signedOutPage.goto(`${baseUrl}/signed-out-search`);
+    console.log('native-runner browser smoke signed-out fixture loaded');
     const signedOutState = await commandPage(signedOutPage, { type: 'MAGIC_CITY_BROWSER_STATE' });
     if (signedOutState.amazonAccountState !== 'signed_out' || signedOutState.loginRequired !== true) {
       fail(`browser_extension_did_not_fail_closed_for_signed_out_amazon:${JSON.stringify(signedOutState)}`);

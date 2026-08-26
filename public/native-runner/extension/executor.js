@@ -3413,6 +3413,9 @@
           completed: true,
           skipped: false,
           navigationRequested: true,
+          // A click only begins Amazon's payment transition. The background
+          // must re-observe until this control is gone and final review exists.
+          paymentConfirmationPending: true,
           label: compactText(confirmPayment.label || 'Use this payment method', 140),
           safeFieldsFilled: [...new Set(filled)],
           checkoutSelections: [...selections, selectedOptions.includes('matching payment card') ? 'confirm matching payment card' : 'confirm already-selected payment card'],

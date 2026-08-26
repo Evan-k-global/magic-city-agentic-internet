@@ -174,7 +174,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.4.10-test',
+        extensionVersion: '0.4.11-test',
         extensionId: 'test-extension-id'
       }
     });
@@ -896,14 +896,17 @@ async function main() {
     await waitForServer(baseUrl);
 
     // A watchdog failure can leave a persisted browser session with an expired capability.
-    // An owner retry must create a fresh same-scope bearer capability and reset the stale
-    // declarative plan before the extension binds its holder key again.
+    // An owner retry must create a fresh same-scope bearer capability and reset stale
+    // declarative plan state without rebuilding the signed plan before the extension
+    // binds its holder key again.
     const staleCapabilityToken = legacyClaim.data.session.missionBoundAuth.token;
     await stopServer();
     const statePath = path.join(tmpDir, 'data', 'state.json');
     const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
     const staleSession = state.connectorSessions.find((entry) => entry.id === legacySessionId);
     if (!staleSession?.missionBoundAuth?.token) throw new Error('expired_retry_fixture_session_missing');
+    const stalePlanHash = staleSession.extensionMissionPlan?.planHash;
+    if (!stalePlanHash) throw new Error('expired_retry_fixture_plan_missing');
     staleSession.status = 'failed';
     staleSession.fulfillment = { status: 'failed', result: { latestFailureReason: 'test fixture' } };
     staleSession.missionBoundAuth.expiresAt = new Date(0).toISOString();
@@ -929,8 +932,9 @@ async function main() {
       || retriedSession.missionBoundAuth.token === staleCapabilityToken
       || retriedSession.missionBoundAuth.confirmation?.method !== 'bearer'
       || retriedSession.missionRuntimeHolder !== null
-      || retriedSession.extensionMissionPlan !== null
-      || retriedSession.extensionMissionPlanState !== null
+      || retriedSession.extensionMissionPlan?.planHash !== stalePlanHash
+      || retriedSession.extensionMissionPlanState?.planHash !== stalePlanHash
+      || Number(retriedSession.extensionMissionPlanState?.nextActionIndex) !== 0
       || retriedSession.fulfillment !== null
       || retriedSession.failedAt !== null
       || retriedSession.claimedByPluginId !== null) {
@@ -1301,6 +1305,152 @@ async function main() {
       || reconcilePlan.limits?.stopBeforeFinalSubmit !== false
       || reconcilePlan.actions?.some((action) => action.type === 'prepare_cart')) {
       throw new Error(`checkout_reconcile_auto_submit_plan_invalid:${reconcileClaim.response.status}:${JSON.stringify(reconcilePlan)}`);
+    }
+
+    // A fresh auto-submit mission must carry its one-order authority all the
+    // way through a claimed plan. This guards the server/runner contract that
+    // previously allowed the browser to reach final review, then rejected the
+    // final_submit checkpoint because the approval was never persisted.
+    const autoSubmitStart = await request(baseUrl, '/connectors/sessions/start', {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        connectorId: 'browser-worker-demo-v1',
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        prompt: 'buy nature valley granola bars from amazon under $4',
+        profileSummary: {}
+      }
+    });
+    const autoSubmitSessionId = autoSubmitStart.data.session?.id;
+    if (!autoSubmitStart.response.ok || !autoSubmitSessionId) {
+      throw new Error(`auto_submit_fixture_start_failed:${autoSubmitStart.response.status}:${JSON.stringify(autoSubmitStart.data)}`);
+    }
+    const autoSubmitMode = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/completion-mode`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: { mode: 'agent_checkout' }
+    });
+    if (!autoSubmitMode.response.ok) {
+      throw new Error(`auto_submit_fixture_mode_failed:${autoSubmitMode.response.status}:${JSON.stringify(autoSubmitMode.data)}`);
+    }
+    const autoSubmitExecution = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/start-execution`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        mode: 'agent_checkout',
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        extensionCheckoutProfileEnabled: true,
+        extensionFinalSubmitEnabled: true
+      }
+    });
+    const autoSubmitSession = autoSubmitExecution.data.session || {};
+    const autoApproval = autoSubmitSession.finalSubmitApproval || {};
+    if (!autoSubmitExecution.response.ok
+      || autoSubmitSession.extensionMissionPlan?.limits?.stopBeforeFinalSubmit !== false
+      || autoSubmitSession.extensionFinalSubmitEnabled !== true
+      || autoApproval.authorizationMode !== 'mission_auto_submit'
+      || autoApproval.maxOrders !== 1
+      || autoApproval.planHash !== autoSubmitSession.extensionMissionPlan?.planHash
+      || !(autoSubmitSession.executionTrace || []).some((event) => (
+        event?.state === 'final_submit_authorized'
+        && event?.approval?.approvalHash === autoApproval.approvalHash
+      ))) {
+      throw new Error(`fresh_auto_submit_authority_not_persisted:${autoSubmitExecution.response.status}:${JSON.stringify(autoSubmitExecution.data)}`);
+    }
+    const autoSubmitPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1'
+    });
+    const autoSubmitMission = (autoSubmitPoll.data.sessions || []).find((entry) => entry.id === autoSubmitSessionId);
+    if (!autoSubmitPoll.response.ok || !autoSubmitMission?.extensionRunDispatch?.nonce) {
+      throw new Error(`fresh_auto_submit_not_visible_to_runner:${JSON.stringify(autoSubmitPoll.data)}`);
+    }
+    const autoSubmitHolderKey = crypto.generateKeyPairSync('ed25519');
+    const autoSubmitClaim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/claim`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        holderPublicKeyJwk: autoSubmitHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: autoSubmitMission.extensionRunDispatch.nonce
+      }
+    });
+    let autoSubmitClaimedSession = autoSubmitClaim.data.session || {};
+    const autoSubmitPlan = autoSubmitClaimedSession.extensionMissionPlan || {};
+    if (!autoSubmitClaim.response.ok
+      || autoSubmitPlan.planHash !== autoApproval.planHash
+      || autoSubmitPlan.limits?.stopBeforeFinalSubmit !== false) {
+      throw new Error(`fresh_auto_submit_claim_missing_authority:${autoSubmitClaim.response.status}:${JSON.stringify(autoSubmitClaim.data)}`);
+    }
+    const verifiedMilestones = new Set();
+    for (const action of autoSubmitPlan.actions || []) {
+      if (action.expectedMilestone) verifiedMilestones.add(action.expectedMilestone);
+      if (action.id === 'fill-checkout-profile' || action.id === 'reconcile-payment-profile') {
+        ['address_confirmed', 'card_confirmed', 'delivery_confirmed'].forEach((milestone) => verifiedMilestones.add(milestone));
+      }
+      const targetUrl = String(action.url || (
+        action.type === 'final_submit' || action.id === 'inspect-review' || action.id === 'reconcile-payment-profile'
+          ? 'https://www.amazon.com/checkout/p/p-auto-submit/spc?pipelineType=Chewbacca'
+          : autoSubmitPlan.startUrl
+      ));
+      const checkpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/checkpoint`, {
+        method: 'POST',
+        bearer: token,
+        runnerSurface: 'chrome-extension',
+        runnerProtocol: 'declarative-v1',
+        body: {
+          pluginId: 'magic-city-runner-extension',
+          label: `Auto-submit fixture completed ${action.id}`,
+          missionAction: action.missionAction,
+          targetUrl,
+          planHash: autoSubmitPlan.planHash,
+          planActionId: action.id,
+          planActionStatus: 'completed',
+          milestoneProtocol: 'verified-v1',
+          verifiedMilestones: [...verifiedMilestones],
+          userApproved: action.type === 'final_submit',
+          browser: {
+            url: targetUrl,
+            currentUrl: targetUrl,
+            finalUrl: targetUrl,
+            title: action.type === 'final_submit' ? 'Amazon final review' : 'Amazon checkout',
+            checkoutSummary: {
+              stage: action.type === 'final_submit' || action.id === 'inspect-review' ? 'final_review' : 'checkout',
+              addressMatches: true,
+              cardMatches: true,
+              deliveryConfirmed: true,
+              expectedCardLast4: '6383',
+              selectedCardLast4: '6383',
+              merchandiseSubtotal: '$2.97',
+              shippingTotal: '$0.00',
+              taxTotal: '$0.00',
+              likelyTotal: '$2.97',
+              cartItemCount: 1
+            }
+          },
+          proofOfPossession: buildPopProof({
+            keyPair: autoSubmitHolderKey,
+            session: autoSubmitClaimedSession,
+            action: action.missionAction,
+            targetUrl
+          })
+        }
+      });
+      if (!checkpoint.response.ok) {
+        throw new Error(`fresh_auto_submit_checkpoint_rejected:${action.id}:${checkpoint.response.status}:${JSON.stringify(checkpoint.data)}`);
+      }
+      autoSubmitClaimedSession = checkpoint.data.session || autoSubmitClaimedSession;
+      if (action.type === 'final_submit') {
+        const trace = await request(baseUrl, `/mission-auth/sessions/${encodeURIComponent(autoSubmitSessionId)}/trace`, {
+          cookie: auth.cookie
+        });
+        if (!trace.response.ok || !trace.data?.trace?.events?.some((event) => event?.action === 'final_submit')) {
+          throw new Error(`fresh_auto_submit_boundary_missing:${trace.response.status}:${JSON.stringify(trace.data)}`);
+        }
+      }
     }
 
     console.log('native-runner extension pairing regression passed');
