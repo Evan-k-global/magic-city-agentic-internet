@@ -1719,6 +1719,9 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
       };
     }
     const shippingAmount = parseUsdAmount(summary.shippingTotal);
+    const zeroShippingAuthoritative = summary.shippingTotalEvidence?.authoritative === true
+      && Number.isFinite(shippingAmount)
+      && shippingAmount <= 0.005;
     if (summary.shippingTotalEvidence?.authoritative === true && Number.isFinite(shippingAmount) && shippingAmount > 0) {
       return {
         state: 'prime_required',
@@ -1726,7 +1729,7 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
         evidence: `Prime-only checkout requires $0 delivery. Amazon currently shows ${summary.shippingTotal} shipping.`
       };
     }
-    if (deliveryVerificationStep && summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
+    if (deliveryVerificationStep && !zeroShippingAuthoritative && summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
       return {
         state: 'prime_required',
         failed: true,

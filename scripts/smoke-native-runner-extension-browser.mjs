@@ -651,7 +651,18 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/checkout/final-review') {
+    const pickupModal = checkoutFixture.showPickupModal
+      ? [
+          '<div id="pickup-modal" role="dialog" aria-modal="true" style="position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto">',
+          '<button id="pickup-close" aria-label="Close" onclick="document.querySelector(\'#pickup-modal\').remove()">×</button>',
+          '<h2>Select a pickup location</h2>',
+          '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
+          '<section><h3>Amazon Counter at Whole Foods Market</h3><p>774 Emerson St, Palo Alto, CA 94301</p><p>FREE pickup Friday, Aug 28</p><button onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-selected\')">Pick up here</button></section>',
+          '</div>'
+        ].join('')
+      : '';
     return [
+      pickupModal,
       '<main><h1>Review your order</h1>',
       '<section aria-label="Order summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p></section>',
       '<section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>',
@@ -2896,6 +2907,18 @@ async function main() {
       const unrelated = document.createElement('label');
       unrelated.innerHTML = '<input type="checkbox" checked /> Default to this delivery address and payment method.';
       document.querySelector('main')?.appendChild(unrelated);
+      const pickupModal = document.createElement('div');
+      pickupModal.id = 'pickup-modal';
+      pickupModal.setAttribute('role', 'dialog');
+      pickupModal.setAttribute('aria-modal', 'true');
+      pickupModal.style.cssText = 'position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto';
+      pickupModal.innerHTML = [
+        '<button id="pickup-close" aria-label="Close" onclick="document.querySelector(\'#pickup-modal\').remove()">×</button>',
+        '<h2>Select a pickup location</h2>',
+        '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
+        '<section><h3>Amazon Counter at Whole Foods Market</h3><p>774 Emerson St, Palo Alto, CA 94301</p><p>FREE pickup Friday, Aug 28</p><button onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-selected\')">Pick up here</button></section>'
+      ].join('');
+      document.body.appendChild(pickupModal);
     });
     const reviewTabCount = (await worker.evaluate(() => chrome.tabs.query({})))
       .filter((tab) => String(tab.url || '').startsWith(baseUrl)).length;
@@ -2952,9 +2975,14 @@ async function main() {
     if (resumeTabs.length !== reviewTabCount || !resumeTabs.some((tab) => tab.id === reviewTabId)) {
       fail(`browser_extension_final_review_did_not_reuse_tab:${JSON.stringify({ reviewTabId, reviewTabCount, resumeTabs })}`);
     }
+    const reviewEvents = await preparedReviewPage.evaluate(() => window.__checkoutEvents || []);
+    if (reviewEvents.includes('bad-pickup-selected')) {
+      fail(`browser_extension_final_review_selected_pickup:${reviewEvents.join(',')}`);
+    }
     recordPurchaseScenario('Manual final-review handoff resumes in the same prepared checkout tab', {
       resumedSteps: resumeActionIds,
-      addressVariant: 'RD/STE and ZIP+4 with unrelated checked checkout control'
+      addressVariant: 'RD/STE and ZIP+4 with unrelated checked checkout control',
+      pickupModalIgnored: true
     });
 
     checkpoints.length = 0;

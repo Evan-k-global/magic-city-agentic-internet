@@ -168,7 +168,59 @@
     return dialogs.at(-1) || null;
   }
 
+  function isPickupChooserRoot(root = null) {
+    if (!root) return false;
+    const text = compactText(root.innerText || root.textContent || '', 5000);
+    return /\b(?:select a pickup location|find pickup locations near|pick up here|amazon locker|amazon counter|whole foods market|free pickup)\b/i.test(text)
+      && !/\b(?:add|edit|enter)\s+(?:a\s+)?(?:new\s+)?(?:delivery|shipping)?\s*address\b|\bstreet address\b|\bzip code\b/i.test(text);
+  }
+
+  function checkoutFinalProgressControlVisible() {
+    return Array.from(document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"], .a-button, .a-button-inner'))
+      .some((control) => visible(control) && (
+        FINAL_ORDER_PATTERN.test(visibleControlLabel(control, 220) || textFor(control))
+        || /\buse this payment method\b/i.test(visibleControlLabel(control, 220) || textFor(control))
+        || /\bdeliver to this address\b/i.test(visibleControlLabel(control, 220) || textFor(control))
+      ));
+  }
+
+  function nonBlockingCheckoutPickupModal() {
+    const modal = activeModalRoot();
+    if (!modal || !isPickupChooserRoot(modal)) return null;
+    const checkoutish = /\/checkout|\/buy|\/gp\/buy/i.test(String(location.pathname || ''));
+    if (!checkoutish || !checkoutFinalProgressControlVisible()) return null;
+    return modal;
+  }
+
+  function closeNonBlockingCheckoutPickupModal() {
+    const modal = nonBlockingCheckoutPickupModal();
+    if (!modal) return { closed: false, reason: 'not_visible' };
+    const closeControl = Array.from(modal.querySelectorAll('button, a, input[type="button"], [role="button"]'))
+      .filter(visible)
+      .map((control, index) => {
+        const label = compactText(visibleControlLabel(control, 120) || textFor(control), 120);
+        const descriptor = compactText(controlDescriptor(control), 240);
+        const closeish = /^(?:x|×|close|cancel|done)$/i.test(label)
+          || /\b(?:close|cancel)\b/i.test(`${label}\n${descriptor}`);
+        const risky = /\b(?:pick up here|use this pickup|select pickup|place(?: your)? order|use this payment method|deliver to this address)\b/i.test(`${label}\n${descriptor}`);
+        return { control, score: (closeish ? 100 : 0) - (risky ? 500 : 0), index };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index)[0]?.control;
+    if (closeControl && immediateSafeClick(closeControl)) {
+      return { closed: true, method: 'close_control' };
+    }
+    try {
+      modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+      return { closed: true, method: 'escape' };
+    } catch {
+      return { closed: false, reason: 'close_failed' };
+    }
+  }
+
   function interactionRoot() {
+    if (nonBlockingCheckoutPickupModal()) return document;
     return activeModalRoot() || document;
   }
 
@@ -1576,7 +1628,7 @@
     return {
       url: location.href,
       title: compactText(document.title, 180),
-      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      interactionLayer: activeModalRoot() && !nonBlockingCheckoutPickupModal() ? 'modal' : 'page',
       loginRequired: hasVisibleLoginField() || /hello\s*,?\s*sign in|sign in/i.test(accountText),
       amazonAccountState: /hello\s*,?\s*sign in|sign in/i.test(accountText) ? 'signed_out' : 'signed_in',
       amazonFulfillmentFilterAvailable: false,
@@ -1733,7 +1785,7 @@
     return {
       url: location.href,
       title: compactText(document.title, 180),
-      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      interactionLayer: activeModalRoot() && !nonBlockingCheckoutPickupModal() ? 'modal' : 'page',
       loginRequired: hasVisibleLoginField() || LOGIN_PATTERN.test(pageText) || amazonPreference.accountState === 'signed_out',
       amazonAccountState: amazonPreference.accountState,
       amazonFulfillmentFilterAvailable: amazonPreference.available,
@@ -1769,7 +1821,7 @@
     return {
       url: location.href,
       title: compactText(document.title, 180),
-      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      interactionLayer: activeModalRoot() && !nonBlockingCheckoutPickupModal() ? 'modal' : 'page',
       loginRequired,
       paymentRequired: false,
       finalApprovalVisible: false,
@@ -2754,6 +2806,10 @@
     return /\b(try|join|start|get)\s+prime\b|\bprime\b[\s\S]{0,80}\b(trial|membership|auto-renew|renews|month|sign up|subscribe)\b|\btrial\b|\bauto-renew\b|\bmembership\b/i.test(String(text || ''));
   }
 
+  function pickupDeliveryOption(text = '') {
+    return /\b(?:pickup|pick up|locker|counter|whole foods|amazon fresh|local market)\b/i.test(String(text || ''));
+  }
+
   function deliverySpeedRank(text = '') {
     const value = String(text || '').toLowerCase();
     if (/\b(today|same day)\b/.test(value)) return 0;
@@ -2775,10 +2831,11 @@
         const text = compactText(container?.innerText || '', 1000);
         const shippingish = /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text);
         const subscriptionish = promotionalDeliveryOption(text);
+        const pickupish = pickupDeliveryOption(text);
         const price = shippingPriceFromText(text);
-        return { input, text, price, speedRank: deliverySpeedRank(text), shippingish, subscriptionish };
+        return { input, text, price, speedRank: deliverySpeedRank(text), shippingish, subscriptionish, pickupish };
       })
-      .filter((option) => option.shippingish && !option.subscriptionish && option.price != null);
+      .filter((option) => option.shippingish && !option.subscriptionish && !option.pickupish && option.price != null);
     const freeOptions = options.filter((option) => option.price === 0)
       .sort((left, right) => left.speedRank - right.speedRank);
     const paidOptions = options.filter((option) => option.price > 0)
@@ -2802,10 +2859,11 @@
           price: shippingPriceFromText(text),
           speedRank: deliverySpeedRank(text),
           shippingish: /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text),
-          subscriptionish: promotionalDeliveryOption(text)
+          subscriptionish: promotionalDeliveryOption(text),
+          pickupish: pickupDeliveryOption(text)
         };
       })
-      .filter((option) => option.shippingish && !option.subscriptionish && option.price != null);
+      .filter((option) => option.shippingish && !option.subscriptionish && !option.pickupish && option.price != null);
     if (!deliverySectionVisible && !options.length) return { required: false, confirmed: true };
     const freeOptions = options.filter((option) => option.price === 0)
       .sort((left, right) => left.speedRank - right.speedRank);
@@ -2830,7 +2888,9 @@
     const visibleShippingOptions = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
       .filter((input) => visible(input))
       .map((input) => compactText(radioContainer(input)?.innerText || '', 1000))
-      .some((text) => /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text) && !promotionalDeliveryOption(text));
+      .some((text) => /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text)
+        && !promotionalDeliveryOption(text)
+        && !pickupDeliveryOption(text));
     return !visibleShippingOptions;
   }
 
@@ -3285,6 +3345,7 @@
     if (action.autoSubmitAfterVerifiedCheckout !== true) {
       return { completed: false, reason: 'This mission did not authorize automatic final order submission.' };
     }
+    const closedPickupModal = closeNonBlockingCheckoutPickupModal();
     const state = pageState(profile);
     const summary = state.checkoutSummary || {};
     if (state.orderSubmitted) {
@@ -3343,6 +3404,7 @@
         finalSubmitRequested: true,
         label: visibleControlLabel(control, 140) || compactText(textFor(control), 140),
         merchantCheckoutDefault,
+        checkoutPickupModalClosed: closedPickupModal.closed,
         state
       };
     } catch {
@@ -3351,6 +3413,16 @@
   }
 
   function fillCheckoutProfile(profile = {}, action = {}) {
+    const closedPickupModal = closeNonBlockingCheckoutPickupModal();
+    if (closedPickupModal.closed) {
+      return {
+        completed: true,
+        skipped: false,
+        checkoutPickupModalClosed: true,
+        label: 'Closed pickup chooser',
+        state: pageState(profile)
+      };
+    }
     const rawPageText = pagePlainText(30000);
     const controlText = interactiveControls().map(textFor).join('\n');
     if (isOptionalOfferPage(rawPageText, controlText)) {
