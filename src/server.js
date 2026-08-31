@@ -7016,7 +7016,7 @@ function buildNativeRunnerReadiness({
       ? 'Magic City Runner can execute approved browser missions in this Chrome profile.'
       : (executableReady ? 'Local browser worker is online and ready for legacy native work.' : 'Magic City Runner extension is paired and polling.'))
     : reason === 'runner_not_started'
-      ? 'A runner is paired, but it has not checked in yet. Open the Magic City Runner extension, then click Status in Settings.'
+      ? 'A runner is paired, but it has not checked in yet. Open the Magic City Runner extension, or click Check in Magic City.'
       : reason === 'runner_extension_outdated'
         ? `Update Magic City Runner to ${NATIVE_RUNNER_MIN_EXTENSION_VERSION} or newer, then click Check runner. The existing pairing remains valid.`
       : reason === 'runner_browser_permission_required'
@@ -7024,8 +7024,8 @@ function buildNativeRunnerReadiness({
       : reason === 'runner_executor_not_started'
         ? 'The extension is paired, but the local checkout worker is not running yet. Start the Magic City Runner helper, then retry.'
       : reason === 'runner_offline'
-        ? 'The Magic City Runner extension is paired but is not polling right now. Open the extension, then click Status in Settings.'
-        : 'Pair the Magic City Runner extension in Settings, then click Status.';
+        ? 'The Magic City Runner extension is paired but is not polling right now. Open the extension popup, or click Check in Magic City.'
+        : 'Pair the Magic City Runner extension in Settings, then click Check.';
   return {
     required: true,
     ready,

@@ -7889,7 +7889,7 @@
       nativeRunnerSettings = loadNativeRunnerSettings();
       applyNativeRunnerSettingsUi(nativeRunnerSettings);
       if (authSessionUser && nativeRunnerSettings.deviceId) {
-        refreshNativeRunnerStatus({ silent: true }).catch(() => null);
+        refreshNativeRunnerStatus({ silent: true, wakeExtension: true }).catch(() => null);
       }
       adminAccess = Boolean(user?.adminAccess || user?.adminAccount);
       applyAdminAccessUi(adminAccess);
@@ -10986,7 +10986,7 @@
           title: 'Waiting for status',
           subtitle: hasFreshPairingCode
             ? 'Open the Magic City Runner extension and paste the pairing code.'
-            : 'Pair the extension, then click Status in the extension popup.',
+            : 'Pair the extension, then click Check in Magic City.',
           detail: hasFreshPairingCode
             ? `Pairing code expires in ${nativeRunnerTimeUntil(normalized.pairingExpiresAt)}.`
             : normalized.lastSetupCopiedAt
@@ -11000,8 +11000,8 @@
         return {
           tone: 'attention',
           title: 'Offline',
-          subtitle: `Last seen ${heartbeatAgo}. Open the extension popup and click Status.`,
-          detail: `Extension last seen ${heartbeatAgo}.`,
+          subtitle: `Last seen ${heartbeatAgo}. Click Check here or reopen the extension popup.`,
+          detail: `Extension last seen ${heartbeatAgo}. Opening the popup checks automatically; Check retries from Magic City.`,
           primaryLabel: 'Check',
           primaryMode: 'refresh'
         };
@@ -19865,7 +19865,7 @@
       try {
         const primaryMode = $('nativeRunnerSetupBtn')?.dataset.nativeRunnerPrimaryMode || 'setup';
         if (primaryMode === 'refresh') {
-          await refreshNativeRunnerStatus({ silent: false, wakeExtension: true });
+          await checkNativeRunnerWithPolling();
           return;
         }
         if (primaryMode === 'show_pairing' && nativeRunnerPairingIsFresh(nativeRunnerSettings)) {
