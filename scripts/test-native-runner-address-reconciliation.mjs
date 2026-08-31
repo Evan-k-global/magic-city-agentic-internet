@@ -149,6 +149,31 @@ function finalReviewWithPickupOverlayHtml() {
     </script>`;
 }
 
+function collapsedShippingSpeedHtml() {
+  return `<!doctype html>
+    <style>
+      main { font: 16px/1.4 Arial, sans-serif; max-width: 1100px; margin: 24px auto; }
+      .checkout-card { margin: 18px 0; padding: 18px; border: 1px solid #d5d9d9; }
+      [hidden] { display: none; }
+      button, a { cursor: pointer; }
+    </style>
+    <main>
+      <section aria-label="Delivery address"><h2>Delivering to Andreessen Horowitz</h2><p>2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States</p><button id="pickup-disclosure" onclick="window.__pickupOpened = true">FREE pickup available nearby</button></section>
+      <section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>
+      <section class="checkout-card" id="shipping-speed-card">
+        <div class="checkout-card-copy"><h2>Shipping speed</h2><p>Fast delivery $3.99</p></div>
+        <div class="checkout-card-action"><a href="#shipping-speed" id="shipping-speed-change" onclick="event.preventDefault(); document.querySelector('#shipping-speed-options').hidden = false">Change</a></div>
+        <div id="shipping-speed-options" hidden>
+          <label><input type="radio" name="shipping-speed" value="fast" /> Fast delivery $3.99</label>
+          <label><input type="radio" name="shipping-speed" value="standard" /> Standard delivery FREE</label>
+          <label><input type="radio" name="shipping-speed" value="one-day" /> One-Day delivery FREE</label>
+          <label><input type="radio" name="shipping-speed" value="trial" /> Try Prime FREE one-day trial</label>
+        </div>
+      </section>
+      <section aria-label="Order summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p></section>
+    </main>`;
+}
+
 async function main() {
   const server = http.createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/html' });
@@ -159,6 +184,10 @@ async function main() {
     }
     if (pathname === '/checkout/final-review-with-pickup-overlay') {
       response.end(finalReviewWithPickupOverlayHtml());
+      return;
+    }
+    if (pathname === '/checkout/shipping-speed') {
+      response.end(collapsedShippingSpeedHtml());
       return;
     }
     const conflict = pathname === '/different-unit';
@@ -358,6 +387,31 @@ async function main() {
       || !pickupOverlayReceipt) {
       fail(`address_reconciliation_pickup_overlay_not_closed_safely:${JSON.stringify({ pickupOverlayOutcome, pickupOverlayClosed, pickupSelected, pickupOverlaySummary })}`);
     }
+    await page.goto(`${baseUrl}/checkout/shipping-speed`);
+    const shippingSpeedOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'fill_checkout_profile', primeRequired: true, fulfillmentMode: 'home_delivery' },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025',
+        paymentCardLast4: '6383'
+      }
+    });
+    const selectedShippingSpeed = await page.locator('input[name="shipping-speed"]:checked').getAttribute('value');
+    const shippingOptionsVisible = await page.locator('#shipping-speed-options').isVisible();
+    const pickupOpened = await page.evaluate(() => window.__pickupOpened === true);
+    const shippingSpeedSummary = shippingSpeedOutcome?.state?.checkoutSummary || {};
+    if (selectedShippingSpeed !== 'one-day'
+      || !shippingOptionsVisible
+      || pickupOpened
+      || shippingSpeedSummary.deliveryConfirmed !== true
+      || shippingSpeedSummary.selectedDeliveryPrice !== 0
+      || !/delivery option free/i.test(String(shippingSpeedOutcome?.checkoutSelections || ''))) {
+      fail(`address_reconciliation_shipping_speed_not_selected_safely:${JSON.stringify({ shippingSpeedOutcome, selectedShippingSpeed, shippingOptionsVisible, pickupOpened, shippingSpeedSummary })}`);
+    }
     console.log(JSON.stringify({
       ok: true,
       version: manifest.version,
@@ -371,6 +425,7 @@ async function main() {
       closedDeliverySummaryPreferredOverUnrelatedDefaultCheckbox: true,
       pickupLocationExcluded: true,
       pickupOverlayClosedWithoutChangingFulfillment: true,
+      collapsedShippingSpeedChoosesFastestFreeHomeDelivery: true,
       duplicateAddressConfirmationHandled: true,
       differentSuiteRejected: true
     }, null, 2));

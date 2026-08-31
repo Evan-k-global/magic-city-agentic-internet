@@ -325,8 +325,19 @@
 
   function pickupOrLockerControl(control = null) {
     if (!control) return false;
-    const text = compactText(`${visibleControlLabel(control, 220)}\n${controlDescriptor(control)}`, 600);
-    return /\b(?:pick up here|use this pickup|select pickup|pickup location|amazon locker|amazon counter|whole foods|amazon fresh|local market)\b/i.test(text);
+    // Use the control's own text here. Its parent may contain unrelated
+    // checkout copy such as "FREE pickup available nearby", which must not
+    // make a legitimate Shipping speed Change link look like pickup.
+    const directText = compactText([
+      control.innerText,
+      control.textContent,
+      control.value,
+      control.getAttribute?.('aria-label'),
+      control.getAttribute?.('title'),
+      control.getAttribute?.('data-testid'),
+      control.getAttribute?.('href')
+    ].filter(Boolean).join('\n'), 600);
+    return /\b(?:pick up here|use this pickup|select pickup|pickup location|free pickup(?: available)?|amazon locker|amazon counter|whole foods|amazon fresh|local market)\b/i.test(directText);
   }
 
   function interactiveControls(root = null) {
@@ -2213,10 +2224,10 @@
     return true;
   }
 
-  function immediateSafeClick(element, { allowPickupOverlay = false } = {}) {
+  function immediateSafeClick(element, { allowPickupOverlay = false, allowFinalAction = false } = {}) {
     if (!visible(element) || element.disabled) return false;
     const label = textFor(element);
-    if (FINAL_ACTION_PATTERN.test(label) || (!allowPickupOverlay && pickupOrLockerControl(element))) return false;
+    if ((!allowFinalAction && FINAL_ACTION_PATTERN.test(label)) || (!allowPickupOverlay && pickupOrLockerControl(element))) return false;
     element.scrollIntoView({ block: 'center', inline: 'center' });
     try {
       element.click();
@@ -2992,47 +3003,94 @@
     return 9;
   }
 
-  function selectPreferredDeliveryOption({ primeRequired = false } = {}) {
-    const options = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
-      .filter((input) => visible(input))
+  function homeDeliveryOnly(fulfillmentMode = '') {
+    return String(fulfillmentMode || '').trim() !== 'pickup_allowed';
+  }
+
+  function shippingSpeedSections() {
+    const headings = Array.from(interactionRoot().querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
+      .filter(visible)
+      .filter((heading) => /^shipping speed$/i.test(compactText(heading.innerText || heading.textContent || '', 120)));
+    const sections = [];
+    for (const heading of headings) {
+      let node = heading.parentElement;
+      for (let depth = 0; node && node !== document.body && depth < 6; depth += 1, node = node.parentElement) {
+        const text = compactText(node.innerText || node.textContent || '', 3600);
+        const controls = Array.from(node.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]'));
+        const radios = Array.from(node.querySelectorAll('input[type="radio"]'));
+        if (!/\bshipping speed\b/i.test(text) || pickupDeliveryOption(text)) continue;
+        if (controls.length || radios.length) {
+          sections.push(node);
+          break;
+        }
+      }
+    }
+    return [...new Set(sections)];
+  }
+
+  function deliveryOptionEntries({ includeHidden = false, fulfillmentMode = '' } = {}) {
+    const sections = shippingSpeedSections();
+    if (!sections.length) return [];
+    const inputs = [...new Set(sections.flatMap((section) => Array.from(section.querySelectorAll('input[type="radio"]'))))]
+      .filter((input) => includeHidden || visibleChoiceInput(input));
+    return inputs
       .map((input) => {
-        const container = radioContainer(input);
-        const text = compactText(container?.innerText || '', 1000);
-        const shippingish = /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text);
+        const container = input.labels?.[0] || radioContainer(input) || input.parentElement;
+        const text = compactText(container?.innerText || container?.textContent || '', 1000);
+        const shippingish = /\b(delivery|shipping|arrives|receive|get it|standard|free|one.?day|fastest)\b/i.test(text);
         const subscriptionish = promotionalDeliveryOption(text);
         const pickupish = pickupDeliveryOption(text);
         const price = shippingPriceFromText(text);
-        return { input, text, price, speedRank: deliverySpeedRank(text), shippingish, subscriptionish, pickupish };
+        return { input, container, text, price, speedRank: deliverySpeedRank(text), shippingish, subscriptionish, pickupish };
       })
-      .filter((option) => option.shippingish && !option.subscriptionish && !option.pickupish && option.price != null);
+      .filter((option) => option.shippingish && !option.subscriptionish && (!homeDeliveryOnly(fulfillmentMode) || !option.pickupish) && option.price != null);
+  }
+
+  function selectDeliveryOption(option) {
+    if (!option?.input || !visibleChoiceInput(option.input) || option.input.disabled) return false;
+    if (option.input.checked || option.input.getAttribute?.('aria-checked') === 'true') return true;
+    const target = option.input.labels?.[0] && visible(option.input.labels[0])
+      ? option.input.labels[0]
+      : visible(option.container)
+        ? option.container
+        : option.input;
+    if (!immediateSafeClick(target)) return false;
+    return Boolean(option.input.checked || option.input.getAttribute?.('aria-checked') === 'true');
+  }
+
+  function selectPreferredDeliveryOption({ primeRequired = false, fulfillmentMode = '' } = {}) {
+    const options = deliveryOptionEntries({ fulfillmentMode });
     const freeOptions = options.filter((option) => option.price === 0)
       .sort((left, right) => left.speedRank - right.speedRank);
     const paidOptions = options.filter((option) => option.price > 0)
       .sort((left, right) => left.price - right.price || left.speedRank - right.speedRank);
     const best = freeOptions[0] || (!primeRequired ? paidOptions[0] : null);
     if (!best) return '';
-    if (!best.input.checked) immediateSafeClick(best.input);
+    if (!selectDeliveryOption(best)) return '';
     return `delivery option ${best.price === 0 ? 'free' : `$${best.price.toFixed(2)}`}`;
   }
 
-  function deliverySelectionState() {
+  function deliverySelectionState({ fulfillmentMode = '' } = {}) {
     const pageText = pagePlainText(18000);
-    const deliverySectionVisible = /\b(delivery option|shipping option|shipping speed|delivery speed|delivery date|arrives|receive|get it)\b/i.test(pageText);
-    const options = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
-      .map((input) => {
-        const container = radioContainer(input);
-        const text = compactText(container?.innerText || container?.textContent || '', 1000);
-        return {
-          input,
-          text,
-          price: shippingPriceFromText(text),
-          speedRank: deliverySpeedRank(text),
-          shippingish: /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text),
-          subscriptionish: promotionalDeliveryOption(text),
-          pickupish: pickupDeliveryOption(text)
-        };
-      })
-      .filter((option) => option.shippingish && !option.subscriptionish && !option.pickupish && option.price != null);
+    const shippingSections = shippingSpeedSections();
+    const hiddenShippingOptions = deliveryOptionEntries({ includeHidden: true, fulfillmentMode });
+    const options = deliveryOptionEntries({ fulfillmentMode });
+    const deliverySectionVisible = shippingSections.length > 0
+      || /\b(delivery option|shipping option|shipping speed|delivery speed|delivery date|arrives|receive|get it)\b/i.test(pageText);
+    // A named Shipping speed section is an explicit merchant decision point.
+    // Its collapsed choices must be opened and selected; a $0 summary line is
+    // not evidence that the fastest free option was actually chosen.
+    if (shippingSections.length && hiddenShippingOptions.length && !options.length) {
+      return {
+        required: true,
+        confirmed: false,
+        freeAvailable: hiddenShippingOptions.some((option) => option.price === 0),
+        selectedPrice: null,
+        bestPrice: hiddenShippingOptions.filter((option) => option.price === 0)
+          .sort((left, right) => left.speedRank - right.speedRank)[0]?.price ?? null,
+        source: 'shipping_speed_collapsed'
+      };
+    }
     // Final review commonly collapses the shipping choices into its order
     // summary. A verified $0 checkout shipping line is stronger evidence than
     // an absent radio control and must not trigger a pickup/local-market flow.
@@ -3078,15 +3136,28 @@
   // purpose. It can expose standard carrier-speed radios, but must never be
   // used for pickup, locker, Fresh, Counter, or local-market routing.
   function findSafeDeliveryOptionsControl() {
-    const candidate = findSectionBoundChangeControl('delivery');
-    if (!candidate?.control) return null;
-    const section = scopedTextForCorrectionControl(
-      candidate.control,
-      /\b(shipping speed|delivery option|shipping option)\b/i,
-      /\b(pickup|locker|counter|whole foods|amazon fresh|local market|payment method|paying with|delivery address|delivering to)\b/i
-    );
-    if (!section || pickupDeliveryOption(section)) return null;
-    return candidate;
+    for (const section of shippingSpeedSections()) {
+      const sectionText = compactText(section.innerText || section.textContent || '', 3600);
+      if (pickupDeliveryOption(sectionText)) continue;
+      const control = Array.from(section.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]'))
+        .filter(visible)
+        .find((candidate) => /^(?:change|choose|edit)$/i.test(compactText(textFor(candidate), 80)) && !pickupOrLockerControl(candidate));
+      if (control) return { control, label: textFor(control), score: 320 };
+    }
+    return null;
+  }
+
+  async function chooseFastestFreeShipping({ primeRequired = false, fulfillmentMode = '' } = {}) {
+    let selection = selectPreferredDeliveryOption({ primeRequired, fulfillmentMode });
+    if (selection) return { selection, opened: false };
+    const opener = findSafeDeliveryOptionsControl();
+    if (!opener || !immediateSafeClick(opener.control)) return { selection: '', opened: false };
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await waitForPaint(80);
+      selection = selectPreferredDeliveryOption({ primeRequired, fulfillmentMode });
+      if (selection) return { selection, opened: true };
+    }
+    return { selection: '', opened: true };
   }
 
   function findDeclineOfferControl(root = null) {
@@ -3597,9 +3668,10 @@
     const merchantCheckoutDefault = action.saveMerchantCheckoutDefault === true
       ? saveAmazonCheckoutDefault()
       : { attempted: false, saved: false, reason: 'not_requested' };
-    control.scrollIntoView({ block: 'center', inline: 'center' });
     try {
-      control.click();
+      if (!immediateSafeClick(control, { allowFinalAction: true })) {
+        return { completed: false, reason: 'The merchant final order control could not be clicked safely.', state };
+      }
       return {
         completed: true,
         navigationRequested: true,
@@ -3684,7 +3756,13 @@
         filled.push(key.replace(/([A-Z])/g, ' $1').toLowerCase());
       }
     }
-    const deliverySelection = selectPreferredDeliveryOption({ primeRequired: action.primeRequired === true });
+    // The mission binds fulfillmentMode. Home delivery is the default, and a
+    // pickup route is legal only when the signed action explicitly allows it.
+    const deliveryChoice = await chooseFastestFreeShipping({
+      primeRequired: action.primeRequired === true,
+      fulfillmentMode: action.fulfillmentMode
+    });
+    const deliverySelection = deliveryChoice.selection;
     const state = pageState(profile);
     const summary = state.checkoutSummary || {};
     const selections = [...selectedOptions, deliverySelection].filter(Boolean);
@@ -3692,21 +3770,20 @@
     const addressVerification = String(summary.addressVerification || '');
     const completeShippingProfile = fullShippingAddressAvailable(profile);
 
-    // If checkout keeps carrier-speed choices collapsed, expose only the
-    // isolated shipping-speed section. A separate signed follow-up chooses
-    // the fastest free option; no generic delivery or pickup UI is opened.
+    // If the signed Shipping speed section was opened but its radio rows did
+    // not render, re-observe. Do not ever fall back to generic delivery or
+    // pickup controls.
     if (summary.deliverySelectionRequired === true
       && summary.deliveryConfirmed !== true
       && summary.stage !== 'final_review'
       && !deliverySelection) {
-      const openDeliveryOptions = findSafeDeliveryOptionsControl();
-      if (openDeliveryOptions && scheduleSafeClick(openDeliveryOptions.control)) {
+      if (deliveryChoice.opened) {
         return {
           completed: true,
           skipped: false,
           navigationRequested: true,
-          label: compactText(openDeliveryOptions.label || 'Change shipping speed', 140),
-          checkoutSelections: [...selections, 'open standard delivery options'],
+          label: 'Open Shipping speed',
+          checkoutSelections: [...selections, 'open Shipping speed'],
           state
         };
       }
