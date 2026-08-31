@@ -116,12 +116,49 @@ function closedCheckoutSummaryHtml() {
     </main>`;
 }
 
+function finalReviewWithPickupOverlayHtml() {
+  return `<!doctype html>
+    <style>
+      body { font: 16px/1.4 Arial, sans-serif; }
+      main { padding: 28px; }
+      .summary { margin-bottom: 20px; padding: 18px; border: 1px solid #d5d9d9; }
+      button { background: #ffd814; border: 0; border-radius: 18px; padding: 10px 24px; font-weight: 700; }
+      .a-popover { position: fixed; inset: 36px; z-index: 20; background: white; border: 2px solid #f08804; padding: 24px; }
+      .a-popover button.close { position: absolute; top: 12px; right: 12px; background: white; border: 1px solid #777; }
+    </style>
+    <main>
+      <section class="summary" aria-label="Delivery address">
+        <h2>Delivering to Andreessen Horowitz</h2>
+        <p>2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States</p>
+        <a href="#pickup">FREE pickup available nearby</a>
+      </section>
+      <section class="summary" aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>
+      <section class="summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p><button>Place your order</button></section>
+      <div class="a-popover" id="pickup-overlay">
+        <button class="close" aria-label="Close" onclick="closePickup()">X</button>
+        <h2>Select a pickup location</h2>
+        <p>Amazon Counter at Whole Foods Market</p>
+        <button onclick="window.__pickupSelected = true">Pick up here</button>
+      </div>
+    </main>
+    <script>
+      function closePickup() {
+        window.__pickupClosed = true;
+        document.querySelector('#pickup-overlay')?.remove();
+      }
+    </script>`;
+}
+
 async function main() {
   const server = http.createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/html' });
     const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
     if (pathname === '/closed-summary') {
       response.end(closedCheckoutSummaryHtml());
+      return;
+    }
+    if (pathname === '/checkout/final-review-with-pickup-overlay') {
+      response.end(finalReviewWithPickupOverlayHtml());
       return;
     }
     const conflict = pathname === '/different-unit';
@@ -291,8 +328,35 @@ async function main() {
     const closedSummary = closedSummaryOutcome?.state?.checkoutSummary || {};
     if (closedSummary.addressMatches !== true
       || closedSummary.addressVerification !== 'matched'
-      || closedSummary.addressVerificationSource !== 'checkout_summary') {
+      || !['checkout_summary', 'checkout_summary_final_review'].includes(closedSummary.addressVerificationSource)) {
       fail(`address_reconciliation_closed_summary_misclassified:${JSON.stringify({ closedSummaryOutcome, closedSummary })}`);
+    }
+    await page.goto(`${baseUrl}/checkout/final-review-with-pickup-overlay`);
+    const pickupOverlayOutcome = await execute({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: {
+        contactName: 'Andreessen Horowitz',
+        streetAddress: '2865 Sand Hill Road Ste 101',
+        shippingCity: 'Menlo Park',
+        shippingState: 'CA',
+        zipCode: '94025',
+        paymentCardLast4: '6383'
+      }
+    });
+    await page.waitForTimeout(250);
+    const pickupOverlayClosed = await page.evaluate(() => window.__pickupClosed === true);
+    const pickupSelected = await page.evaluate(() => window.__pickupSelected === true);
+    const pickupOverlaySummary = pickupOverlayOutcome?.state?.checkoutSummary || {};
+    const pickupOverlayReceipt = (pickupOverlaySummary.browserActionReceipts || [])
+      .some((receipt) => receipt?.kind === 'pickup_overlay_close');
+    if (!pickupOverlayOutcome?.checkoutPickupModalClosed
+      || !pickupOverlayClosed
+      || pickupSelected
+      || !pickupOverlaySummary.finalReviewReady
+      || !pickupOverlaySummary.finalReviewDeliverySummaryMatches
+      || !pickupOverlayReceipt) {
+      fail(`address_reconciliation_pickup_overlay_not_closed_safely:${JSON.stringify({ pickupOverlayOutcome, pickupOverlayClosed, pickupSelected, pickupOverlaySummary })}`);
     }
     console.log(JSON.stringify({
       ok: true,
@@ -306,6 +370,7 @@ async function main() {
       unreadableRowIsNotMisreportedAsMismatch: true,
       closedDeliverySummaryPreferredOverUnrelatedDefaultCheckbox: true,
       pickupLocationExcluded: true,
+      pickupOverlayClosedWithoutChangingFulfillment: true,
       duplicateAddressConfirmationHandled: true,
       differentSuiteRejected: true
     }, null, 2));

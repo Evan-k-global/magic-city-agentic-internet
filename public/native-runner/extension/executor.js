@@ -11,6 +11,9 @@
   const DECLINE_OFFER_PATTERN = /^(?:no thanks|not now|skip|decline|continue without(?: prime| trial| offer| add-ons?)?|continue to checkout|continue without benefits|maybe later|keep my current delivery|do not add|no,? thanks|i'?ll pass)$/i;
   const POSITIVE_OFFER_PATTERN = /(?:get|join|start|try|add|accept|yes|claim).*(?:prime|trial|membership|free one-day|protection|warranty)|subscribe\s*&\s*save/i;
   const SELECTED_CANDIDATE_TTL_MS = 2 * 60 * 1000;
+  const RECENT_BROWSER_ACTIONS_LIMIT = 12;
+  const recentBrowserActions = [];
+  let activeActionContext = null;
   const US_STATE_CODES = {
     alabama: 'al', alaska: 'ak', arizona: 'az', arkansas: 'ar', california: 'ca', colorado: 'co', connecticut: 'ct', delaware: 'de', florida: 'fl', georgia: 'ga', hawaii: 'hi', idaho: 'id', illinois: 'il', indiana: 'in', iowa: 'ia', kansas: 'ks', kentucky: 'ky', louisiana: 'la', maine: 'me', maryland: 'md', massachusetts: 'ma', michigan: 'mi', minnesota: 'mn', mississippi: 'ms', missouri: 'mo', montana: 'mt', nebraska: 'ne', nevada: 'nv', 'new hampshire': 'nh', 'new jersey': 'nj', 'new mexico': 'nm', 'new york': 'ny', 'north carolina': 'nc', 'north dakota': 'nd', ohio: 'oh', oklahoma: 'ok', oregon: 'or', pennsylvania: 'pa', 'rhode island': 'ri', 'south carolina': 'sc', 'south dakota': 'sd', tennessee: 'tn', texas: 'tx', utah: 'ut', vermont: 'vt', virginia: 'va', washington: 'wa', 'west virginia': 'wv', wisconsin: 'wi', wyoming: 'wy'
   };
@@ -85,6 +88,39 @@
       element?.getAttribute?.('data-action'),
       element?.getAttribute?.('data-testid')
     ].filter(Boolean).join(' '), 600);
+  }
+
+  // Keep a compact, non-sensitive trace of merchant clicks. It is deliberately
+  // categorical: no address text, card number, or merchant-page body is kept.
+  function browserClickKind(element) {
+    const directLabel = compactText([
+      element?.getAttribute?.('aria-label'),
+      element?.getAttribute?.('title'),
+      element?.value,
+      element?.innerText,
+      element?.textContent
+    ].filter(Boolean).join(' '), 80);
+    if (/(?:^|\s)(?:x|×|close|cancel|done)(?:\s|$)/i.test(directLabel)) return 'pickup_overlay_close';
+    const text = compactText(`${visibleControlLabel(element, 180)}\n${controlDescriptor(element)}`, 400);
+    if (/\bplace(?: your)? order|submit order|confirm and pay\b/i.test(text)) return 'final_order';
+    if (/\buse this payment method\b/i.test(text)) return 'payment_confirm';
+    if (/\bdeliver to this address|use this address\b/i.test(text)) return 'address_confirm';
+    if (/\bdefault to this (?:delivery address|address) and payment method\b/i.test(text)) return 'merchant_checkout_default';
+    return 'safe_browser_click';
+  }
+
+  function recordBrowserClick(element, context = activeActionContext) {
+    recentBrowserActions.push({
+      actionId: String(context?.actionId || '').slice(0, 96),
+      actionType: String(context?.actionType || '').slice(0, 64),
+      intent: String(context?.intent || '').slice(0, 64),
+      kind: browserClickKind(element),
+      path: String(location.pathname || '').slice(0, 240),
+      at: new Date().toISOString()
+    });
+    if (recentBrowserActions.length > RECENT_BROWSER_ACTIONS_LIMIT) {
+      recentBrowserActions.splice(0, recentBrowserActions.length - RECENT_BROWSER_ACTIONS_LIMIT);
+    }
   }
 
   function normalized(value = '') {
@@ -168,11 +204,58 @@
     return dialogs.at(-1) || null;
   }
 
+  function waitForPaint(milliseconds = 60) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
   function isPickupChooserRoot(root = null) {
     if (!root) return false;
     const text = compactText(root.innerText || root.textContent || '', 5000);
-    return /\b(?:select a pickup location|find pickup locations near|pick up here|amazon locker|amazon counter|whole foods market|free pickup)\b/i.test(text)
+    return /\b(?:select a pickup location|find pickup locations near|pick up here|amazon locker|amazon counter|whole foods market)\b/i.test(text)
       && !/\b(?:add|edit|enter)\s+(?:a\s+)?(?:new\s+)?(?:delivery|shipping)?\s*address\b|\bstreet address\b|\bzip code\b/i.test(text);
+  }
+
+  // Amazon's pickup sheet is not consistently exposed as a semantic dialog.
+  // Find a visible, bounded overlay by its own pickup content, never by the
+  // checkout page that happens to contain a nearby "FREE pickup" disclosure.
+  function visiblePickupChooserRoots() {
+    const candidates = new Set();
+    const selectors = [
+      'dialog[open]', '[aria-modal="true"]', '[role="dialog"]',
+      '.a-popover', '.a-modal-scroller', '[class*="popover" i]', '[class*="modal" i]'
+    ];
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((node) => candidates.add(node));
+    }
+    document.querySelectorAll('h1, h2, h3, [role="heading"], button, [role="button"]').forEach((node) => {
+      const text = compactText(node.innerText || node.textContent || '', 240);
+      if (!/select a pickup location|find pickup locations near|pick up here|amazon locker|amazon counter|whole foods market/i.test(text)) return;
+      let parent = node.parentElement;
+      for (let depth = 0; parent && parent !== document.body && depth < 7; depth += 1, parent = parent.parentElement) {
+        candidates.add(parent);
+      }
+    });
+    return Array.from(candidates)
+      .filter((node) => node && node !== document.body && visible(node) && isPickupChooserRoot(node))
+      .sort((left, right) => {
+        const score = (node) => {
+          const text = compactText(node.innerText || node.textContent || '', 1500);
+          const hasClose = Array.from(node.querySelectorAll('button, a, [role="button"]'))
+            .some((control) => /^(?:x|×|close|cancel)$/i.test(compactText(visibleControlLabel(control, 80) || textFor(control), 80)));
+          const structuralSignal = /select a pickup location|find pickup locations near/i.test(text);
+          const style = getComputedStyle(node);
+          const positioned = /fixed|absolute/i.test(style.position || '');
+          return (hasClose ? 100 : 0) + (structuralSignal ? 40 : 0) + (positioned ? 20 : 0);
+        };
+        const scoreDifference = score(right) - score(left);
+        if (scoreDifference) return scoreDifference;
+        const depth = (node) => {
+          let value = 0;
+          for (let current = node; current && current !== document.body; current = current.parentElement) value += 1;
+          return value;
+        };
+        return depth(right) - depth(left);
+      });
   }
 
   function checkoutFinalProgressControlVisible() {
@@ -185,43 +268,65 @@
   }
 
   function nonBlockingCheckoutPickupModal() {
-    const modal = activeModalRoot();
-    if (!modal || !isPickupChooserRoot(modal)) return null;
+    const modal = visiblePickupChooserRoots()[0] || null;
+    if (!modal) return null;
     const checkoutish = /\/checkout|\/buy|\/gp\/buy/i.test(String(location.pathname || ''));
     if (!checkoutish || !checkoutFinalProgressControlVisible()) return null;
     return modal;
   }
 
-  function closeNonBlockingCheckoutPickupModal() {
+  async function closeNonBlockingCheckoutPickupModal() {
     const modal = nonBlockingCheckoutPickupModal();
     if (!modal) return { closed: false, reason: 'not_visible' };
     const closeControl = Array.from(modal.querySelectorAll('button, a, input[type="button"], [role="button"]'))
       .filter(visible)
       .map((control, index) => {
-        const label = compactText(visibleControlLabel(control, 120) || textFor(control), 120);
+        // Amazon's close button may inherit the entire pickup sheet through
+        // its parent. Score the button's own label, never the sheet text.
+        const directLabel = compactText([
+          control.getAttribute?.('aria-label'),
+          control.getAttribute?.('title'),
+          control.value,
+          control.innerText,
+          control.textContent
+        ].filter(Boolean).join(' '), 120);
+        const label = compactText(visibleControlLabel(control, 120) || directLabel, 120);
         const descriptor = compactText(controlDescriptor(control), 240);
-        const closeish = /^(?:x|×|close|cancel|done)$/i.test(label)
-          || /\b(?:close|cancel)\b/i.test(`${label}\n${descriptor}`);
-        const risky = /\b(?:pick up here|use this pickup|select pickup|place(?: your)? order|use this payment method|deliver to this address)\b/i.test(`${label}\n${descriptor}`);
-        return { control, score: (closeish ? 100 : 0) - (risky ? 500 : 0), index };
+        const directClose = /(?:^|\s)(?:x|×|close|cancel|done)(?:\s|$)/i.test(directLabel);
+        const closeish = directClose || /\b(?:close|cancel)\b/i.test(`${directLabel}\n${descriptor}`);
+        const risky = !directClose && /\b(?:pick up here|use this pickup|select pickup|place(?: your)? order|use this payment method|deliver to this address)\b/i.test(`${label}\n${descriptor}`);
+        return { control, score: (directClose ? 1000 : closeish ? 100 : 0) - (risky ? 500 : 0), index };
       })
       .filter((entry) => entry.score > 0)
       .sort((left, right) => right.score - left.score || left.index - right.index)[0]?.control;
-    if (closeControl && immediateSafeClick(closeControl)) {
-      return { closed: true, method: 'close_control' };
+    const clickedCloseControl = Boolean(closeControl && immediateSafeClick(closeControl, { allowPickupOverlay: true }));
+    const method = clickedCloseControl ? 'close_control' : 'escape';
+    if (!clickedCloseControl) {
+      try {
+        modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+      } catch {
+        return { closed: false, reason: 'close_failed' };
+      }
     }
-    try {
-      modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
-      return { closed: true, method: 'escape' };
-    } catch {
-      return { closed: false, reason: 'close_failed' };
+    // Do not claim success simply because a close event was dispatched. The
+    // next checkout primitive must see the overlay gone before it can act.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await waitForPaint(70);
+      if (!visiblePickupChooserRoots().length) return { closed: true, method };
     }
+    return { closed: false, closeRequested: true, reason: 'pickup_overlay_still_visible' };
   }
 
   function interactionRoot() {
     if (nonBlockingCheckoutPickupModal()) return document;
     return activeModalRoot() || document;
+  }
+
+  function pickupOrLockerControl(control = null) {
+    if (!control) return false;
+    const text = compactText(`${visibleControlLabel(control, 220)}\n${controlDescriptor(control)}`, 600);
+    return /\b(?:pick up here|use this pickup|select pickup|pickup location|amazon locker|amazon counter|whole foods|amazon fresh|local market)\b/i.test(text);
   }
 
   function interactiveControls(root = null) {
@@ -688,7 +793,9 @@
   }
 
   function closedDeliverySummaryObservation(profile = {}) {
-    const root = interactionRoot();
+    // The final-review delivery summary remains meaningful even if an
+    // unrelated pickup overlay is mounted above it.
+    const root = document;
     const candidates = Array.from(root.querySelectorAll([
       'h1', 'h2', 'h3', '[role="heading"]',
       '[aria-label*="delivery" i]', '[aria-label*="shipping" i]',
@@ -718,6 +825,7 @@
   function visibleAddressChoices() {
     return Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
       .filter((input) => visibleChoiceInput(input))
+      .filter((input) => !visiblePickupChooserRoots().some((root) => root.contains(input)))
       .map((input) => ({ input, context: addressChoiceContext(input) }))
       .filter(({ context }) => Boolean(context));
   }
@@ -1954,12 +2062,29 @@
     const expectedAddressText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
     const hasAddressPreset = Boolean(expectedAddressText);
     const hasCardPreset = Boolean(expectedLast4);
-    const addressObservation = checkoutOpen && hasAddressPreset
+    let addressObservation = checkoutOpen && hasAddressPreset
       ? observeSelectedAddress(profile)
       // An address profile is not an address-verification problem while the
       // shopper is still on a catalog or cart surface. Emitting "unverified"
       // here made the runner stop after add-to-cart before checkout existed.
       : { status: 'not_requested', source: 'none', diagnostics: {} };
+    const closedDeliverySummary = checkoutOpen && hasAddressPreset
+      ? closedDeliverySummaryObservation(profile)
+      : { visible: false, matches: false };
+    // A closed "Delivering to" summary on Amazon's final review is the
+    // authoritative delivery identity. An unreadable address picker or a
+    // mounted pickup sheet must not regress that verified state back to an
+    // address mismatch.
+    if (classification.state === 'final_review' && closedDeliverySummary.visible && closedDeliverySummary.matches) {
+      addressObservation = {
+        status: 'matched',
+        source: 'checkout_summary_final_review',
+        diagnostics: {
+          ...addressObservation.diagnostics,
+          finalReviewSummaryMatched: true
+        }
+      };
+    }
     // A closed "Delivering to" summary and an open address picker both contain
     // address language. Only the picker exposes a pending address selection.
     // Never let a mounted-but-inactive picker turn a verified summary into a
@@ -2047,6 +2172,7 @@
       addressVerification: addressObservation.status,
       addressVerificationSource: addressObservation.source,
       addressVerificationDiagnostics: addressObservation.diagnostics,
+      finalReviewDeliverySummaryMatches: classification.state === 'final_review' && closedDeliverySummary.matches,
       addressConfirmationRequired,
       paymentMethodConfirmationRequired,
       addressConfirmed,
@@ -2060,6 +2186,7 @@
       finalReviewReady,
       paymentNeedsHuman,
       paymentIssue,
+      browserActionReceipts: recentBrowserActions.slice(),
       availableActions: controls
         .filter((label) => /cart|checkout|continue|shipping|address|payment|place|order/i.test(label))
         .slice(0, 4)
@@ -2069,14 +2196,16 @@
   function scheduleSafeClick(element) {
     if (!visible(element) || element.disabled) return false;
     const label = textFor(element);
-    if (FINAL_ACTION_PATTERN.test(label)) return false;
+    if (FINAL_ACTION_PATTERN.test(label) || pickupOrLockerControl(element)) return false;
     element.scrollIntoView({ block: 'center', inline: 'center' });
     // Let the runtime serialize the signed response before a merchant
     // navigation can unload this content-script message channel.
+    const actionContext = activeActionContext;
     setTimeout(() => {
       if (!visible(element) || element.disabled) return;
       try {
         element.click();
+        recordBrowserClick(element, actionContext);
       } catch {
         // The next inspection step reports a safe handoff when navigation fails.
       }
@@ -2084,13 +2213,14 @@
     return true;
   }
 
-  function immediateSafeClick(element) {
+  function immediateSafeClick(element, { allowPickupOverlay = false } = {}) {
     if (!visible(element) || element.disabled) return false;
     const label = textFor(element);
-    if (FINAL_ACTION_PATTERN.test(label)) return false;
+    if (FINAL_ACTION_PATTERN.test(label) || (!allowPickupOverlay && pickupOrLockerControl(element))) return false;
     element.scrollIntoView({ block: 'center', inline: 'center' });
     try {
       element.click();
+      recordBrowserClick(element);
       return true;
     } catch {
       return false;
@@ -2943,6 +3073,22 @@
     return false;
   }
 
+  // Unlike generic delivery links, a Change control bound to a visible
+  // "Shipping speed" / "Delivery option" section has a narrowly defined
+  // purpose. It can expose standard carrier-speed radios, but must never be
+  // used for pickup, locker, Fresh, Counter, or local-market routing.
+  function findSafeDeliveryOptionsControl() {
+    const candidate = findSectionBoundChangeControl('delivery');
+    if (!candidate?.control) return null;
+    const section = scopedTextForCorrectionControl(
+      candidate.control,
+      /\b(shipping speed|delivery option|shipping option)\b/i,
+      /\b(pickup|locker|counter|whole foods|amazon fresh|local market|payment method|paying with|delivery address|delivering to)\b/i
+    );
+    if (!section || pickupDeliveryOption(section)) return null;
+    return candidate;
+  }
+
   function findDeclineOfferControl(root = null) {
     const controls = interactiveControls(root)
       .map((control, index) => {
@@ -3390,11 +3536,18 @@
     return { attempted: true, saved: isChecked(), reason: isChecked() ? 'enabled' : 'not_confirmed' };
   }
 
-  function submitFinalOrder(action = {}, profile = {}) {
+  async function submitFinalOrder(action = {}, profile = {}) {
     if (action.autoSubmitAfterVerifiedCheckout !== true) {
       return { completed: false, reason: 'This mission did not authorize automatic final order submission.' };
     }
-    const closedPickupModal = closeNonBlockingCheckoutPickupModal();
+    const closedPickupModal = await closeNonBlockingCheckoutPickupModal();
+    if (closedPickupModal.closeRequested && !closedPickupModal.closed) {
+      return {
+        completed: false,
+        reason: 'An unexpected pickup overlay remained open after Magic City tried to close it. No delivery or pickup change was made.',
+        state: pageState(profile)
+      };
+    }
     const state = pageState(profile);
     const summary = state.checkoutSummary || {};
     if (state.orderSubmitted) {
@@ -3461,8 +3614,8 @@
     }
   }
 
-  function fillCheckoutProfile(profile = {}, action = {}) {
-    const closedPickupModal = closeNonBlockingCheckoutPickupModal();
+  async function fillCheckoutProfile(profile = {}, action = {}) {
+    const closedPickupModal = await closeNonBlockingCheckoutPickupModal();
     if (closedPickupModal.closed) {
       return {
         completed: true,
@@ -3470,6 +3623,24 @@
         checkoutPickupModalClosed: true,
         label: 'Closed pickup chooser',
         state: pageState(profile)
+      };
+    }
+    if (closedPickupModal.closeRequested) {
+      return {
+        completed: false,
+        reason: 'An unexpected pickup overlay remained open after Magic City tried to close it. No delivery or pickup change was made.',
+        state: pageState(profile)
+      };
+    }
+    // Once Amazon exposes a verified final review, do not reopen address or
+    // delivery controls. The signed final-submit action owns the next step.
+    const existingState = pageState(profile);
+    if (existingState.checkoutSummary?.finalReviewReady === true) {
+      return {
+        completed: true,
+        skipped: true,
+        reason: 'Verified final review is already ready; preserving the merchant checkout state.',
+        state: existingState
       };
     }
     const rawPageText = pagePlainText(30000);
@@ -3520,6 +3691,26 @@
     const addressMatches = summary.addressMatches;
     const addressVerification = String(summary.addressVerification || '');
     const completeShippingProfile = fullShippingAddressAvailable(profile);
+
+    // If checkout keeps carrier-speed choices collapsed, expose only the
+    // isolated shipping-speed section. A separate signed follow-up chooses
+    // the fastest free option; no generic delivery or pickup UI is opened.
+    if (summary.deliverySelectionRequired === true
+      && summary.deliveryConfirmed !== true
+      && summary.stage !== 'final_review'
+      && !deliverySelection) {
+      const openDeliveryOptions = findSafeDeliveryOptionsControl();
+      if (openDeliveryOptions && scheduleSafeClick(openDeliveryOptions.control)) {
+        return {
+          completed: true,
+          skipped: false,
+          navigationRequested: true,
+          label: compactText(openDeliveryOptions.label || 'Change shipping speed', 140),
+          checkoutSelections: [...selections, 'open standard delivery options'],
+          state
+        };
+      }
+    }
 
     // Confirming an exact saved-card selection is a non-final checkout step.
     // Raw card entry and the final order action remain hard boundaries.
@@ -3744,32 +3935,42 @@
 
   async function executePlanStep(action = {}, checkoutProfile = null) {
     if (!action || typeof action !== 'object') return { completed: false, reason: 'Invalid plan action.' };
-    if (action.type === 'inspect' || action.type === 'pause') return { completed: true, state: pageState(checkoutProfile || {}) };
-    if (action.type === 'search') return { ...(await runSearch(action.query)), state: pageState(checkoutProfile || {}) };
-    if (action.type === 'select_candidate') {
-      const outcome = selectCandidate(action);
-      if (outcome.completed && outcome.searchResultSelected === true) {
-        return { ...outcome, state: compactPlanStepState({ candidateSelected: true }) };
+    const previousActionContext = activeActionContext;
+    activeActionContext = {
+      actionId: action.id || '',
+      actionType: action.type || '',
+      intent: action.intent || ''
+    };
+    try {
+      if (action.type === 'inspect' || action.type === 'pause') return { completed: true, state: pageState(checkoutProfile || {}) };
+      if (action.type === 'search') return { ...(await runSearch(action.query)), state: pageState(checkoutProfile || {}) };
+      if (action.type === 'select_candidate') {
+        const outcome = selectCandidate(action);
+        if (outcome.completed && outcome.searchResultSelected === true) {
+          return { ...outcome, state: compactPlanStepState({ candidateSelected: true }) };
+        }
+        return { ...outcome, state: pageState(checkoutProfile || {}) };
       }
-      return { ...outcome, state: pageState(checkoutProfile || {}) };
-    }
-    if (action.type === 'navigate' && action.intent === 'open_cart') {
-      const outcome = clickIntent('open_cart', action, checkoutProfile || {});
-      return { ...outcome, state: compactPlanStepState({ cartOpenStarted: true }) };
-    }
-    if (action.type === 'click_intent') {
-      const outcome = clickIntent(action.intent, action, checkoutProfile || {});
-      if (action.intent === 'add_to_cart' && outcome.completed && outcome.directSearchResultCart === true) {
-        return { ...outcome, state: compactPlanStepState({ cartActionStarted: true }) };
+      if (action.type === 'navigate' && action.intent === 'open_cart') {
+        const outcome = clickIntent('open_cart', action, checkoutProfile || {});
+        return { ...outcome, state: compactPlanStepState({ cartOpenStarted: true }) };
       }
-      if (action.intent === 'checkout' && outcome.completed && outcome.cartCheckoutStarted === true) {
-        return outcome;
+      if (action.type === 'click_intent') {
+        const outcome = clickIntent(action.intent, action, checkoutProfile || {});
+        if (action.intent === 'add_to_cart' && outcome.completed && outcome.directSearchResultCart === true) {
+          return { ...outcome, state: compactPlanStepState({ cartActionStarted: true }) };
+        }
+        if (action.intent === 'checkout' && outcome.completed && outcome.cartCheckoutStarted === true) {
+          return outcome;
+        }
+        return { ...outcome, state: pageState(checkoutProfile || {}) };
       }
-      return { ...outcome, state: pageState(checkoutProfile || {}) };
+      if (action.type === 'fill_checkout_profile') return await fillCheckoutProfile(checkoutProfile || {}, action);
+      if (action.type === 'final_submit') return await submitFinalOrder(action, checkoutProfile || {});
+      return { completed: false, reason: 'Unsupported local plan action.' };
+    } finally {
+      activeActionContext = previousActionContext;
     }
-    if (action.type === 'fill_checkout_profile') return fillCheckoutProfile(checkoutProfile || {}, action);
-    if (action.type === 'final_submit') return submitFinalOrder(action, checkoutProfile || {});
-    return { completed: false, reason: 'Unsupported local plan action.' };
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

@@ -393,6 +393,11 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   const fulfillmentPolicy = String(session.extensionFulfillmentPolicy || (
     fastAmazonCatalogPlan ? 'amazon_free_shipping_preferred' : 'merchant_default'
   ));
+  // Home delivery is the retail default. Pickup needs explicit, separately
+  // signed consent and is never inferred from a merchant promotion.
+  const fulfillmentMode = String(session.extensionFulfillmentMode || '').trim() === 'pickup_allowed'
+    ? 'pickup_allowed'
+    : 'home_delivery';
   // Keep the existing policy name for older published runners, while adding an
   // explicit capability flag that newer runners enforce as Prime-only.
   const primeRequired = session.extensionPrimeRequired === true
@@ -591,9 +596,12 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })
         ])
     : [];
-  const policyBoundActions = fulfillmentPolicy === 'merchant_default' && !primeRequired
-    ? actions
-    : actions.map((action) => ({ ...action, fulfillmentPolicy, primeRequired }));
+  const policyBoundActions = actions.map((action) => ({
+    ...action,
+    fulfillmentPolicy,
+    fulfillmentMode,
+    primeRequired
+  }));
   const unsigned = {
     schema: BROWSER_EXTENSION_PLAN_SCHEMA,
     protocol: BROWSER_EXTENSION_PLAN_PROTOCOL,
@@ -633,6 +641,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     budgetScope,
     budgetBasis,
     fulfillmentPolicy,
+    fulfillmentMode,
     fulfillmentScope: fastAmazonCatalogPlan ? 'amazon_catalog_prime_only' : 'merchant_default',
     primeRequired,
     allowAmazonLocalMarket: false,

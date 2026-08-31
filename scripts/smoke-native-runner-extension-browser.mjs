@@ -656,8 +656,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       : '';
     const pickupModal = checkoutFixture.showPickupModal
       ? [
-          `<div id="pickup-modal" role="dialog" aria-modal="true"${checkoutFixture.showPickupDisclosure ? ' hidden' : ''} style="position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto">`,
-          '<button id="pickup-close" aria-label="Close" onclick="document.querySelector(\'#pickup-modal\').remove()">×</button>',
+          `<div id="pickup-modal" class="a-popover a-popover-modal"${checkoutFixture.showPickupDisclosure ? ' hidden' : ''} style="position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto">`,
+          '<button id="pickup-close" aria-label="Close" onclick="sessionStorage.setItem(\'magic-city-pickup-overlay-closed\', \'1\'); document.querySelector(\'#pickup-modal\').remove()">×</button>',
           '<h2>Select a pickup location</h2>',
           '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
           '<section><h3>Amazon Counter at Whole Foods Market</h3><p>774 Emerson St, Palo Alto, CA 94301</p><p>FREE pickup Friday, Aug 28</p><button onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-selected\')">Pick up here</button></section>',
@@ -2915,11 +2915,10 @@ async function main() {
       document.querySelector('main')?.appendChild(unrelated);
       const pickupModal = document.createElement('div');
       pickupModal.id = 'pickup-modal';
-      pickupModal.setAttribute('role', 'dialog');
-      pickupModal.setAttribute('aria-modal', 'true');
+      pickupModal.className = 'a-popover a-popover-modal';
       pickupModal.style.cssText = 'position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto';
       pickupModal.innerHTML = [
-        '<button id="pickup-close" aria-label="Close" onclick="document.querySelector(\'#pickup-modal\').remove()">×</button>',
+        '<button id="pickup-close" aria-label="Close" onclick="sessionStorage.setItem(\'magic-city-pickup-overlay-closed\', \'1\'); document.querySelector(\'#pickup-modal\').remove()">×</button>',
         '<h2>Select a pickup location</h2>',
         '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
         '<section><h3>Amazon Counter at Whole Foods Market</h3><p>774 Emerson St, Palo Alto, CA 94301</p><p>FREE pickup Friday, Aug 28</p><button onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-selected\')">Pick up here</button></section>'
@@ -2984,6 +2983,10 @@ async function main() {
     const reviewEvents = await preparedReviewPage.evaluate(() => window.__checkoutEvents || []);
     if (reviewEvents.includes('bad-pickup-selected') || reviewEvents.includes('bad-pickup-disclosure-opened')) {
       fail(`browser_extension_final_review_selected_pickup:${reviewEvents.join(',')}`);
+    }
+    const pickupOverlayClosed = await preparedReviewPage.evaluate(() => sessionStorage.getItem('magic-city-pickup-overlay-closed'));
+    if (pickupOverlayClosed !== '1') {
+      fail(`browser_extension_final_review_pickup_overlay_not_closed:${pickupOverlayClosed || 'missing'}`);
     }
     recordPurchaseScenario('Manual final-review handoff resumes in the same prepared checkout tab', {
       resumedSteps: resumeActionIds,

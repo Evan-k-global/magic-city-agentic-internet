@@ -1677,6 +1677,19 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
     : Array.isArray(plan?.shoppingItems)
       ? Math.min(plan.shoppingItems.length, MAX_PLANNED_BASKET_ITEMS)
       : 1;
+  // The final review is an immutable checkout boundary once Amazon shows the
+  // closed delivery and payment summaries, the expected card/address match,
+  // and authoritative $0 shipping. Do not let a stale or unreadable picker
+  // observation reopen a verified checkout state.
+  const verifiedFinalReview = Boolean(
+    stage === 'final_review'
+    && summary.finalReviewReady === true
+    && summary.checkoutProfileVerified === true
+    && summary.addressMatches === true
+    && summary.cardMatches === true
+    && summary.shippingTotalEvidence?.authoritative === true
+    && parseUsdAmount(summary.shippingTotal) === 0
+  );
   if (
     budgetScope === 'incremental_cart_addition' &&
     checkoutish &&
@@ -1737,6 +1750,7 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
       };
     }
   }
+  if (verifiedFinalReview) return null;
   if (checkoutish && summary.addressVerification === 'unverified') {
     return {
       state: 'address_verification_required',
