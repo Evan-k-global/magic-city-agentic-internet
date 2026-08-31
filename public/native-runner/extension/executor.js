@@ -413,12 +413,41 @@
     return fallback;
   }
 
-  function selectPaymentChoiceInput(input) {
+  function paymentChoiceClickTarget(input, context = null) {
+    if (!input) return null;
+    const expected = String(context?.endings?.[0] || '').replace(/\D/g, '').slice(-4);
+    const candidates = [
+      input.labels?.[0],
+      input.closest?.('label, [role="radio"], [role="option"], [data-testid*="payment" i], [id*="payment" i], [class*="payment" i], [class*="card" i]'),
+      context?.node,
+      radioContainer(input),
+      input.parentElement
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      if (!visible(candidate) || candidate.disabled || candidate.getAttribute?.('aria-disabled') === 'true') continue;
+      const endings = cardEndingMentions(compactText([
+        candidate.innerText || candidate.textContent || '',
+        candidate.getAttribute?.('aria-label') || '',
+        ariaLabelledText(candidate)
+      ].filter(Boolean).join('\n'), 1400));
+      // A broad checkout section can mention several cards. A row click is
+      // safe only when this exact visible target names the intended card.
+      if (expected && (!endings.includes(expected) || endings.some((ending) => ending !== expected))) continue;
+      return candidate;
+    }
+    return input;
+  }
+
+  function selectPaymentChoiceInput(input, context = null) {
     if (!input || input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) return false;
     if (input.checked || input.getAttribute?.('aria-checked') === 'true') return true;
+    const target = paymentChoiceClickTarget(input, context);
     try {
-      input.scrollIntoView({ block: 'center', inline: 'center' });
-      input.click();
+      target?.scrollIntoView?.({ block: 'center', inline: 'center' });
+      // Amazon's saved-card radios can be represented by a sibling row. Click
+      // that row first, then use the native input only as a narrow fallback.
+      if (target && target !== input) target.click();
+      if (!input.checked && input.getAttribute?.('aria-checked') !== 'true') input.click();
       return Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true');
     } catch {
       return false;
@@ -2442,7 +2471,7 @@
       const paymentChoice = expectedLast4 ? paymentChoiceContext(input, expectedLast4) : null;
       const addressChoice = shippingText ? addressChoiceContext(input) : null;
       if (expectedLast4 && !input.checked && paymentChoice?.endings?.includes(expectedLast4)) {
-        if (selectPaymentChoiceInput(input)) {
+        if (selectPaymentChoiceInput(input, paymentChoice)) {
           selected.push('matching payment card');
         }
         continue;
@@ -2485,7 +2514,10 @@
     }
     if (expectedLast4 && !selectedKinds.has('matching payment card')) {
       const matchingPaymentChoice = findMatchingStoredPaymentChoice(profile);
-      if (matchingPaymentChoice && immediateSafeClick(matchingPaymentChoice.target)) {
+      if (matchingPaymentChoice && selectPaymentChoiceInput(
+        matchingPaymentChoice.input,
+        matchingPaymentChoice.context
+      )) {
         // Amazon often updates the checked radio and summary asynchronously.
         // Record the safe click now; fillCheckoutProfile re-observes before it
         // confirms the card or decides that the mismatch remains.
@@ -2519,16 +2551,6 @@
     return entries[0] || null;
   }
 
-  function paymentChoiceClickTarget(control) {
-    if (!control) return null;
-    if (String(control.tagName || '').toLowerCase() === 'input') {
-      return control.labels?.[0]
-        || control.closest?.('label, [role="radio"], [role="option"], [data-testid*="payment" i], [id*="payment" i], [class*="payment" i]')
-        || control;
-    }
-    return control;
-  }
-
   function findMatchingStoredPaymentChoice(profile = {}) {
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     if (!expectedLast4) return null;
@@ -2538,7 +2560,9 @@
       const context = paymentChoiceContext(input, expectedLast4);
       if (!context?.endings?.includes(expectedLast4)) continue;
       return {
-        target: input,
+        input,
+        context,
+        target: paymentChoiceClickTarget(input, context),
         label: compactText(context.text, 180),
         score: 280
       };
