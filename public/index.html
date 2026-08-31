@@ -10557,34 +10557,51 @@
       return NATIVE_RUNNER_EXTENSION_INSTALL_URL || normalized.extensionSetupUrl || '/native-runner/extension/';
     }
 
-	    function sendNativeRunnerExtensionMessage(message = {}) {
-	      return new Promise((resolve) => {
-	        if (!window.chrome?.runtime?.sendMessage) {
-	          resolve({ ok: false, reason: 'chrome_runtime_unavailable' });
-          return;
-        }
-        const extensionId = normalizeNativeRunnerSettings(nativeRunnerSettings).extensionId || NATIVE_RUNNER_CHROME_EXTENSION_ID;
-        try {
-          window.chrome.runtime.sendMessage(
-            extensionId,
-            message,
-            (response) => {
-              const error = window.chrome.runtime.lastError;
-              if (error) {
-                resolve({ ok: false, reason: error.message || 'extension_not_reachable' });
-                return;
-              }
-              if (!response?.ok) {
-                resolve({ ok: false, reason: response?.error || 'extension_pair_failed' });
-                return;
-              }
-              resolve({ ok: true, result: response.result || null });
-            }
-          );
-        } catch (error) {
-          resolve({ ok: false, reason: error?.message || String(error) });
+	    async function sendNativeRunnerExtensionMessage(message = {}) {
+	      if (!window.chrome?.runtime?.sendMessage) {
+	        return { ok: false, reason: 'chrome_runtime_unavailable' };
+	      }
+	      const normalized = normalizeNativeRunnerSettings(nativeRunnerSettings);
+	      const candidateIds = [
+	        normalized.extensionId,
+	        ...nativeRunnerDevices.map((device) => device?.extensionId),
+	        NATIVE_RUNNER_CHROME_EXTENSION_ID
+	      ].map((id) => String(id || '').trim()).filter(Boolean);
+	      const extensionIds = Array.from(new Set(candidateIds));
+	      if (!extensionIds.length) return { ok: false, reason: 'extension_id_missing' };
+	      let lastFailure = null;
+	      for (const extensionId of extensionIds) {
+	        const result = await new Promise((resolve) => {
+	          try {
+	            window.chrome.runtime.sendMessage(
+	              extensionId,
+	              message,
+	              (response) => {
+	                const error = window.chrome.runtime.lastError;
+	                if (error) {
+	                  resolve({ ok: false, reason: error.message || 'extension_not_reachable', extensionId });
+	                  return;
+	                }
+	                if (!response?.ok) {
+	                  resolve({ ok: false, reason: response?.error || 'extension_pair_failed', extensionId });
+	                  return;
+	                }
+	                resolve({ ok: true, result: response.result || null, extensionId });
+	              }
+	            );
+	          } catch (error) {
+	            resolve({ ok: false, reason: error?.message || String(error), extensionId });
+	          }
+	        });
+	        if (result.ok) {
+	          if (extensionId && normalized.extensionId !== extensionId) {
+	            saveNativeRunnerSettings({ ...nativeRunnerSettings, extensionId });
+	          }
+	          return result;
 	        }
-	      });
+	        lastFailure = result;
+	      }
+	      return lastFailure || { ok: false, reason: 'extension_not_reachable' };
 	    }
 
     async function requestNativeRunnerMissionWake(sessionId = '') {
@@ -10895,18 +10912,27 @@
       }
     }
 
-    async function checkNativeRunnerWithPolling() {
+    async function checkNativeRunnerWithPolling({ triggerButton = null } = {}) {
       if (nativeRunnerCheckInFlight) return nativeRunnerSettings;
       nativeRunnerCheckInFlight = true;
-      const button = $('nativeRunnerRefreshBtn');
+      const refreshButton = $('nativeRunnerRefreshBtn');
+      const primaryButton = $('nativeRunnerSetupBtn');
+      const primaryIsRefresh = primaryButton?.dataset.nativeRunnerPrimaryMode === 'refresh';
+      const activeButtons = Array.from(new Set([
+        triggerButton,
+        primaryIsRefresh ? primaryButton : null,
+        primaryIsRefresh ? null : refreshButton
+      ].filter(Boolean)));
       const status = $('nativeRunnerStatus');
       const baselinePollAt = String(nativeRunnerSettings.lastPollAt || '').trim();
       const startedAt = Date.now();
       let lastError = null;
       const setCheckingUi = () => {
-        if (button) {
+        if (refreshButton && primaryIsRefresh && refreshButton !== triggerButton) {
+          refreshButton.hidden = true;
+        }
+        for (const button of activeButtons) {
           button.disabled = true;
-          button.hidden = false;
           button.textContent = 'Checking...';
           button.setAttribute('aria-busy', 'true');
         }
@@ -10936,11 +10962,12 @@
         return nativeRunnerSettings;
       } finally {
         nativeRunnerCheckInFlight = false;
-        if (button) {
+        for (const button of activeButtons) {
           button.disabled = false;
           button.textContent = 'Check';
           button.removeAttribute('aria-busy');
         }
+        applyNativeRunnerSettingsUi(nativeRunnerSettings);
       }
     }
 
@@ -19861,11 +19888,11 @@
       }
     });
 
-    $('nativeRunnerSetupBtn')?.addEventListener('click', async () => {
+    $('nativeRunnerSetupBtn')?.addEventListener('click', async (event) => {
       try {
         const primaryMode = $('nativeRunnerSetupBtn')?.dataset.nativeRunnerPrimaryMode || 'setup';
         if (primaryMode === 'refresh') {
-          await checkNativeRunnerWithPolling();
+          await checkNativeRunnerWithPolling({ triggerButton: event.currentTarget });
           return;
         }
         if (primaryMode === 'show_pairing' && nativeRunnerPairingIsFresh(nativeRunnerSettings)) {
@@ -19951,9 +19978,9 @@
       }
     });
 
-    $('nativeRunnerRefreshBtn')?.addEventListener('click', async () => {
+    $('nativeRunnerRefreshBtn')?.addEventListener('click', async (event) => {
       try {
-        await checkNativeRunnerWithPolling();
+        await checkNativeRunnerWithPolling({ triggerButton: event.currentTarget });
       } catch {
         // Status text is set inside checkNativeRunnerWithPolling.
       }
