@@ -6066,7 +6066,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.13';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.14';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -10881,15 +10881,20 @@
         data = await requestNativeRunnerStatus(statusSettings);
         nativeRunnerDevices = Array.isArray(data.devices) ? data.devices : (data.device ? [data.device] : []);
         nativeRunnerActivity = Array.isArray(data.activity) ? data.activity : [];
-        const extensionPollAt = String(extensionCheck?.result?.config?.lastPollAt || '').trim();
+        // External extension responses are wrapped in { ok, result }. Keep
+        // the freshly checked-in heartbeat even when the subsequent server
+        // status read is briefly stale, otherwise the dashboard can claim the
+        // same runner shown as connected in its popup is offline.
+        const extensionStatus = extensionCheck?.result || extensionCheck || {};
+        const extensionPollAt = String(extensionStatus?.config?.lastPollAt || '').trim();
         const heartbeatSettings = extensionPollAt
-          ? { ...statusSettings, lastPollAt: extensionPollAt }
+          ? { ...statusSettings, lastPollAt: extensionPollAt, lastSeenAt: extensionPollAt }
           : statusSettings;
         const saved = saveNativeRunnerSettings(mergeNativeRunnerDeviceStatus(heartbeatSettings, data.device || null, data.checkoutReadiness || data.readiness || null));
         applyNativeRunnerSettingsUi(saved);
         if (!silent && $('nativeRunnerStatus')) {
-          const extensionError = String(extensionCheck?.result?.config?.lastError || '').trim();
-          const extensionPollSucceeded = Boolean(extensionCheck?.result?.poll?.paired);
+          const extensionError = String(extensionStatus?.config?.lastError || '').trim();
+          const extensionPollSucceeded = Boolean(extensionStatus?.poll?.paired);
           if (extensionError && !extensionPollSucceeded) {
             $('nativeRunnerStatus').textContent = `Runner needs attention: ${extensionError}`;
             return saved;

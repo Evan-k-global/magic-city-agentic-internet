@@ -651,9 +651,12 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/checkout/final-review') {
+    const pickupDisclosure = checkoutFixture.showPickupDisclosure
+      ? '<button id="pickup-disclosure" onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-disclosure-opened\'); document.querySelector(\'#pickup-modal\')?.removeAttribute(\'hidden\')">FREE pickup available nearby</button>'
+      : '';
     const pickupModal = checkoutFixture.showPickupModal
       ? [
-          '<div id="pickup-modal" role="dialog" aria-modal="true" style="position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto">',
+          `<div id="pickup-modal" role="dialog" aria-modal="true"${checkoutFixture.showPickupDisclosure ? ' hidden' : ''} style="position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto">`,
           '<button id="pickup-close" aria-label="Close" onclick="document.querySelector(\'#pickup-modal\').remove()">×</button>',
           '<h2>Select a pickup location</h2>',
           '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
@@ -666,7 +669,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<main><h1>Review your order</h1>',
       '<section aria-label="Order summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p></section>',
       '<section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>',
-      '<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>',
+      `<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p>${pickupDisclosure}</section>`,
       '<label><input id="merchant-checkout-default" type="checkbox" /> Default to this delivery address and payment method.</label>',
       '<span class="a-button"><span class="a-button-inner"><input id="submitOrderButtonId" type="submit" aria-labelledby="submitOrderButtonId-announce" onclick="document.body.dataset.orderSubmitted=\'1\'; location.href=\'/checkout/order-confirmation\'" /><span id="submitOrderButtonId-announce" class="a-button-text">Place your order</span></span></span>',
       '</main>'
@@ -2830,7 +2833,10 @@ async function main() {
       matchingAddressChecked: true,
       matchingAddressSummary: '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
       matchingAddressText: 'Test User 2865 SAND HILL RD STE 101 Menlo Park, CA 94025-7022 United States Phone number: 415-555-0100',
-      selectedFreeDelivery: true
+      selectedFreeDelivery: true,
+      // Amazon renders this pickup disclosure next to a perfectly valid
+      // shipped-order review. It must never be treated as a delivery change.
+      showPickupDisclosure: true
     };
     checkpoints.length = 0;
     fulfillment = null;
@@ -2976,7 +2982,7 @@ async function main() {
       fail(`browser_extension_final_review_did_not_reuse_tab:${JSON.stringify({ reviewTabId, reviewTabCount, resumeTabs })}`);
     }
     const reviewEvents = await preparedReviewPage.evaluate(() => window.__checkoutEvents || []);
-    if (reviewEvents.includes('bad-pickup-selected')) {
+    if (reviewEvents.includes('bad-pickup-selected') || reviewEvents.includes('bad-pickup-disclosure-opened')) {
       fail(`browser_extension_final_review_selected_pickup:${reviewEvents.join(',')}`);
     }
     recordPurchaseScenario('Manual final-review handoff resumes in the same prepared checkout tab', {

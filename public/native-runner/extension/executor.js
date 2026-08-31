@@ -1975,9 +1975,19 @@
     const deliveryState = checkoutOpen
       ? deliverySelectionState()
       : { required: false, confirmed: false, selectedPrice: null, bestPrice: null };
+    // On Amazon's final-review surface the delivery radio group is often no
+    // longer mounted. Its checkout order summary is the authoritative source
+    // at that point: a $0 shipping line confirms the retained free delivery
+    // choice without reopening any delivery or pickup UI.
+    const deliveryConfirmed = Boolean(
+      deliveryState.confirmed
+      || classification.state === 'final_review'
+        && shippingTotalEvidence.authoritative
+        && shippingTotalEvidence.amount === 0
+    );
     const addressConfirmed = Boolean(checkoutOpen && (!hasAddressPreset || addressMatch && !addressConfirmationRequired && !shippingFormOpen));
     const cardConfirmed = Boolean(checkoutOpen && (!hasCardPreset || cardMatches && !sensitiveField && !paymentMethodConfirmationRequired));
-    const checkoutProfileVerified = Boolean(checkoutOpen && addressConfirmed && cardConfirmed && deliveryState.confirmed);
+    const checkoutProfileVerified = Boolean(checkoutOpen && addressConfirmed && cardConfirmed && deliveryConfirmed);
     const finalReviewReady = Boolean(
       classification.state === 'final_review'
       && checkoutProfileVerified
@@ -2041,8 +2051,8 @@
       paymentMethodConfirmationRequired,
       addressConfirmed,
       cardConfirmed,
-      deliveryConfirmed: deliveryState.confirmed,
-      deliverySelectionRequired: deliveryState.required,
+      deliveryConfirmed,
+      deliverySelectionRequired: deliveryConfirmed ? false : deliveryState.required,
       deliveryFreeAvailable: deliveryState.freeAvailable ?? null,
       selectedDeliveryPrice: deliveryState.selectedPrice,
       checkoutOpen,
@@ -2731,6 +2741,11 @@
   }
 
   function findCheckoutCorrectionControl(kind = '', summary = {}) {
+    // Amazon's final-review surfaces contain several delivery-adjacent
+    // disclosures (pickup, locker, Whole Foods, local market). They are not
+    // shipping selectors. Shipping is changed only through a verified radio
+    // row below, never through a generic "delivery" control.
+    if (kind === 'delivery') return null;
     const sectionBound = findSectionBoundChangeControl(kind);
     if (sectionBound) return sectionBound;
     const isPayment = kind === 'payment';
@@ -2888,6 +2903,20 @@
         };
       })
       .filter((option) => option.shippingish && !option.subscriptionish && !option.pickupish && option.price != null);
+    // Final review commonly collapses the shipping choices into its order
+    // summary. A verified $0 checkout shipping line is stronger evidence than
+    // an absent radio control and must not trigger a pickup/local-market flow.
+    const checkoutShipping = shippingTotalEvidenceForSurface(pageText, { surface: 'checkout' });
+    if (!options.length && checkoutShipping.authoritative && checkoutShipping.amount === 0) {
+      return {
+        required: false,
+        confirmed: true,
+        freeAvailable: true,
+        selectedPrice: 0,
+        bestPrice: 0,
+        source: 'checkout_shipping_total'
+      };
+    }
     if (!deliverySectionVisible && !options.length) return { required: false, confirmed: true };
     const freeOptions = options.filter((option) => option.price === 0)
       .sort((left, right) => left.speedRank - right.speedRank);
@@ -2905,17 +2934,13 @@
   }
 
   function shouldOpenDeliverySelector(state = {}) {
-    const summary = state.checkoutSummary || {};
-    if (!['checkout', 'final_review'].includes(String(summary.stage || state.browserState || '').toLowerCase())) return false;
-    const pageText = pagePlainText(18000);
-    if (!/\b(delivery option|shipping option|shipping speed|delivery speed|delivery date|arrives|receive|get it|shipping|delivery)\b/i.test(pageText)) return false;
-    const visibleShippingOptions = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
-      .filter((input) => visible(input))
-      .map((input) => compactText(radioContainer(input)?.innerText || '', 1000))
-      .some((text) => /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text)
-        && !promotionalDeliveryOption(text)
-        && !pickupDeliveryOption(text));
-    return !visibleShippingOptions;
+    // selectPreferredDeliveryOption handles real, visible shipping radio rows
+    // directly. There is no safe generic fallback: Amazon's pickup disclosure
+    // also contains delivery/free language and must never be opened by a
+    // delivery correction. When no shipping rows are visible, preserve the
+    // merchant's current shipping choice and continue with address/card work.
+    void state;
+    return false;
   }
 
   function findDeclineOfferControl(root = null) {
