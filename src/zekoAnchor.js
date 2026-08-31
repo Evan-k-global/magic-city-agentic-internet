@@ -22,11 +22,12 @@ const ZEKO_RELAYER_TIMEOUT_MS = Math.max(
   Number(process.env.ZEKO_RELAYER_TIMEOUT_MS || 6 * 60 * 1000) || 6 * 60 * 1000
 );
 const ZEKO_IS_MAINNET = String(ZEKO_NETWORK_ID).includes('mainnet');
-const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
-const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
+const ZEKO_IS_SEPOLIA = String(ZEKO_NETWORK_ID).includes('sepolia');
+const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_SEPOLIA ? 'https://sepolia.zeko.io/graphql' : ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
+const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_SEPOLIA ? ZEKO_GRAPHQL : ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
 const ZEKO_EXPLORER_TX_BASE = process.env.ZEKO_EXPLORER_TX_BASE ||
-  (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'https://zekoscan.io/mainnet/tx/{tx}?type=zk-tx' : 'https://zekoscan.io/testnet/tx/{tx}?type=zk-tx');
-const TX_FEE = process.env.TX_FEE || '100000000';
+  (ZEKO_IS_SEPOLIA ? 'https://sepolia.zeko.io/v1/explorer/transactions/{tx}' : String(ZEKO_NETWORK_ID).includes('mainnet') ? 'https://zekoscan.io/mainnet/tx/{tx}?type=zk-tx' : 'https://zekoscan.io/testnet/tx/{tx}?type=zk-tx');
+const TX_FEE = process.env.TX_FEE || (ZEKO_IS_SEPOLIA ? '200000' : '100000000');
 const ZEKO_RELAYER_MODE = process.env.ZEKO_RELAYER_MODE || process.env.ZEKO_SUBMITTER_MODE || 'record';
 const ZEKO_RELAYER_PRIVATE_KEY =
   process.env.ZEKO_RELAYER_PRIVATE_KEY ||
@@ -96,40 +97,11 @@ function fieldFromHashLike(value, Field, Poseidon) {
 const ACCOUNT_CACHE_QUERY = `query Account($pk: PublicKey!) {
   account(publicKey: $pk) {
     publicKey
-    token
     nonce
     balance { total }
-    tokenSymbol
-    receiptChainHash
-    timing {
-      initialMinimumBalance
-      cliffTime
-      cliffAmount
-      vestingPeriod
-      vestingIncrement
-    }
-    permissions {
-      editState
-      access
-      send
-      receive
-      setDelegate
-      setPermissions
-      setVerificationKey { auth txnVersion }
-      setZkappUri
-      editActionState
-      setTokenSymbol
-      incrementNonce
-      setVotingFor
-      setTiming
-    }
-    delegateAccount { publicKey }
-    votingFor
     zkappState
-    verificationKey { verificationKey hash }
-    actionState
+    verificationKey { hash }
     provedState
-    zkappUri
   }
 }`;
 

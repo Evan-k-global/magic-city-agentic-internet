@@ -29,9 +29,10 @@ const ZEKO_O1JS_NETWORK_ID =
   process.env.ZEKO_O1JS_NETWORK_ID ||
   (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'zeko-mainnet' : 'testnet');
 const ZEKO_IS_MAINNET = String(ZEKO_NETWORK_ID).includes('mainnet');
-const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
-const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
-const TX_FEE = process.env.TX_FEE || '100000000';
+const ZEKO_IS_SEPOLIA = String(ZEKO_NETWORK_ID).includes('sepolia');
+const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_SEPOLIA ? 'https://sepolia.zeko.io/graphql' : ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
+const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_SEPOLIA ? ZEKO_GRAPHQL : ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
+const TX_FEE = process.env.TX_FEE || (ZEKO_IS_SEPOLIA ? '200000' : '100000000');
 const RELAYER_PRIVATE_KEY =
   process.env.ZEKO_RELAYER_PRIVATE_KEY ||
   process.env.ZEKO_MISSION_AUTH_RELAYER_PRIVATE_KEY ||
@@ -170,6 +171,11 @@ function isTransientSendError(message) {
   return /502|504|Bad Gateway|Gateway Timeout|timeout|timed out|fetch failed|ECONNRESET|UND_ERR|socket/i.test(String(message || ''));
 }
 
+function extractZekoTxHash(value) {
+  const match = String(value || '').match(/\btxHash=([1-9A-HJ-NP-Za-km-z]{20,})\b/);
+  return match?.[1] || null;
+}
+
 async function computeSignedTransactionHash(signedTx, Transaction) {
   try {
     if (!signedTx || typeof signedTx.toJSON !== 'function' || !Transaction?.hash) return null;
@@ -182,40 +188,11 @@ async function computeSignedTransactionHash(signedTx, Transaction) {
 const ACCOUNT_CACHE_QUERY = `query Account($pk: PublicKey!) {
   account(publicKey: $pk) {
     publicKey
-    token
     nonce
     balance { total }
-    tokenSymbol
-    receiptChainHash
-    timing {
-      initialMinimumBalance
-      cliffTime
-      cliffAmount
-      vestingPeriod
-      vestingIncrement
-    }
-    permissions {
-      editState
-      access
-      send
-      receive
-      setDelegate
-      setPermissions
-      setVerificationKey { auth txnVersion }
-      setZkappUri
-      editActionState
-      setTokenSymbol
-      incrementNonce
-      setVotingFor
-      setTiming
-    }
-    delegateAccount { publicKey }
-    votingFor
     zkappState
-    verificationKey { verificationKey hash }
-    actionState
+    verificationKey { hash }
     provedState
-    zkappUri
   }
 }`;
 
@@ -587,14 +564,15 @@ async function runSubmitOnce(submissionId) {
     const stage = String(error?.executionStage || 'mission_auth_registry');
     const submissionUncertain = Boolean(error?.submissionUncertain);
     const message = error instanceof Error ? error.message : String(error);
+    const preservedTxHash = error?.txHash || extractZekoTxHash(message) || submission.txHash || null;
     await updateSubmission(submission.id, {
       status: submissionUncertain ? 'submission_unknown' : 'failed',
-      txHash: error?.txHash || submission.txHash || null,
+      txHash: preservedTxHash,
       result: {
         accepted: false,
         errorCode: message || 'relayer_submission_failed',
         stage,
-        txHash: error?.txHash || submission.txHash || null,
+        txHash: preservedTxHash,
         safeToRetrySamePayload: !submissionUncertain && error?.safeToRetry !== false
       }
     }).catch(() => null);
@@ -655,6 +633,7 @@ function runSubmitOnceChild(submissionId) {
       const err = new Error(stderr.trim().slice(-1000) || `mission_auth_registry_child_exit:${code ?? signal}`);
       err.executionStage = 'mission_auth_registry_child';
       err.submissionUncertain = /submission_unknown|send_timeout|SIGKILL|timeout|Bad Gateway|Gateway Timeout|502|504/i.test(String(stderr || signal || ''));
+      err.txHash = extractZekoTxHash(stderr);
       finish(() => reject(err));
     });
   });

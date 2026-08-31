@@ -2,16 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PrivateKey } from 'o1js';
 
-const DEFAULT_PRIVATE_PATH = path.resolve(
-  process.cwd(),
-  '.magic-city-secrets',
-  'zeko-testnet-mission-auth-registry.private.json'
-);
-const DEFAULT_PUBLIC_PATH = path.resolve(
-  process.cwd(),
-  'data',
-  'zeko-testnet-mission-auth-registry.public.json'
-);
+function networkSlug(value) {
+  const normalized = String(value || 'zeko:testnet')
+    .toLowerCase()
+    .replace(/^zeko:/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'testnet';
+}
 
 function writeJson(filePath, value, mode = null) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -23,6 +21,17 @@ const networkId =
   process.env.ZEKO_MISSION_AUTH_NETWORK_ID ||
   process.env.ZEKO_NETWORK_ID ||
   'zeko:testnet';
+const slug = networkSlug(networkId);
+const DEFAULT_PRIVATE_PATH = path.resolve(
+  process.cwd(),
+  '.magic-city-secrets',
+  `zeko-${slug}-mission-auth-registry.private.json`
+);
+const DEFAULT_PUBLIC_PATH = path.resolve(
+  process.cwd(),
+  'data',
+  `zeko-${slug}-mission-auth-registry.public.json`
+);
 const mina =
   process.env.ZEKO_MISSION_AUTH_GRAPHQL ||
   process.env.ZEKO_GRAPHQL ||
@@ -35,7 +44,14 @@ const o1jsNetworkId = process.env.ZEKO_O1JS_NETWORK_ID || 'testnet';
 const privatePath = process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_PATH || DEFAULT_PRIVATE_PATH;
 const publicPath = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_PATH || DEFAULT_PUBLIC_PATH;
 
-const relayerKey = PrivateKey.random();
+const configuredRelayerPrivateKey =
+  process.env.ZEKO_RELAYER_PRIVATE_KEY ||
+  process.env.ZEKO_MISSION_AUTH_RELAYER_PRIVATE_KEY ||
+  process.env.SUBMITTER_PRIVATE_KEY ||
+  '';
+const relayerKey = configuredRelayerPrivateKey
+  ? PrivateKey.fromBase58(configuredRelayerPrivateKey)
+  : PrivateKey.random();
 const registryKey = PrivateKey.random();
 const relayerPublicKey = relayerKey.toPublicKey().toBase58();
 const registryPublicKey = registryKey.toPublicKey().toBase58();
@@ -77,7 +93,7 @@ console.log(JSON.stringify({
   privatePath,
   publicPath,
   next: [
-    `Fund ${relayerPublicKey} on Zeko testnet for deploy fees and future relayer anchor fees.`,
+    `Fund ${relayerPublicKey} on ${networkId} for deploy fees and future relayer anchor fees.`,
     'Run npm run zeko:registry:deploy after funding.',
     'Set Magic City/Fly env to use the deployed registry address after deployment.'
   ]

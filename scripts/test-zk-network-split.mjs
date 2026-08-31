@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-process.env.ZEKO_NETWORK_ID = 'zeko:testnet';
+process.env.ZEKO_NETWORK_ID = 'zeko:sepolia';
 process.env.ZEKO_SUBMIT_MODE = 'record';
-process.env.ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = 'zeko:sepolia';
+delete process.env.ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK;
 delete process.env.MAGIC_CITY_MISSION_PROOF_NETWORK_ID;
 delete process.env.ZEKO_GRAPHQL;
 delete process.env.ZEKO_ARCHIVE;
@@ -17,11 +17,11 @@ const { getAnchorConfig, submitAnchorPayload } = await import('../src/zekoAnchor
 const { buildMbaDiscoveryDocument, buildMbaRegistryAnchor } = await import('../src/agentMissionBoundAuth.js');
 
 const anchorConfig = getAnchorConfig();
-assert.equal(anchorConfig.networkId, 'zeko:testnet');
+assert.equal(anchorConfig.networkId, 'zeko:sepolia');
 assert.equal(anchorConfig.o1jsNetworkId, 'testnet');
-assert.match(anchorConfig.explorerTxBase, /zekoscan\.io\/testnet/);
+assert.match(anchorConfig.explorerTxBase, /sepolia\.zeko\.io\/v1\/explorer\/transactions/);
 assert.equal(anchorConfig.offchain, true);
-assert.equal(anchorConfig.offchainTargetNetwork, 'zeko:sepolia');
+assert.equal(anchorConfig.offchainTargetNetwork, null);
 
 const offchainSubmission = await submitAnchorPayload({ statementHash: '0x01', network: 'offchain' });
 assert.equal(offchainSubmission.mode, 'record');
@@ -30,7 +30,7 @@ assert.equal(offchainSubmission.txHash, null);
 
 const discovery = buildMbaDiscoveryDocument({ baseUrl: 'https://magic-city-staging.fly.dev' });
 assert.deepEqual(discovery.capabilities.anchoring, [
-  'zeko:testnet',
+  'zeko:sepolia',
   'mission-auth-registry-zkapp',
   'receipt-root-anchor'
 ]);
@@ -42,17 +42,17 @@ const registryAnchor = buildMbaRegistryAnchor({
   receiptIdHash: '0x04',
   nullifier: '0x05'
 });
-assert.equal(registryAnchor.networkId, 'zeko:testnet');
+assert.equal(registryAnchor.networkId, 'zeko:sepolia');
 
 const envExample = fs.readFileSync(path.join(rootDir, '.env.example'), 'utf8');
-assert.match(envExample, /^MAGIC_CITY_MISSION_PROOF_NETWORK_ID=zeko:testnet$/m);
+assert.match(envExample, /^MAGIC_CITY_MISSION_PROOF_NETWORK_ID=zeko:sepolia$/m);
 assert.match(envExample, /^SANTACLAWZ_PROOF_NETWORK=zeko:testnet$/m);
 
 const flyToml = fs.readFileSync(path.join(rootDir, 'fly.toml'), 'utf8');
-assert.match(flyToml, /MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:testnet"/);
+assert.match(flyToml, /MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:sepolia"/);
 assert.match(flyToml, /SANTACLAWZ_PROOF_NETWORK = "zeko:testnet"/);
-assert.match(flyToml, /ZEKO_SUBMIT_MODE = "record"/);
-assert.match(flyToml, /ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = "zeko:sepolia"/);
+assert.match(flyToml, /ZEKO_SUBMIT_MODE = "relay"/);
+assert.doesNotMatch(flyToml, /ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = "zeko:sepolia"/);
 
 const serverSource = fs.readFileSync(path.join(rootDir, 'src', 'server.js'), 'utf8');
 assert.match(serverSource, /Boolean\(String\(process\.env\.ZEKO_PROOF_WORKER_URL/);

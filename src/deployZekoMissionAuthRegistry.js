@@ -10,20 +10,22 @@ import {
 } from 'o1js';
 import { MagicCityMissionAuthRegistry } from './zekoMissionAuthRegistry.js';
 
-const DEFAULT_PRIVATE_PATH = path.resolve(
-  process.cwd(),
-  '.magic-city-secrets',
-  'zeko-testnet-mission-auth-registry.private.json'
-);
-const DEFAULT_PUBLIC_PATH = path.resolve(
-  process.cwd(),
-  'data',
-  'zeko-testnet-mission-auth-registry.public.json'
-);
+function networkSlug(value) {
+  const normalized = String(value || 'zeko:testnet')
+    .toLowerCase()
+    .replace(/^zeko:/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'testnet';
+}
 
 function networkLooksMainnet(value) {
   const normalized = String(value ?? '').toLowerCase();
   return normalized.includes('mainnet') && !normalized.includes('testnet');
+}
+
+function networkLooksSepolia(value) {
+  return String(value ?? '').toLowerCase().includes('sepolia');
 }
 
 function endpointLooksTestnet(value) {
@@ -62,6 +64,22 @@ async function fetchAccountViaGraphql(graphqlUrl, publicKey) {
   return payload.data?.account ?? null;
 }
 
+const pathNetworkId =
+  process.env.ZEKO_MISSION_AUTH_NETWORK_ID ||
+  process.env.ZEKO_NETWORK_ID ||
+  'zeko:testnet';
+const pathSlug = networkSlug(pathNetworkId);
+const DEFAULT_PRIVATE_PATH = path.resolve(
+  process.cwd(),
+  '.magic-city-secrets',
+  `zeko-${pathSlug}-mission-auth-registry.private.json`
+);
+const DEFAULT_PUBLIC_PATH = path.resolve(
+  process.cwd(),
+  'data',
+  `zeko-${pathSlug}-mission-auth-registry.public.json`
+);
+
 const privatePath = process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_PATH || DEFAULT_PRIVATE_PATH;
 const publicPath = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_PATH || DEFAULT_PUBLIC_PATH;
 const existing = fs.existsSync(privatePath) ? readJson(privatePath) : {};
@@ -72,19 +90,22 @@ const networkId =
   process.env.ZEKO_NETWORK_ID ||
   'zeko:testnet';
 const isMainnet = networkLooksMainnet(networkId);
+const isSepolia = networkLooksSepolia(networkId);
 const mina =
   process.env.ZEKO_MISSION_AUTH_GRAPHQL ||
   existing.mina ||
+  (isSepolia ? 'https://sepolia.zeko.io/graphql' : '') ||
   (isMainnet ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
 const archive =
   process.env.ZEKO_MISSION_AUTH_ARCHIVE ||
   existing.archive ||
+  (isSepolia ? 'https://sepolia.zeko.io/graphql' : '') ||
   (isMainnet ? 'https://archive.mainnet.zeko.io/graphql' : 'https://archive.testnet.zeko.io/graphql');
 const o1jsNetworkId =
   process.env.ZEKO_O1JS_NETWORK_ID ||
   existing.o1jsNetworkId ||
   (isMainnet ? 'zeko-mainnet' : 'testnet');
-const fee = process.env.TX_FEE || '100000000';
+const fee = process.env.TX_FEE || (isSepolia ? '200000' : '100000000');
 const confirmMainnet =
   process.argv.includes('--confirm-mainnet') ||
   process.env.ZEKO_CONFIRM_MAINNET === 'true' ||
