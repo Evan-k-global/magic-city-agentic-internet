@@ -652,7 +652,10 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
   }
   if (pathname === '/checkout/final-review') {
     const pickupDisclosure = checkoutFixture.showPickupDisclosure
-      ? '<button id="pickup-disclosure" onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-disclosure-opened\'); document.querySelector(\'#pickup-modal\')?.removeAttribute(\'hidden\')">FREE pickup available nearby</button>'
+      ? [
+          '<button id="pickup-disclosure" onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-disclosure-opened\'); document.querySelector(\'#pickup-modal\')?.removeAttribute(\'hidden\')">FREE pickup available nearby</button>',
+          '<button id="pickup-change" onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-change-to-pickup\'); document.querySelector(\'#pickup-modal\')?.removeAttribute(\'hidden\')">Change to pickup</button>'
+        ].join('')
       : '';
     const pickupModal = checkoutFixture.showPickupModal
       ? [
@@ -2981,17 +2984,23 @@ async function main() {
       fail(`browser_extension_final_review_did_not_reuse_tab:${JSON.stringify({ reviewTabId, reviewTabCount, resumeTabs })}`);
     }
     const reviewEvents = await preparedReviewPage.evaluate(() => window.__checkoutEvents || []);
-    if (reviewEvents.includes('bad-pickup-selected') || reviewEvents.includes('bad-pickup-disclosure-opened')) {
+    if (reviewEvents.includes('bad-pickup-selected') || reviewEvents.includes('bad-pickup-disclosure-opened') || reviewEvents.includes('bad-change-to-pickup')) {
       fail(`browser_extension_final_review_selected_pickup:${reviewEvents.join(',')}`);
     }
     const pickupOverlayClosed = await preparedReviewPage.evaluate(() => sessionStorage.getItem('magic-city-pickup-overlay-closed'));
     if (pickupOverlayClosed !== '1') {
       fail(`browser_extension_final_review_pickup_overlay_not_closed:${pickupOverlayClosed || 'missing'}`);
     }
+    const finalSubmitCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    if (finalSubmitCheckpoint?.browser?.runnerStep?.finalSubmitReceipt?.kind !== 'final_order'
+      || !finalSubmitCheckpoint?.browser?.browserActionReceipts?.some((receipt) => receipt?.kind === 'final_order')) {
+      fail(`browser_extension_final_order_receipt_missing_before_navigation:${JSON.stringify(finalSubmitCheckpoint?.browser?.runnerStep || {})}`);
+    }
     recordPurchaseScenario('Manual final-review handoff resumes in the same prepared checkout tab', {
       resumedSteps: resumeActionIds,
       addressVariant: 'RD/STE and ZIP+4 with unrelated checked checkout control',
-      pickupModalIgnored: true
+      pickupModalIgnored: true,
+      finalOrderReceiptCheckpointed: true
     });
 
     checkpoints.length = 0;

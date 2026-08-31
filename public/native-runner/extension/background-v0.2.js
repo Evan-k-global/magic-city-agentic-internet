@@ -3060,8 +3060,37 @@ async function runSession(rawSession) {
               waitMs: Number(outcome.merchantOrderConfirmation.waitMs || 0) || null
             }
           : null,
+        // The content script records this before triggering merchant
+        // navigation, so the signed checkpoint remains auditable even if the
+        // navigation tears down the page immediately.
+        finalSubmitReceipt: outcome.finalSubmitReceipt && typeof outcome.finalSubmitReceipt === 'object'
+          ? {
+              actionId: String(outcome.finalSubmitReceipt.actionId || '').slice(0, 96),
+              actionType: String(outcome.finalSubmitReceipt.actionType || '').slice(0, 64),
+              intent: String(outcome.finalSubmitReceipt.intent || '').slice(0, 64),
+              kind: String(outcome.finalSubmitReceipt.kind || '').slice(0, 64),
+              path: String(outcome.finalSubmitReceipt.path || '').slice(0, 240),
+              at: outcome.finalSubmitReceipt.at || null
+            }
+          : null,
         runnerVersion: chrome.runtime.getManifest().version
       };
+      if (report.runnerStep.finalSubmitReceipt) {
+        const receipt = report.runnerStep.finalSubmitReceipt;
+        const browserActionReceipts = Array.isArray(report.browserActionReceipts)
+          ? report.browserActionReceipts
+          : [];
+        const alreadyRecorded = browserActionReceipts.some((entry) => entry
+          && entry.kind === receipt.kind
+          && entry.actionId === receipt.actionId
+          && entry.at === receipt.at);
+        // Keep the pre-navigation final-order receipt in the stable browser
+        // receipt list as well as the runner-step envelope. Merchant
+        // navigation may unload executor.js before a subsequent state read.
+        report.browserActionReceipts = alreadyRecorded
+          ? browserActionReceipts
+          : [...browserActionReceipts, receipt];
+      }
       report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested);
       report.orderSubmitted = Boolean(outcome.orderSubmitted || report.orderSubmitted);
       report.lastRunnerAction = String(outcome.label || '');

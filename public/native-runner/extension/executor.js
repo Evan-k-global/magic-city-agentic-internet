@@ -110,17 +110,19 @@
   }
 
   function recordBrowserClick(element, context = activeActionContext) {
-    recentBrowserActions.push({
+    const receipt = {
       actionId: String(context?.actionId || '').slice(0, 96),
       actionType: String(context?.actionType || '').slice(0, 64),
       intent: String(context?.intent || '').slice(0, 64),
       kind: browserClickKind(element),
       path: String(location.pathname || '').slice(0, 240),
       at: new Date().toISOString()
-    });
+    };
+    recentBrowserActions.push(receipt);
     if (recentBrowserActions.length > RECENT_BROWSER_ACTIONS_LIMIT) {
       recentBrowserActions.splice(0, recentBrowserActions.length - RECENT_BROWSER_ACTIONS_LIMIT);
     }
+    return receipt;
   }
 
   function normalized(value = '') {
@@ -337,7 +339,10 @@
       control.getAttribute?.('data-testid'),
       control.getAttribute?.('href')
     ].filter(Boolean).join('\n'), 600);
-    return /\b(?:pick up here|use this pickup|select pickup|pickup location|free pickup(?: available)?|amazon locker|amazon counter|whole foods|amazon fresh|local market)\b/i.test(directText);
+    // This is intentionally an absolute veto for a home-delivery mission.
+    // The direct control label is safe to inspect: unlike a parent container,
+    // it cannot accidentally inherit unrelated pickup disclosure copy.
+    return /\b(?:pick\s*up|pickup|amazon locker|amazon counter|whole foods|amazon fresh|local market)\b/i.test(directText);
   }
 
   function interactiveControls(root = null) {
@@ -2238,6 +2243,29 @@
     }
   }
 
+  function scheduleFinalOrderClick(element) {
+    if (!visible(element) || element.disabled) return null;
+    const label = textFor(element);
+    if (!FINAL_ACTION_PATTERN.test(label) || pickupOrLockerControl(element)) return null;
+    element.scrollIntoView({ block: 'center', inline: 'center' });
+
+    // A merchant navigation can destroy this content-script context before a
+    // synchronous click result reaches the background worker. Persist the
+    // categorical receipt first, return it with the action result, then make
+    // the one already-authorized merchant click after the message serializes.
+    const receipt = recordBrowserClick(element, activeActionContext);
+    setTimeout(() => {
+      if (!visible(element) || element.disabled) return;
+      try {
+        element.click();
+      } catch {
+        // The confirmation observer reports a terminal failure if navigation
+        // never happens; the irreversible control is never replayed.
+      }
+    }, 80);
+    return receipt;
+  }
+
   function dispatchInput(element, value) {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set ||
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
@@ -3669,17 +3697,20 @@
       ? saveAmazonCheckoutDefault()
       : { attempted: false, saved: false, reason: 'not_requested' };
     try {
-      if (!immediateSafeClick(control, { allowFinalAction: true })) {
+      const finalSubmitReceipt = scheduleFinalOrderClick(control);
+      if (!finalSubmitReceipt) {
         return { completed: false, reason: 'The merchant final order control could not be clicked safely.', state };
       }
+      const stateAfterFinalSubmitRequested = pageState(profile);
       return {
         completed: true,
         navigationRequested: true,
         finalSubmitRequested: true,
+        finalSubmitReceipt,
         label: visibleControlLabel(control, 140) || compactText(textFor(control), 140),
         merchantCheckoutDefault,
         checkoutPickupModalClosed: closedPickupModal.closed,
-        state
+        state: stateAfterFinalSubmitRequested
       };
     } catch {
       return { completed: false, reason: 'The merchant final order control could not be clicked safely.', state };
