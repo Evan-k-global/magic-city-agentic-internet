@@ -476,7 +476,10 @@ const DEFAULT_AGENT_PAYMENT_PROFILE = {
   paymentProfileDisplay: 'agent_card_label_and_last4',
   checkoutRunnerMode: 'server_prep_only',
   checkoutRunnerReceiptProof: 'receipt_hashes_and_screenshots',
-  checkoutRunnerStopBeforeFinalSubmit: true,
+  // The merchant-specific execution layer derives the final-submit boundary.
+  // Do not inject a generic `true` here: it becomes an explicit selection and
+  // can override Amazon's signed auto-submit policy downstream.
+  checkoutRunnerStopBeforeFinalSubmit: undefined,
   limitSource: 'bank_controls_and_magic_city_policy',
   allowedUse: 'internet_agent,procurement,bookings,applications',
   trustTier: 'ask_every_time',
@@ -1174,6 +1177,7 @@ const CONNECTOR_REGISTRY = {
       const stopCondition = searchParams.get('stop_condition') || 'Pause at login, captcha, payment, final submit, or uncertainty';
       const contextualAuthority = inferBrowserContextualAuthority([goal, constraints, budget].filter(Boolean).join(' '), targetUrl);
       const paymentProfile = { ...DEFAULT_AGENT_PAYMENT_PROFILE };
+      const isAmazonTarget = /^https?:\/\/(?:www\.)?amazon\.com(?:[/:]|$)/i.test(targetUrl);
       const actionDepth = searchParams.get('action_depth') || contextualAuthority.actionDepth;
       const trustTier = searchParams.get('trust_tier') || contextualAuthority.trustTier;
       const allowedMerchants = searchParams.get('allowed_merchants') || contextualAuthority.allowedMerchants;
@@ -1212,7 +1216,12 @@ const CONNECTOR_REGISTRY = {
           fundingSource: paymentProfile.fundingSource,
           checkoutRunnerMode: paymentProfile.checkoutRunnerMode,
           checkoutRunnerReceiptProof: paymentProfile.checkoutRunnerReceiptProof,
-          checkoutRunnerStopBeforeFinalSubmit: paymentProfile.checkoutRunnerStopBeforeFinalSubmit,
+          checkoutRunnerStopBeforeFinalSubmit: isAmazonTarget
+            ? false
+            : paymentProfile.checkoutRunnerStopBeforeFinalSubmit,
+          finalApprovalPolicy: isAmazonTarget
+            ? 'auto_submit_after_verified_checkout'
+            : 'pause_before_final_approval',
           cardAuthority: paymentProfile.cardAuthority,
           paymentEntryAuthority: paymentProfile.paymentEntryAuthority,
           missionAuthority: paymentProfile.missionAuthority,

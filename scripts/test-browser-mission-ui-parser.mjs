@@ -156,6 +156,21 @@ assert.match(browserMissionPlan, /budgetBasis = 'merchandise_subtotal'/, 'browse
 assert.match(browserMissionPlan, /amazon_free_shipping_preferred/, 'Amazon plans must bind the free-delivery preference');
 assert.match(browserMissionPlan, /deliveryStrategy: targetDomain === 'amazon\.com' \? 'prime_fastest_free_only'/, 'Amazon plans must bind Prime fastest-free delivery only');
 assert.match(browserMissionPlan, /const primeRequired = session\.extensionPrimeRequired === true/, 'Amazon plans must explicitly require Prime evidence');
+assert.match(
+  browserMissionPlan,
+  /autoSubmitAfterVerifiedCheckout = \(finalApprovalPolicy === 'auto_submit_after_verified_checkout'/,
+  'Amazon plans must bind automatic final submit to the signed approval policy'
+);
+assert.match(
+  serverSource,
+  /autoSubmitAfterVerifiedCheckout = finalApprovalPolicy === 'auto_submit_after_verified_checkout'/,
+  'MBA capabilities must omit final-submit pause only for signed auto-submit plans'
+);
+assert.doesNotMatch(
+  fs.readFileSync(new URL('../src/connectors.js', import.meta.url), 'utf8'),
+  /checkoutRunnerStopBeforeFinalSubmit:\s*true/,
+  'connector defaults must not inject a stale final-submit stop flag into Amazon sessions'
+);
 assert.match(html, /Applies to merchandise\. Tax and delivery are shown separately\./, 'the execution sheet must explain the item-budget basis');
 assert.match(localRunnerLegacyBackground, /acquireMissionTab/, 'browser missions must reuse a runner-owned merchant tab');
 assert.doesNotMatch(

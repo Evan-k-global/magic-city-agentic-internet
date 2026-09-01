@@ -4,6 +4,7 @@ import {
   evaluateBrowserExtensionFulfillment,
   validateBrowserExtensionPlan
 } from '../src/browserMissionPlan.js';
+import { runAssistedBrowserWorkerExecution } from '../src/browserExecution.js';
 
 const baseSession = {
   id: 'final-review-policy-smoke',
@@ -48,6 +49,20 @@ assert.equal(defaultAmazonPlan.actions.at(-3)?.type, 'final_submit');
 assert.equal(defaultAmazonPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
+
+const staleLegacyStopPolicy = await runAssistedBrowserWorkerExecution({
+  ...baseSession,
+  selections: {
+    ...baseSession.selections,
+    finalApprovalPolicy: 'auto_submit_after_verified_checkout',
+    // Older connector payloads included this generic default. The signed
+    // Amazon policy must win, otherwise a fresh mission pauses at Place order.
+    checkoutRunnerStopBeforeFinalSubmit: true
+  }
+});
+assert.equal(staleLegacyStopPolicy.localCheckoutRunner.finalApprovalPolicy, 'auto_submit_after_verified_checkout');
+assert.equal(staleLegacyStopPolicy.localCheckoutRunner.stopBeforeFinalSubmit, false);
+assert.equal(staleLegacyStopPolicy.paymentPolicy.finalApprovalPolicy, 'auto_submit_after_verified_checkout');
 
 const reviewPlan = buildBrowserExtensionMissionPlan({
   ...baseSession,
