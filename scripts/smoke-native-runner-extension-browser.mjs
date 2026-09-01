@@ -2942,6 +2942,67 @@ async function main() {
     const reviewTabCount = (await worker.evaluate(() => chrome.tabs.query({})))
       .filter((tab) => String(tab.url || '').startsWith(baseUrl)).length;
 
+    // An interruption after intent persistence but before native dispatch is
+    // deliberately inconclusive. It must neither click a second time nor
+    // claim final-submit evidence that the browser cannot prove.
+    await preparedReviewPage.evaluate(() => {
+      const key = 'magic_city_browser_action_receipts_v1';
+      const current = JSON.parse(sessionStorage.getItem(key) || '[]');
+      current.push({
+        actionId: 'interrupted-final-submit',
+        actionType: 'final_submit',
+        intent: 'submit_final_order',
+        receiptScope: 'browser-smoke-interrupted-final-submit',
+        kind: 'final_order',
+        phase: 'final_submit_intent',
+        at: new Date().toISOString()
+      });
+      sessionStorage.setItem(key, JSON.stringify(current));
+      window.__nativeFinalClickTargetId = '';
+    });
+    // Force a fresh executor injection after the durable receipt was written.
+    // This covers the MV3/content-script reinjection path rather than relying
+    // on an earlier in-memory receipt array.
+    const reinjectExecutor = await worker.evaluate(async ({ tabId }) => {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error?.message || String(error) };
+      }
+    }, { tabId: reviewTabId });
+    if (!reinjectExecutor?.ok) fail(`browser_extension_final_order_intent_reinject_failed:${reinjectExecutor?.error || 'unknown'}`);
+    const interruptedFinalSubmit = await worker.evaluate(({ tabId }) => new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, {
+        type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+        action: {
+          id: 'interrupted-final-submit',
+          type: 'final_submit',
+          receiptScope: 'browser-smoke-interrupted-final-submit',
+          autoSubmitAfterVerifiedCheckout: true,
+          maxPrice: 4
+        },
+        checkoutProfile: {
+          streetAddress: '2865 Sand Hill Road Suite 101',
+          shippingCity: 'Menlo Park',
+          shippingState: 'CA',
+          zipCode: '94025',
+          paymentCardLast4: '1817'
+        }
+      }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
+    }), { tabId: reviewTabId });
+    const interruptedNativeClick = await preparedReviewPage.evaluate(() => window.__nativeFinalClickTargetId || '');
+    if (interruptedFinalSubmit.error
+      || interruptedFinalSubmit.response?.completed !== false
+      || interruptedFinalSubmit.response?.noReplay !== true
+      || interruptedFinalSubmit.response?.finalSubmitRequested === true
+      || interruptedNativeClick) {
+      fail(`browser_extension_final_order_intent_interruption_replayed_or_counted_as_dispatch:${JSON.stringify({
+        interruptedFinalSubmit,
+        interruptedNativeClick
+      })}`);
+    }
+
     checkpoints.length = 0;
     fulfillment = null;
     const resumeFinalSubmitPlan = buildExtensionPlan({
@@ -3041,7 +3102,8 @@ async function main() {
       resumedSteps: resumeActionIds,
       addressVariant: 'RD/STE and ZIP+4 with unrelated checked checkout control',
       pickupModalIgnored: true,
-      finalOrderReceiptCheckpointed: true
+      finalOrderReceiptCheckpointed: true,
+      intentOnlyFinalSubmitRejected: true
     });
 
     checkpoints.length = 0;

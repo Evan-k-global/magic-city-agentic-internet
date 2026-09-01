@@ -2106,7 +2106,8 @@ function observedVerifiedMilestones(report = {}, action = {}, outcome = {}, { ca
     && outcome.completed
     && outcome.finalSubmitRequested
     && (
-      outcome.finalSubmitReceipt?.kind === 'final_order'
+      (outcome.finalSubmitReceipt?.kind === 'final_order'
+        && outcome.finalSubmitReceipt?.phase === 'click_dispatched')
       // A worker may recover only after Amazon has already confirmed the
       // purchase. That is stronger evidence than a local click receipt and
       // must not be downgraded solely because the original tab navigated.
@@ -3201,7 +3202,11 @@ async function runSession(rawSession) {
           [receipt]
         );
       }
-      report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested);
+      const finalSubmitDispatched = outcome.finalSubmitReceipt?.kind === 'final_order'
+        && outcome.finalSubmitReceipt?.phase === 'click_dispatched';
+      report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested && (
+        action.type !== 'final_submit' || finalSubmitDispatched || outcome.orderSubmitted === true
+      ));
       report.orderSubmitted = Boolean(outcome.orderSubmitted || report.orderSubmitted);
       report.lastRunnerAction = String(outcome.label || '');
       const reportStage = String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase();
@@ -3327,7 +3332,8 @@ async function runSession(rawSession) {
       // particular, never make recovery believe the irreversible click ran
       // unless the content script recorded its pre-dispatch receipt.
       const finalSubmitReceiptRecorded = action.type !== 'final_submit'
-        || Boolean(report.runnerStep.finalSubmitReceipt);
+        || (report.runnerStep.finalSubmitReceipt?.kind === 'final_order'
+          && report.runnerStep.finalSubmitReceipt?.phase === 'click_dispatched');
       await saveActiveRun({
         sessionId: session.id,
         planHash: plan.planHash,
@@ -3338,7 +3344,7 @@ async function runSession(rawSession) {
         nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
         selectedCandidate: progress.selectedCandidate
       });
-      if (action.awaitMerchantOrderConfirmation === true && outcome.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
+      if (action.awaitMerchantOrderConfirmation === true && report.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
         const confirmationDeadlineMs = Date.parse(String(executionAction.merchantConfirmationDeadlineAt || ''));
         if (Number.isFinite(confirmationDeadlineMs) && confirmationDeadlineMs <= Date.now()) {
           return reportAndStop(session, plan, {

@@ -1,5 +1,8 @@
 (() => {
-  if (globalThis.__magicCityExecutorInstalled) return;
+  // Each executeScript call gets a fresh lexical scope, but the extension's
+  // isolated world survives. Reinstall the current handler on every command
+  // while keeping only one runtime listener below; otherwise an earlier
+  // executor closure can answer a later command with stale page state.
   globalThis.__magicCityExecutorInstalled = true;
 
   const FINAL_ACTION_PATTERN = /place (your )?order|confirm purchase|complete purchase|pay now|submit order|buy now|confirm and pay/i;
@@ -2383,16 +2386,28 @@
     return { intentReceipt, dispatchReady };
   }
 
-  function priorFinalOrderIntent(actionId = '', receiptScope = '', receipts = []) {
+  function priorFinalOrderReceipt(actionId = '', receiptScope = '', receipts = [], phase = '') {
     const normalizedActionId = String(actionId || '').trim();
     const normalizedScope = String(receiptScope || '').trim();
+    const normalizedPhase = String(phase || '').trim();
     return (Array.isArray(receipts) ? receipts : []).find((receipt) => (
       receipt
       && receipt.kind === 'final_order'
-      && receipt.phase === 'final_submit_intent'
+      && (!normalizedPhase || receipt.phase === normalizedPhase)
       && (!normalizedActionId || String(receipt.actionId || '') === normalizedActionId)
       && (!normalizedScope || String(receipt.receiptScope || '') === normalizedScope)
     )) || null;
+  }
+
+  function finalOrderReceiptsFor(state = {}) {
+    // The page snapshot can be created just before a navigation or a fresh
+    // executor injection. Read the durable tab-local receipts again at the
+    // irreversible boundary so a persisted intent can never be replayed.
+    return [...(
+      Array.isArray(state?.browserActionReceipts)
+        ? state.browserActionReceipts
+        : []
+    ), ...currentBrowserActionReceipts()];
   }
 
   function dispatchInput(element, value) {
@@ -3816,17 +3831,38 @@
     if (summary.deliveryConfirmed !== true) {
       return { completed: false, reason: 'The preferred delivery option is not confirmed yet.', state };
     }
-    // An Amazon navigation may outlive a checkpoint request. Once an intent is
-    // recorded, this exact tab session must observe the merchant result rather
-    // than dispatching the irreversible control a second time.
-    const existingIntent = priorFinalOrderIntent(action.id, action.receiptScope, state.browserActionReceipts);
-    if (existingIntent) {
+    // An Amazon navigation may outlive a checkpoint request. Only a persisted
+    // dispatch receipt proves that the native control was actually invoked.
+    // Intent alone is deliberately not replayed or treated as proof: the
+    // original page may have died between intent and click.
+    const finalOrderReceipts = finalOrderReceiptsFor(state);
+    const existingDispatch = priorFinalOrderReceipt(
+      action.id,
+      action.receiptScope,
+      finalOrderReceipts,
+      'click_dispatched'
+    );
+    if (existingDispatch) {
       return {
         completed: true,
         skipped: true,
         finalSubmitRequested: true,
-        finalSubmitReceipt: existingIntent,
+        finalSubmitReceipt: existingDispatch,
         reason: 'Final order click was already requested; awaiting merchant confirmation.',
+        state
+      };
+    }
+    const existingIntent = priorFinalOrderReceipt(
+      action.id,
+      action.receiptScope,
+      finalOrderReceipts,
+      'final_submit_intent'
+    );
+    if (existingIntent) {
+      return {
+        completed: false,
+        noReplay: true,
+        reason: 'Final order dispatch was interrupted before the native merchant click. Magic City will not replay an irreversible order action.',
         state
       };
     }
