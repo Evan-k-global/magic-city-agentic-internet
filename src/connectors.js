@@ -369,6 +369,9 @@ function inferBrowserBudget(prompt = '') {
 
 function inferBrowserStopCondition(prompt = '') {
   const lower = String(prompt || '').toLowerCase();
+  if (/\b(?:amazon|bezos|everything store)\b/.test(lower) && /\b(payment|pay|checkout|purchase|buy|order)\b/.test(lower)) {
+    return 'Pause at login, captcha, payment, or checkout mismatch';
+  }
   if (/\b(final submit|submit|application)\b/.test(lower)) return 'Pause before final submit';
   if (/\b(payment|pay|checkout|purchase|buy|order)\b/.test(lower)) return 'Pause before payment or final purchase';
   if (/\blogin|sign in|account\b/.test(lower)) return 'Pause at login or account creation';

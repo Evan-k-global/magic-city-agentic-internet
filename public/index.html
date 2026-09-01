@@ -6154,6 +6154,10 @@
     const PROFILE_VAULT_DB = 'magic_city_local_secure_store_v1';
     const PROFILE_VAULT_DB_STORE = 'vaultKeys';
     const CHECKOUT_FINAL_REVIEW_KEY = 'magic_city_require_final_checkout_review_v1';
+    // v1 stored a safety-first default as a durable preference. Amazon checkout
+    // now defaults to the signed one-run auto-submit path, so only a deliberate
+    // v2 choice may keep the old review boundary for new missions.
+    const CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY = 'magic_city_final_checkout_review_preference_v2';
     const PROFILE_VAULT_LOCKED_NOTE = 'Save local workflow info behind device lock. Browser autofill or wallet handles final card entry; Magic City asks before unlocking exact details.';
 	    const attemptedLiveFoodDiscovery = new Set();
 	    const executionPendingSessions = new Set();
@@ -6226,7 +6230,8 @@
     }
 
     function requiresFinalCheckoutReview() {
-      return localStorage.getItem(CHECKOUT_FINAL_REVIEW_KEY) === 'true';
+      return localStorage.getItem(CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY) === 'explicit'
+        && localStorage.getItem(CHECKOUT_FINAL_REVIEW_KEY) === 'true';
     }
 
     function preferredBrowserFinalApprovalPolicy() {
@@ -14378,19 +14383,19 @@
               host ? `from ${host}` : '',
               budget ? `within the shared ${budget} budget` : '',
               `items: ${shoppingItems.slice(0, 12).join('; ')}${shoppingItems.length > 12 ? `; +${shoppingItems.length - 12} more` : ''}`
-            ].filter(Boolean).join(' ') + '. Pause before payment or final purchase.'
+            ].filter(Boolean).join(' ') + '. Pause only for login, payment, captcha, or a checkout mismatch.'
         : product
           ? (isTravelTask
             ? [
                 `Prepare ${product}`,
                 host ? `on ${host}` : '',
                 budget ? `within ${budget}` : ''
-              ].filter(Boolean).join(' ') + '. Pause before payment or final purchase.'
+              ].filter(Boolean).join(' ') + '. Pause only for login, payment, captcha, or a checkout mismatch.'
             : [
                 `Buy ${product}`,
                 host ? `from ${host}` : '',
                 budget ? `with max spend ${budget}` : ''
-              ].filter(Boolean).join(' ') + '. Pause before payment or final purchase.')
+              ].filter(Boolean).join(' ') + '. Pause only for login, payment, captcha, or a checkout mismatch.')
         : nextGoalSeed;
       return {
         ...current,
@@ -14418,7 +14423,7 @@
           finalApprovalPolicy: preferredBrowserFinalApprovalPolicy()
         } : {}),
         actionDepth: current.actionDepth || 'Prepare cart or form',
-        stopCondition: current.stopCondition || 'Pause before payment or final purchase',
+        stopCondition: current.stopCondition || 'Pause only for login, payment, captcha, or a checkout mismatch',
         paymentFundingMode: current.paymentFundingMode || 'magic_city_credits'
       };
     }
@@ -20523,6 +20528,7 @@
 
     $('vaultRequireFinalCheckoutReview')?.addEventListener('change', () => {
       localStorage.setItem(CHECKOUT_FINAL_REVIEW_KEY, $('vaultRequireFinalCheckoutReview').checked ? 'true' : 'false');
+      localStorage.setItem(CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY, 'explicit');
       syncFinalCheckoutReviewPreferenceUi();
       if (activeExecutionSessionId) void renderExecutionSheet(activeExecutionSessionId, { focus: false });
     });

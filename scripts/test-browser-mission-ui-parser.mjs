@@ -93,6 +93,16 @@ assert.match(html, /finalSubmitApproval/, 'final order approval must send a boun
 assert.match(serverSource, /magic-city-final-submit-approval-v1/, 'server must commit final-order approval receipts');
 assert.match(serverSource, /finalSubmitApprovalHash/, 'mission contracts must bind the final-order approval hash');
 assert.match(
+  html,
+  /CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY[\s\S]*function requiresFinalCheckoutReview\(\)[\s\S]*=== 'explicit'[\s\S]*CHECKOUT_FINAL_REVIEW_KEY\) === 'true'/,
+  'legacy final-review preferences must not silently pause new Amazon missions'
+);
+assert.match(
+  html,
+  /vaultRequireFinalCheckoutReview[\s\S]*CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY, 'explicit'/,
+  'a user must be able to explicitly opt back into final review'
+);
+assert.match(
   serverSource,
   /const canDispatchExtensionWake = Boolean\([\s\S]*declarativeExtensionRun[\s\S]*nativeRunnerReadiness\.device[\s\S]*!nativeRunnerReadiness\.extensionUpdateRequired/,
   'only a paired, current declarative extension may receive a direct exact-session wake'
@@ -138,7 +148,7 @@ assert.match(localRunnerExecutor, /function applyAmazonFulfillmentPreference/, '
 assert.match(localRunnerExecutor, /const selected = primeRequired \? prime : \(prime \|\| freeShipping\)/, 'Prime-only missions must never fall back to a generic free-shipping refinement');
 assert.match(browserMissionPlan, /intent: 'prefer_free_delivery'/, 'Amazon mission plans must include a reversible delivery-filter action');
 assert.match(localRunnerLegacyBackground, /'add_to_cart', 'checkout', 'prefer_free_delivery'/, 'the signed mission validator must explicitly allow the bounded delivery-filter intent');
-assert.match(localRunnerExecutor, /selectPreferredDeliveryOption\(\{ primeRequired = false \} = \{\}\)/, 'checkout must select fastest free delivery and reject paid fallback for Prime-only missions');
+assert.match(localRunnerExecutor, /selectPreferredDeliveryOption\(\{ primeRequired = false, fulfillmentMode = '' \} = \{\}\)/, 'checkout must select fastest free delivery and reject paid fallback for Prime-only missions');
 assert.match(localRunnerExecutor, /shippingTotalEvidenceForSurface/, 'checkout must verify the final shipping total separately');
 assert.match(localRunnerExecutor, /\.a-button/, 'final order submission must inspect Amazon-style nested yellow buttons');
 assert.match(localRunnerExecutor, /finalOrderControls\(\)[\s\S]*visibleControlLabel\(root, 220\)/, 'final order submission must use visible wrapper labels');
