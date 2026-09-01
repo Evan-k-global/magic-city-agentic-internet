@@ -12,7 +12,8 @@
   const POSITIVE_OFFER_PATTERN = /(?:get|join|start|try|add|accept|yes|claim).*(?:prime|trial|membership|free one-day|protection|warranty)|subscribe\s*&\s*save/i;
   const SELECTED_CANDIDATE_TTL_MS = 2 * 60 * 1000;
   const RECENT_BROWSER_ACTIONS_LIMIT = 12;
-  const recentBrowserActions = [];
+  const BROWSER_ACTION_RECEIPTS_STORAGE_KEY = 'magic_city_browser_action_receipts_v1';
+  const recentBrowserActions = loadBrowserActionReceipts();
   let activeActionContext = null;
   const US_STATE_CODES = {
     alabama: 'al', alaska: 'ak', arizona: 'az', arkansas: 'ar', california: 'ca', colorado: 'co', connecticut: 'ct', delaware: 'de', florida: 'fl', georgia: 'ga', hawaii: 'hi', idaho: 'id', illinois: 'il', indiana: 'in', iowa: 'ia', kansas: 'ks', kentucky: 'ky', louisiana: 'la', maine: 'me', maryland: 'md', massachusetts: 'ma', michigan: 'mi', minnesota: 'mn', mississippi: 'ms', missouri: 'mo', montana: 'mt', nebraska: 'ne', nevada: 'nv', 'new hampshire': 'nh', 'new jersey': 'nj', 'new mexico': 'nm', 'new york': 'ny', 'north carolina': 'nc', 'north dakota': 'nd', ohio: 'oh', oklahoma: 'ok', oregon: 'or', pennsylvania: 'pa', 'rhode island': 'ri', 'south carolina': 'sc', 'south dakota': 'sd', tennessee: 'tn', texas: 'tx', utah: 'ut', vermont: 'vt', virginia: 'va', washington: 'wa', 'west virginia': 'wv', wisconsin: 'wi', wyoming: 'wy'
@@ -92,7 +93,54 @@
 
   // Keep a compact, non-sensitive trace of merchant clicks. It is deliberately
   // categorical: no address text, card number, or merchant-page body is kept.
-  function browserClickKind(element) {
+  function loadBrowserActionReceipts() {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(BROWSER_ACTION_RECEIPTS_STORAGE_KEY) || '[]');
+      if (!Array.isArray(stored)) return [];
+      return stored.slice(-RECENT_BROWSER_ACTIONS_LIMIT).map((entry) => ({
+        actionId: String(entry?.actionId || '').slice(0, 96),
+        actionType: String(entry?.actionType || '').slice(0, 64),
+        intent: String(entry?.intent || '').slice(0, 64),
+        receiptScope: String(entry?.receiptScope || '').slice(0, 192),
+        kind: String(entry?.kind || '').slice(0, 64),
+        phase: String(entry?.phase || '').slice(0, 64),
+        controlTag: String(entry?.controlTag || '').slice(0, 32),
+        controlType: String(entry?.controlType || '').slice(0, 32),
+        path: String(entry?.path || '').slice(0, 240),
+        at: entry?.at || null
+      })).filter((entry) => entry.kind && entry.at);
+    } catch {
+      return [];
+    }
+  }
+
+  function persistBrowserActionReceipts() {
+    try {
+      sessionStorage.setItem(BROWSER_ACTION_RECEIPTS_STORAGE_KEY, JSON.stringify(recentBrowserActions.slice(-RECENT_BROWSER_ACTIONS_LIMIT)));
+    } catch {
+      // The in-memory receipt still accompanies the current browser response.
+    }
+  }
+
+  function currentBrowserActionReceipts() {
+    const receiptsByIdentity = new Map();
+    for (const receipt of [...loadBrowserActionReceipts(), ...recentBrowserActions]) {
+      if (!receipt?.kind || !receipt?.at) continue;
+      const identity = [
+        receipt.actionId || '',
+        receipt.receiptScope || '',
+        receipt.kind || '',
+        receipt.phase || '',
+        receipt.at || ''
+      ].join('|');
+      receiptsByIdentity.set(identity, receipt);
+    }
+    return [...receiptsByIdentity.values()]
+      .sort((left, right) => String(left.at || '').localeCompare(String(right.at || '')))
+      .slice(-RECENT_BROWSER_ACTIONS_LIMIT);
+  }
+
+  function browserClickKind(element, validatedLabel = '') {
     const directLabel = compactText([
       element?.getAttribute?.('aria-label'),
       element?.getAttribute?.('title'),
@@ -101,7 +149,7 @@
       element?.textContent
     ].filter(Boolean).join(' '), 80);
     if (/(?:^|\s)(?:x|×|close|cancel|done)(?:\s|$)/i.test(directLabel)) return 'pickup_overlay_close';
-    const text = compactText(`${visibleControlLabel(element, 180)}\n${controlDescriptor(element)}`, 400);
+    const text = compactText(`${validatedLabel}\n${visibleControlLabel(element, 180)}\n${controlDescriptor(element)}`, 400);
     if (/\bplace(?: your)? order|submit order|confirm and pay\b/i.test(text)) return 'final_order';
     if (/\buse this payment method\b/i.test(text)) return 'payment_confirm';
     if (/\bdeliver to this address|use this address\b/i.test(text)) return 'address_confirm';
@@ -109,12 +157,16 @@
     return 'safe_browser_click';
   }
 
-  function recordBrowserClick(element, context = activeActionContext) {
+  function recordBrowserClick(element, context = activeActionContext, { kind = '', phase = '', validatedLabel = '' } = {}) {
     const receipt = {
       actionId: String(context?.actionId || '').slice(0, 96),
       actionType: String(context?.actionType || '').slice(0, 64),
       intent: String(context?.intent || '').slice(0, 64),
-      kind: browserClickKind(element),
+      receiptScope: String(context?.receiptScope || '').slice(0, 192),
+      kind: kind || browserClickKind(element, validatedLabel),
+      ...(phase ? { phase: String(phase).slice(0, 64) } : {}),
+      controlTag: String(element?.tagName || '').toLowerCase().slice(0, 32),
+      controlType: String(element?.getAttribute?.('type') || '').toLowerCase().slice(0, 32),
       path: String(location.pathname || '').slice(0, 240),
       at: new Date().toISOString()
     };
@@ -122,6 +174,7 @@
     if (recentBrowserActions.length > RECENT_BROWSER_ACTIONS_LIMIT) {
       recentBrowserActions.splice(0, recentBrowserActions.length - RECENT_BROWSER_ACTIONS_LIMIT);
     }
+    persistBrowserActionReceipts();
     return receipt;
   }
 
@@ -2202,7 +2255,7 @@
       finalReviewReady,
       paymentNeedsHuman,
       paymentIssue,
-      browserActionReceipts: recentBrowserActions.slice(),
+      browserActionReceipts: currentBrowserActionReceipts(),
       availableActions: controls
         .filter((label) => /cart|checkout|continue|shipping|address|payment|place|order/i.test(label))
         .slice(0, 4)
@@ -2217,6 +2270,9 @@
     // Let the runtime serialize the signed response before a merchant
     // navigation can unload this content-script message channel.
     const actionContext = activeActionContext;
+    // Yield once so the extension message carrying final_submit_intent can
+    // serialize, but do not leave a long window for MV3 or the page lifecycle
+    // to tear down this content script before the already-authorized click.
     setTimeout(() => {
       if (!visible(element) || element.disabled) return;
       try {
@@ -2243,27 +2299,100 @@
     }
   }
 
-  function scheduleFinalOrderClick(element) {
-    if (!visible(element) || element.disabled) return null;
-    const label = textFor(element);
-    if (!FINAL_ACTION_PATTERN.test(label) || pickupOrLockerControl(element)) return null;
-    element.scrollIntoView({ block: 'center', inline: 'center' });
+  function scheduleFinalOrderClick(control) {
+    const clickTarget = control?.clickTarget || control;
+    const wrapper = control?.wrapper || clickTarget;
+    const validatedLabel = compactText(control?.validatedLabel || visibleControlLabel(wrapper, 220), 220);
+    const nativeSubmitTarget = Boolean(clickTarget?.matches?.('input[type="submit"], input[type="button"], button'));
+    // Amazon's native submit input can be visually collapsed inside the
+    // visible a-button wrapper. The wrapper carries the user-visible label;
+    // an enabled native descendant remains the correct click target.
+    if (!visible(wrapper) || (!visible(clickTarget) && !nativeSubmitTarget) || clickTarget.disabled) return null;
+    // The wrapper is the element whose visible Amazon text was verified. The
+    // nested native input can legitimately have no standalone accessible name.
+    // Never discard that verified context and reclassify the nested input.
+    if (!FINAL_ACTION_PATTERN.test(validatedLabel) || pickupOrLockerControl(wrapper) || pickupOrLockerControl(clickTarget)) return null;
+    clickTarget.scrollIntoView({ block: 'center', inline: 'center' });
 
     // A merchant navigation can destroy this content-script context before a
     // synchronous click result reaches the background worker. Persist the
     // categorical receipt first, return it with the action result, then make
     // the one already-authorized merchant click after the message serializes.
-    const receipt = recordBrowserClick(element, activeActionContext);
-    setTimeout(() => {
-      if (!visible(element) || element.disabled) return;
-      try {
-        element.click();
-      } catch {
-        // The confirmation observer reports a terminal failure if navigation
-        // never happens; the irreversible control is never replayed.
+    const intentReceipt = recordBrowserClick(clickTarget, activeActionContext, {
+      kind: 'final_order',
+      phase: 'final_submit_intent',
+      validatedLabel
+    });
+    const actionContext = activeActionContext;
+    let resolveDispatch;
+    const dispatchReady = new Promise((resolve) => {
+      resolveDispatch = resolve;
+    });
+    setTimeout(async () => {
+      if (!visible(wrapper) || (!visible(clickTarget) && !nativeSubmitTarget) || clickTarget.disabled) {
+        resolveDispatch({ receipt: null, reason: 'The final order control became unavailable before its click was dispatched.' });
+        return;
       }
-    }, 80);
-    return receipt;
+      try {
+        // Persist this just before invocation. It survives an Amazon
+        // navigation so a control-plane timeout cannot replay the order.
+        const dispatchReceipt = recordBrowserClick(clickTarget, actionContext, {
+          kind: 'final_order',
+          phase: 'click_dispatched',
+          validatedLabel
+        });
+        // Best-effort out-of-band handoff for the post-dispatch receipt. The
+        // background keeps this scoped receipt long enough to include it in
+        // the signed checkpoint even if Amazon unloads this document at once.
+        // It carries no merchant text, address, or payment data.
+        const dispatchHandoff = chrome.runtime.sendMessage({
+          type: 'MAGIC_CITY_FINAL_ORDER_DISPATCHED',
+          receipt: dispatchReceipt
+        }).catch(() => null);
+        // Give the background a short, bounded opportunity to durably retain
+        // the dispatch receipt before Amazon can unload this document. A
+        // missed acknowledgement never blocks the already-authorized click.
+        const handoff = await Promise.race([
+          dispatchHandoff,
+          new Promise((resolve) => setTimeout(() => resolve(null), 320))
+        ]);
+        // Return only after the immutable action receipt exists. The plan
+        // response can now checkpoint the dispatch before the merchant page
+        // starts navigating, preventing a timeout from replaying the click.
+        resolveDispatch({
+          receipt: dispatchReceipt,
+          handoffSaved: Boolean(handoff?.result?.saved || handoff?.saved)
+        });
+        setTimeout(() => {
+          if (!visible(wrapper) || (!visible(clickTarget) && !nativeSubmitTarget) || clickTarget.disabled) return;
+          try {
+            recordBrowserClick(clickTarget, actionContext, {
+              kind: 'final_order',
+              phase: 'native_click_invoked',
+              validatedLabel
+            });
+            clickTarget.click();
+          } catch {
+            // The next observer reports a terminal failure; never replay.
+          }
+        }, 50);
+      } catch {
+        resolveDispatch({ receipt: null, reason: 'The final order dispatch receipt could not be recorded.' });
+      }
+    }, 0);
+    return { intentReceipt, dispatchReady };
+  }
+
+  function priorFinalOrderIntent(actionId = '', receiptScope = '', receipts = []) {
+    const normalizedActionId = String(actionId || '').trim();
+    const normalizedScope = String(receiptScope || '').trim();
+    return (Array.isArray(receipts) ? receipts : []).find((receipt) => (
+      receipt
+      && receipt.kind === 'final_order'
+      && receipt.phase === 'final_submit_intent'
+      && (!normalizedActionId || String(receipt.actionId || '') === normalizedActionId)
+      && (!normalizedScope || String(receipt.receiptScope || '') === normalizedScope)
+    )) || null;
   }
 
   function dispatchInput(element, value) {
@@ -3597,19 +3726,25 @@
     const controls = [];
     const seen = new Set();
     for (const root of roots) {
-      const target = root.matches?.('button, a, input[type="submit"], input[type="button"], [role="button"]')
-        ? root
-        : root.querySelector?.('input[type="submit"], input[type="button"], button, [role="button"]') || root;
-      if ((!visible(root) && !visible(target)) || target.disabled) continue;
-      const label = visibleControlLabel(root, 220) || visibleControlLabel(target, 220) || compactText(textFor(target), 220);
+      // Amazon often wraps the visible order label in a role=button surface
+      // around the actual native submit input. Prefer that nested native
+      // control when it exists; clicking the wrapper itself is not equivalent
+      // and can be a no-op.
+      const nestedNativeControl = root.querySelector?.('input[type="submit"], input[type="button"], button') || null;
+      const clickTarget = nestedNativeControl
+        || (root.matches?.('button, a, input[type="submit"], input[type="button"], [role="button"]') ? root : null)
+        || root.querySelector?.('[role="button"]')
+        || root;
+      if ((!visible(root) && !visible(clickTarget)) || clickTarget.disabled) continue;
+      const label = visibleControlLabel(root, 220) || visibleControlLabel(clickTarget, 220) || compactText(textFor(clickTarget), 220);
       const hasFinalOrderIntent = /^(?:place(?: your)? order|submit order|confirm and pay)$/i.test(label)
         || /\b(?:place(?: your)? order|submit order|confirm and pay)\b/i.test(label);
       const unsafe = /\b(?:use this payment method|gift card|promo code|prime|trial|subscribe|delivery address|payment method)\b/i.test(label)
         && !/\bplace(?: your)? order\b/i.test(label);
       if (!hasFinalOrderIntent || unsafe) continue;
-      if (seen.has(target)) continue;
-      seen.add(target);
-      controls.push(target);
+      if (seen.has(clickTarget)) continue;
+      seen.add(clickTarget);
+      controls.push({ wrapper: root, clickTarget, validatedLabel: label });
     }
     return controls;
   }
@@ -3681,12 +3816,26 @@
     if (summary.deliveryConfirmed !== true) {
       return { completed: false, reason: 'The preferred delivery option is not confirmed yet.', state };
     }
+    // An Amazon navigation may outlive a checkpoint request. Once an intent is
+    // recorded, this exact tab session must observe the merchant result rather
+    // than dispatching the irreversible control a second time.
+    const existingIntent = priorFinalOrderIntent(action.id, action.receiptScope, state.browserActionReceipts);
+    if (existingIntent) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        finalSubmitReceipt: existingIntent,
+        reason: 'Final order click was already requested; awaiting merchant confirmation.',
+        state
+      };
+    }
     const controls = finalOrderControls();
     if (!controls.length) {
       return { completed: false, reason: 'Magic City could not identify a verified final order control.', state };
     }
     const control = controls[0];
-    if (control.disabled) {
+    if (control.clickTarget.disabled) {
       return { completed: false, reason: 'The final order control is not available.', state };
     }
     // This Amazon preference changes a persistent merchant default. Only touch
@@ -3697,17 +3846,29 @@
       ? saveAmazonCheckoutDefault()
       : { attempted: false, saved: false, reason: 'not_requested' };
     try {
-      const finalSubmitReceipt = scheduleFinalOrderClick(control);
-      if (!finalSubmitReceipt) {
+      const scheduledFinalSubmit = scheduleFinalOrderClick(control);
+      if (!scheduledFinalSubmit) {
         return { completed: false, reason: 'The merchant final order control could not be clicked safely.', state };
+      }
+      const dispatchedFinalSubmit = await scheduledFinalSubmit.dispatchReady;
+      if (!dispatchedFinalSubmit?.receipt) {
+        return {
+          completed: false,
+          reason: dispatchedFinalSubmit?.reason || 'The merchant final order control could not be dispatched safely.',
+          state: pageState(profile)
+        };
       }
       const stateAfterFinalSubmitRequested = pageState(profile);
       return {
         completed: true,
         navigationRequested: true,
         finalSubmitRequested: true,
-        finalSubmitReceipt,
-        label: visibleControlLabel(control, 140) || compactText(textFor(control), 140),
+        finalSubmitReceipt: dispatchedFinalSubmit.receipt,
+        finalSubmitReceipts: [
+          scheduledFinalSubmit.intentReceipt,
+          dispatchedFinalSubmit.receipt
+        ],
+        label: compactText(control.validatedLabel, 140),
         merchantCheckoutDefault,
         checkoutPickupModalClosed: closedPickupModal.closed,
         state: stateAfterFinalSubmitRequested
@@ -4047,7 +4208,8 @@
     activeActionContext = {
       actionId: action.id || '',
       actionType: action.type || '',
-      intent: action.intent || ''
+      intent: action.intent || '',
+      receiptScope: action.receiptScope || ''
     };
     try {
       if (action.type === 'inspect' || action.type === 'pause') return { completed: true, state: pageState(checkoutProfile || {}) };
@@ -4081,14 +4243,29 @@
     }
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    (async () => {
+  const EXECUTOR_MESSAGE_HANDLER_KEY = '__magicCityExecutorMessageHandlerV1';
+  const EXECUTOR_MESSAGE_LISTENER_KEY = '__magicCityExecutorMessageListenerInstalledV1';
+
+  // Chrome executes this file for each browser command. Keep a single
+  // listener in the extension's isolated world, but replace its handler on
+  // every injection so a later state read cannot be answered by an earlier
+  // executor instance with stale in-memory receipts.
+  globalThis[EXECUTOR_MESSAGE_HANDLER_KEY] = async (message) => {
       if (message?.type === 'MAGIC_CITY_BROWSER_STATE') return pageState(message.checkoutProfile || {});
       if (message?.type === 'MAGIC_CITY_EXECUTE_PLAN_STEP') return executePlanStep(message.action || {}, message.checkoutProfile || null);
       return { ok: true };
-    })()
-      .then(sendResponse)
-      .catch((error) => sendResponse({ completed: false, reason: error?.message || String(error), state: pageState() }));
-    return true;
-  });
+  };
+
+  if (!globalThis[EXECUTOR_MESSAGE_LISTENER_KEY]) {
+    globalThis[EXECUTOR_MESSAGE_LISTENER_KEY] = true;
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      const handler = globalThis[EXECUTOR_MESSAGE_HANDLER_KEY];
+      Promise.resolve(typeof handler === 'function'
+        ? handler(message)
+        : { completed: false, reason: 'Magic City browser executor is unavailable.' })
+        .then(sendResponse)
+        .catch((error) => sendResponse({ completed: false, reason: error?.message || String(error) }));
+      return true;
+    });
+  }
 })();

@@ -431,6 +431,7 @@ async function getConfig() {
     activeMissionTabs: {},
     localCheckoutProfiles: {},
     pendingPaymentWaits: {},
+    finalOrderDispatches: {},
     useExistingBrowser: false,
     pairedAt: ''
   });
@@ -439,6 +440,62 @@ async function getConfig() {
 async function saveConfig(patch = {}) {
   await chrome.storage.local.set(patch);
   return getConfig();
+}
+
+function compactFinalOrderDispatchReceipt(receipt = {}) {
+  if (!receipt || receipt.kind !== 'final_order' || receipt.phase !== 'click_dispatched') return null;
+  const actionId = String(receipt.actionId || '').slice(0, 96);
+  const receiptScope = String(receipt.receiptScope || '').slice(0, 192);
+  if (!actionId || !receiptScope) return null;
+  return {
+    actionId,
+    actionType: String(receipt.actionType || '').slice(0, 64),
+    intent: String(receipt.intent || '').slice(0, 64),
+    receiptScope,
+    kind: 'final_order',
+    phase: 'click_dispatched',
+    controlTag: String(receipt.controlTag || '').slice(0, 32),
+    controlType: String(receipt.controlType || '').slice(0, 32),
+    path: String(receipt.path || '').slice(0, 240),
+    at: receipt.at || new Date().toISOString()
+  };
+}
+
+function mergeBrowserActionReceipts(...receiptLists) {
+  const receiptsByIdentity = new Map();
+  for (const receipt of receiptLists.flat()) {
+    if (!receipt || typeof receipt !== 'object' || !receipt.kind || !receipt.at) continue;
+    const identity = [
+      receipt.actionId || '',
+      receipt.receiptScope || '',
+      receipt.kind || '',
+      receipt.phase || '',
+      receipt.at || ''
+    ].join('|');
+    receiptsByIdentity.set(identity, receipt);
+  }
+  return [...receiptsByIdentity.values()]
+    .sort((left, right) => String(left.at || '').localeCompare(String(right.at || '')))
+    .slice(-24);
+}
+
+async function saveFinalOrderDispatchReceipt(tabId, receipt) {
+  const normalizedTabId = Number(tabId || 0);
+  const compactReceipt = compactFinalOrderDispatchReceipt(receipt);
+  if (!normalizedTabId || !compactReceipt) return { saved: false };
+  const config = await getConfig();
+  const dispatches = config.finalOrderDispatches && typeof config.finalOrderDispatches === 'object'
+    ? { ...config.finalOrderDispatches }
+    : {};
+  dispatches[String(normalizedTabId)] = compactReceipt;
+  await saveConfig({ finalOrderDispatches: dispatches });
+  return { saved: true, receipt: compactReceipt };
+}
+
+async function finalOrderDispatchReceiptFor(tabId, receiptScope = '') {
+  const config = await getConfig();
+  const receipt = config.finalOrderDispatches?.[String(Number(tabId || 0))] || null;
+  return receipt?.receiptScope === String(receiptScope || '') ? receipt : null;
 }
 
 function normalizeActiveRunCandidate(candidate = null) {
@@ -2045,7 +2102,17 @@ function observedVerifiedMilestones(report = {}, action = {}, outcome = {}, { ca
   if (action.expectedMilestone === 'cart_confirmed' && cartCountVerified && signals.cartVisible) {
     observed.push('cart_confirmed');
   }
-  if (action.expectedMilestone === 'final_submit_requested' && outcome.completed && outcome.finalSubmitRequested) {
+  if (action.expectedMilestone === 'final_submit_requested'
+    && outcome.completed
+    && outcome.finalSubmitRequested
+    && (
+      outcome.finalSubmitReceipt?.kind === 'final_order'
+      // A worker may recover only after Amazon has already confirmed the
+      // purchase. That is stronger evidence than a local click receipt and
+      // must not be downgraded solely because the original tab navigated.
+      || outcome.orderSubmitted === true
+      || report.orderSubmitted === true
+    )) {
     observed.push('final_submit_requested');
   }
   return [...new Set(observed)];
@@ -2064,7 +2131,9 @@ function milestoneFailureReason(action = {}, report = {}, outcome = {}) {
     if (!signals.deliveryConfirmed) return 'The preferred delivery option is not confirmed yet.';
     return 'The merchant final-order review is not ready yet.';
   }
-  if (expected === 'final_submit_requested') return 'The approved final-order control was not invoked.';
+  if (expected === 'final_submit_requested') {
+    return String(outcome.reason || '').trim() || 'The approved final-order control was not invoked.';
+  }
   return `The required ${expected.replace(/_/g, ' ')} milestone was not verified.`;
 }
 
@@ -2257,6 +2326,13 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
 }
 
 async function executePlanAction(tabId, action, plan, checkoutProfile = null, assertActive = null) {
+  // This is runtime-only context, not a mutation of the signed plan. It scopes
+  // durable page receipts to this exact signed action so a completed order in a
+  // previous mission never suppresses a fresh mission in the same Amazon tab.
+  action = {
+    ...action,
+    receiptScope: `${String(plan?.planHash || '').slice(0, 96)}:${String(action?.id || '').slice(0, 96)}`
+  };
   if (plan.targetDomain === 'amazon.com' && action.type !== 'navigate') {
     const currentTab = await chrome.tabs.get(tabId).catch(() => null);
     if (currentTab?.url && !isAmazonRetailShoppingUrl(currentTab.url)) {
@@ -3010,7 +3086,43 @@ async function runSession(rawSession) {
         };
         progress.directSearchResultCart = Boolean(outcome.directSearchResultCart);
       }
-      const report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+      let report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+      if (action.type === 'final_submit' && Array.isArray(outcome.finalSubmitReceipts)) {
+        // The executor returns both pre-navigation receipts in its signed
+        // action response. Preserve that explicit pair even if a merchant
+        // navigation or a later page observation exposes only one of them.
+        report.browserActionReceipts = mergeBrowserActionReceipts(
+          Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [],
+          outcome.finalSubmitReceipts
+        );
+      }
+      if (action.type === 'final_submit' && outcome.finalSubmitReceipt) {
+        // submitFinalOrder returns the pre-dispatch receipt so this action is
+        // non-replayable even if Amazon unloads the page. Give the queued
+        // native click one event-loop turn, then capture its dispatched
+        // receipt in the same signed checkpoint whenever the tab is readable.
+        // A navigation failure here never causes another merchant click.
+        await delay(260);
+        const dispatchedState = await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' }).catch(() => null);
+        if (dispatchedState?.browserActionReceipts?.length) {
+          const priorReceipts = Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [];
+          report = {
+            ...report,
+            ...dispatchedState,
+            browserActionReceipts: mergeBrowserActionReceipts(
+              priorReceipts,
+              dispatchedState.browserActionReceipts
+            )
+          };
+        }
+        const dispatchedReceipt = await finalOrderDispatchReceiptFor(tab.id, action.receiptScope);
+        if (dispatchedReceipt) {
+          report.browserActionReceipts = mergeBrowserActionReceipts(
+            Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [],
+            [dispatchedReceipt]
+          );
+        }
+      }
       report.runnerStep = {
         actionId: action.id,
         actionType: action.type,
@@ -3068,7 +3180,11 @@ async function runSession(rawSession) {
               actionId: String(outcome.finalSubmitReceipt.actionId || '').slice(0, 96),
               actionType: String(outcome.finalSubmitReceipt.actionType || '').slice(0, 64),
               intent: String(outcome.finalSubmitReceipt.intent || '').slice(0, 64),
+              receiptScope: String(outcome.finalSubmitReceipt.receiptScope || '').slice(0, 192),
               kind: String(outcome.finalSubmitReceipt.kind || '').slice(0, 64),
+              phase: String(outcome.finalSubmitReceipt.phase || '').slice(0, 64),
+              controlTag: String(outcome.finalSubmitReceipt.controlTag || '').slice(0, 32),
+              controlType: String(outcome.finalSubmitReceipt.controlType || '').slice(0, 32),
               path: String(outcome.finalSubmitReceipt.path || '').slice(0, 240),
               at: outcome.finalSubmitReceipt.at || null
             }
@@ -3077,19 +3193,13 @@ async function runSession(rawSession) {
       };
       if (report.runnerStep.finalSubmitReceipt) {
         const receipt = report.runnerStep.finalSubmitReceipt;
-        const browserActionReceipts = Array.isArray(report.browserActionReceipts)
-          ? report.browserActionReceipts
-          : [];
-        const alreadyRecorded = browserActionReceipts.some((entry) => entry
-          && entry.kind === receipt.kind
-          && entry.actionId === receipt.actionId
-          && entry.at === receipt.at);
         // Keep the pre-navigation final-order receipt in the stable browser
         // receipt list as well as the runner-step envelope. Merchant
         // navigation may unload executor.js before a subsequent state read.
-        report.browserActionReceipts = alreadyRecorded
-          ? browserActionReceipts
-          : [...browserActionReceipts, receipt];
+        report.browserActionReceipts = mergeBrowserActionReceipts(
+          Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [],
+          [receipt]
+        );
       }
       report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested);
       report.orderSubmitted = Boolean(outcome.orderSubmitted || report.orderSubmitted);
@@ -3213,14 +3323,19 @@ async function runSession(rawSession) {
         planAction: action,
         planActionStatus: actionStatus
       });
+      // A failed final-order action must remain at its signed cursor. In
+      // particular, never make recovery believe the irreversible click ran
+      // unless the content script recorded its pre-dispatch receipt.
+      const finalSubmitReceiptRecorded = action.type !== 'final_submit'
+        || Boolean(report.runnerStep.finalSubmitReceipt);
       await saveActiveRun({
         sessionId: session.id,
         planHash: plan.planHash,
         phase: 'running',
         tabId: Number(tab?.id || 0) || null,
-        actionId: null,
-        actionIndex: null,
-        nextActionIndex: index + 1,
+        actionId: finalSubmitReceiptRecorded ? null : action.id,
+        actionIndex: finalSubmitReceiptRecorded ? null : index,
+        nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
         selectedCandidate: progress.selectedCandidate
       });
       if (action.awaitMerchantOrderConfirmation === true && outcome.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
@@ -3608,6 +3723,10 @@ async function activateRunner() {
 async function handleMessage(message, sender = null) {
   if (message?.type === 'PAIR_WITH_CODE') return pairWithCode(message);
   if (message?.type === 'SET_LOCAL_CHECKOUT_PROFILE') return setLocalCheckoutProfile(message, sender);
+  if (message?.type === 'MAGIC_CITY_FINAL_ORDER_DISPATCHED') {
+    const stored = await saveFinalOrderDispatchReceipt(sender?.tab?.id, message.receipt);
+    return { ok: true, saved: Boolean(stored?.saved) };
+  }
   if (message?.type === 'CHECK_STATUS') {
     let config = await getConfig();
     if (config.deviceToken) await registerExecutor(config);

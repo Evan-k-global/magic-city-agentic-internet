@@ -616,7 +616,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<label><input type="radio" name="delivery" /> Try Prime FREE one-day trial</label></div></div>',
       '<input aria-label="Billing street address" value="1 Wrong Billing Way" />',
       '<input aria-label="Billing ZIP code" value="99999" />',
-      '<button onclick="document.querySelector(\'#order-result\').textContent=\'Order placed\'; this.remove()">Place order</button>',
+      '<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="document.querySelector(\'#order-result\').textContent=\'Order placed\'; return false" /></div>',
       '<p id="order-result"></p>',
       '</main>'
     ].join('');
@@ -674,7 +674,12 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>',
       `<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p>${pickupDisclosure}</section>`,
       '<label><input id="merchant-checkout-default" type="checkbox" /> Default to this delivery address and payment method.</label>',
-      '<span class="a-button"><span class="a-button-inner"><input id="submitOrderButtonId" type="submit" aria-labelledby="submitOrderButtonId-announce" onclick="document.body.dataset.orderSubmitted=\'1\'; location.href=\'/checkout/order-confirmation\'" /><span id="submitOrderButtonId-announce" class="a-button-text">Place your order</span></span></span>',
+      // Amazon can put the visible final-order words on a wrapper while the
+      // native input itself has no standalone accessible label. Keep this
+      // realistic shape so the runner must preserve the wrapper validation
+      // when dispatching the native click.
+      '<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" /></div>',
+      '<script>document.addEventListener(\'click\', (event) => { if (event.target?.id !== \'submitOrderButtonId\') return; sessionStorage.setItem(\'magic-city-native-final-click\', \'1\'); document.body.dataset.orderSubmitted=\'1\'; event.preventDefault(); }, true)</script>',
       '</main>'
     ].join('');
   }
@@ -2911,6 +2916,12 @@ async function main() {
       && page.url().includes('/checkout/'));
     if (!preparedReviewPage) fail('browser_extension_final_review_page_missing');
     await preparedReviewPage.evaluate(() => {
+      window.__nativeFinalClickTargetId = '';
+      document.addEventListener('click', (event) => {
+        if (event.target?.id === 'submitOrderButtonId') {
+          window.__nativeFinalClickTargetId = event.target.id;
+        }
+      }, true);
       const summary = document.querySelector('#delivery-summary');
       if (summary) summary.textContent = '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States';
       const unrelated = document.createElement('label');
@@ -2992,9 +3003,39 @@ async function main() {
       fail(`browser_extension_final_review_pickup_overlay_not_closed:${pickupOverlayClosed || 'missing'}`);
     }
     const finalSubmitCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    const finalOrderReceipts = finalSubmitCheckpoint?.browser?.browserActionReceipts || [];
     if (finalSubmitCheckpoint?.browser?.runnerStep?.finalSubmitReceipt?.kind !== 'final_order'
-      || !finalSubmitCheckpoint?.browser?.browserActionReceipts?.some((receipt) => receipt?.kind === 'final_order')) {
-      fail(`browser_extension_final_order_receipt_missing_before_navigation:${JSON.stringify(finalSubmitCheckpoint?.browser?.runnerStep || {})}`);
+      || finalSubmitCheckpoint?.browser?.runnerStep?.finalSubmitReceipt?.phase !== 'click_dispatched'
+      || !finalOrderReceipts.some((receipt) => receipt?.kind === 'final_order' && receipt?.phase === 'final_submit_intent')
+      || !finalOrderReceipts.some((receipt) => receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched')) {
+      fail(`browser_extension_final_order_receipt_missing_before_navigation:${JSON.stringify({
+        runnerStep: finalSubmitCheckpoint?.browser?.runnerStep || {},
+        receipts: finalOrderReceipts
+      })}`);
+    }
+    const nativeFinalClick = await preparedReviewPage.evaluate(() => window.__nativeFinalClickTargetId || '');
+    if (nativeFinalClick !== 'submitOrderButtonId') {
+      fail(`browser_extension_final_order_native_control_not_clicked:${JSON.stringify({
+        url: preparedReviewPage.url(),
+        nativeFinalClick,
+        finalSubmit: finalSubmitCheckpoint?.browser?.runnerStep || null,
+        receipts: finalSubmitCheckpoint?.browser?.browserActionReceipts || [],
+        fulfillment: fulfillment?.result?.browserExecution || null
+      })}`);
+    }
+    if (!checkpoints.some((checkpoint) => checkpoint?.browser?.browserActionReceipts?.some((receipt) => (
+      receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched'
+    )))) {
+      const pageReceiptStorage = await preparedReviewPage.evaluate(() => sessionStorage.getItem('magic_city_browser_action_receipts_v1') || '');
+      fail(`browser_extension_final_order_dispatch_receipt_missing_after_navigation:${JSON.stringify({
+        checkpoints: checkpoints
+          .filter((checkpoint) => checkpoint.planActionId === 'submit-final-order' || checkpoint.planActionId === 'confirm-merchant-order')
+          .map((checkpoint) => ({
+            actionId: checkpoint.planActionId,
+            receipts: checkpoint.browser?.browserActionReceipts || []
+          })),
+        pageReceiptStorage
+      })}`);
     }
     recordPurchaseScenario('Manual final-review handoff resumes in the same prepared checkout tab', {
       resumedSteps: resumeActionIds,

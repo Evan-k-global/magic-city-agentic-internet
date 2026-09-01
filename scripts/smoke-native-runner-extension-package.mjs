@@ -82,6 +82,26 @@ if (!/const isCartMutation = action\.type === 'click_intent' && action\.intent =
 if (!/finalSubmitRequested: action\.type === 'final_submit' && Boolean\(recoveredState\?\.orderSubmitted/.test(packagedLegacyBackground)) {
   fail('a recovered merchant order confirmation must retain final-submit evidence');
 }
+const packagedExecutorPath = path.join(unpackedDir, 'executor.js');
+if (!fs.existsSync(packagedExecutorPath)) fail('package is missing executor.js');
+const packagedExecutor = fs.readFileSync(packagedExecutorPath, 'utf8');
+if (!/function scheduleFinalOrderClick\(control\)/.test(packagedExecutor)
+  || !/function currentBrowserActionReceipts\(\)/.test(packagedExecutor)
+  || !/validatedLabel/.test(packagedExecutor)
+  || !/phase: 'final_submit_intent'/.test(packagedExecutor)
+  || !/phase: 'click_dispatched'/.test(packagedExecutor)
+  || !/type: 'MAGIC_CITY_FINAL_ORDER_DISPATCHED'/.test(packagedExecutor)
+  || !/EXECUTOR_MESSAGE_LISTENER_KEY/.test(packagedExecutor)
+  || !/function priorFinalOrderIntent/.test(packagedExecutor)) {
+  fail('final order dispatch must retain wrapper validation, durable receipts, and a single current executor listener');
+}
+if (!/if \(message\?\.type === 'MAGIC_CITY_FINAL_ORDER_DISPATCHED'\)/.test(packagedLegacyBackground)
+  || !/saveFinalOrderDispatchReceipt\(sender\?\.tab\?\.id, message\.receipt\)/.test(packagedLegacyBackground)) {
+  fail('the background must persist the dispatched final-order receipt before page navigation can unload the content script');
+}
+if (!/nextActionIndex: finalSubmitReceiptRecorded \? index \+ 1 : index/.test(packagedLegacyBackground)) {
+  fail('a failed final submit must retain its signed action cursor');
+}
 const checkoutNavigationMarker = 'Opening checkout is navigation only.';
 const checkoutNavigationIndex = packagedLegacyBackground.indexOf(checkoutNavigationMarker);
 const checkoutNavigationSection = checkoutNavigationIndex >= 0
