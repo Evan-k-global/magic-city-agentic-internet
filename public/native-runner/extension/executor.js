@@ -3822,7 +3822,15 @@
     if (Number.isFinite(maxPrice) && maxPrice > 0 && Number.isFinite(merchandiseSubtotal) && merchandiseSubtotal > maxPrice + 0.005) {
       return { completed: false, reason: 'The verified merchandise subtotal exceeds the approved item budget.', state };
     }
-    if (!expectedCardLast4 || summary.cardMatches !== true) {
+    if (!expectedCardLast4) {
+      return {
+        completed: false,
+        localCheckoutProfileMissing: true,
+        reason: 'The local checkout profile is unavailable, so Magic City cannot verify the authorized card.',
+        state
+      };
+    }
+    if (summary.cardMatches !== true) {
       return { completed: false, reason: 'The selected merchant card does not match the Local Data Vault card cue.', state };
     }
     if (hasAddressPreset && summary.addressMatches !== true) {

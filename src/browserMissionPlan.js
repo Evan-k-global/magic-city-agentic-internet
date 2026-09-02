@@ -50,6 +50,8 @@ const VERIFIED_HUMAN_BOUNDARIES = new Set([
 ]);
 const UNVERIFIED_TECHNICAL_STOPS = new Set([
   'basket_item_not_added',
+  'final_submit_dispatch_failed',
+  'final_submit_unconfirmed',
   'local_checkout_profile_missing',
   'product_selection_needs_review',
   'milestone_not_verified',
@@ -136,10 +138,11 @@ export function evaluateBrowserExtensionFulfillment({ status = '', result = null
   );
 
   if (requestedStatus === 'failed') {
+    const terminalEvidenceVerified = !UNVERIFIED_TECHNICAL_STOPS.has(stopState);
     return {
       status: 'failed',
-      accepted: true,
-      proofEligible: !UNVERIFIED_TECHNICAL_STOPS.has(stopState),
+      accepted: terminalEvidenceVerified,
+      proofEligible: terminalEvidenceVerified,
       reason: stopState || 'runner_reported_failure'
     };
   }

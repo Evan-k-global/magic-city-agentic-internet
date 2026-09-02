@@ -597,38 +597,56 @@ function normalizeLocalCheckoutProfile(profile = {}) {
   };
 }
 
-async function setLocalCheckoutProfile({ sessionId = '', profile = {}, expiresAt = '' } = {}, sender = null) {
+async function setLocalCheckoutProfile({ sessionId = '', profile = {}, planHash = '' } = {}, sender = null) {
   const config = await getConfig();
   const senderOrigin = String(sender?.origin || '').replace(/\/+$/, '');
   if (!config.deviceToken || senderOrigin !== normalizeBaseUrl(config.baseUrl)) throw new Error('local_profile_origin_not_allowed');
   const id = String(sessionId || '').trim().slice(0, 160);
   if (!id) throw new Error('local_profile_session_required');
-  const candidateExpiry = Date.parse(expiresAt || '');
-  const now = Date.now();
-  const maxExpiry = now + 10 * 60 * 1000;
-  const resolvedExpiry = Number.isFinite(candidateExpiry)
-    ? Math.min(Math.max(candidateExpiry, now + 60_000), maxExpiry)
-    : now + 8 * 60 * 1000;
+  const now = new Date().toISOString();
   const normalized = normalizeLocalCheckoutProfile(profile);
   if (!Object.values(normalized).some((entry) => typeof entry === 'string' && entry.trim())) throw new Error('local_profile_empty');
   const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
-  localCheckoutProfiles[id] = { profile: normalized, expiresAt: new Date(resolvedExpiry).toISOString() };
-  for (const [staleId] of Object.entries(localCheckoutProfiles).slice(0, -2)) delete localCheckoutProfiles[staleId];
-  await saveConfig({ localCheckoutProfiles });
-  return { stored: true, sessionId: id, expiresAt: new Date(resolvedExpiry).toISOString() };
+  localCheckoutProfiles[id] = {
+    profile: normalized,
+    planHash: String(planHash || '').trim() || null,
+    createdAt: localCheckoutProfiles[id]?.createdAt || now,
+    updatedAt: now
+  };
+  const retainedEntries = Object.entries(localCheckoutProfiles)
+    .sort(([, left], [, right]) => String(right?.updatedAt || '').localeCompare(String(left?.updatedAt || '')))
+    .slice(0, 2);
+  const retainedProfiles = Object.fromEntries(retainedEntries);
+  await saveConfig({ localCheckoutProfiles: retainedProfiles });
+  return { stored: true, sessionId: id, planHash: String(planHash || '').trim() || null };
 }
 
-async function getLocalCheckoutProfile(sessionId = '') {
+async function bindLocalCheckoutProfileToPlan(sessionId = '', planHash = '') {
+  const id = String(sessionId || '').trim();
+  const expectedPlanHash = String(planHash || '').trim();
+  if (!id || !expectedPlanHash) return null;
   const config = await getConfig();
   const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
-  const id = String(sessionId || '');
+  const entry = localCheckoutProfiles[id];
+  if (!entry?.profile) return null;
+  if (entry.planHash && entry.planHash !== expectedPlanHash) return null;
+  localCheckoutProfiles[id] = {
+    ...entry,
+    planHash: expectedPlanHash,
+    updatedAt: new Date().toISOString()
+  };
+  await saveConfig({ localCheckoutProfiles });
+  return normalizeLocalCheckoutProfile(entry.profile);
+}
+
+async function getLocalCheckoutProfile(sessionId = '', planHash = '') {
+  const config = await getConfig();
+  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const id = String(sessionId || '').trim();
+  const expectedPlanHash = String(planHash || '').trim();
   const entry = localCheckoutProfiles[id];
   if (!entry) return null;
-  if (Date.parse(entry.expiresAt || '') <= Date.now()) {
-    delete localCheckoutProfiles[id];
-    await saveConfig({ localCheckoutProfiles });
-    return null;
-  }
+  if (expectedPlanHash && entry.planHash && entry.planHash !== expectedPlanHash) return null;
   return normalizeLocalCheckoutProfile(entry.profile || {});
 }
 
@@ -1489,11 +1507,15 @@ async function fulfillSession(session, report, note = '', plan = null) {
   }
   const proofOfPossession = await buildProofOfPossession(session, { action: 'handoff', targetUrl: finalUrl });
   const fulfillmentStatus = report.fulfillmentStatus === 'fulfilled' ? 'fulfilled' : 'failed';
+  const requiresManualFinalReview = planRequiresManualFinalReview(plan);
+  const finalApprovalRequired = !orderSubmitted && !finalSubmitRequested && requiresManualFinalReview;
   const completionState = fulfillmentStatus === 'failed'
     ? 'needs_attention'
     : orderSubmitted ? 'completed'
       : finalSubmitRequested ? 'waiting_on_confirmation'
-        : report.addToCartClicked || report.checkoutOpened ? 'waiting_on_user' : 'handoff_ready';
+        : finalApprovalRequired || report.loginRequired || report.paymentRequired
+          ? 'waiting_on_user'
+          : 'handoff_ready';
   const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/fulfill`, {
     method: 'POST',
     bearer: config.deviceToken,
@@ -1524,19 +1546,20 @@ async function fulfillSession(session, report, note = '', plan = null) {
           localCheckoutProfileAvailable: Boolean(report.localCheckoutProfileAvailable),
           loginRequired: Boolean(report.loginRequired),
           paymentRequired: Boolean(report.paymentRequired),
-          finalApprovalRequired: !orderSubmitted && !finalSubmitRequested,
+          finalApprovalRequired,
           finalSubmitRequested,
           orderSubmitted,
           rawCredentialsAccess: false,
           rawPaymentAccess: false
         },
         completionState,
-        needsUserHandoff: !orderSubmitted && !finalSubmitRequested,
+        needsUserHandoff: !orderSubmitted && !finalSubmitRequested
+          && (finalApprovalRequired || Boolean(report.loginRequired) || Boolean(report.paymentRequired)),
         targetUrl: getTargetUrl(session),
         finalUrl
       },
       handoff: {
-        label: orderSubmitted ? 'Order submitted' : finalSubmitRequested ? 'Checking merchant confirmation' : report.loginRequired ? 'Sign in to continue' : report.paymentRequired ? 'Review payment and approve' : 'Review prepared checkout',
+        label: orderSubmitted ? 'Order submitted' : finalSubmitRequested ? 'Checking merchant confirmation' : report.loginRequired ? 'Sign in to continue' : report.paymentRequired ? 'Review payment and approve' : finalApprovalRequired ? 'Review prepared checkout' : 'Execution needs attention',
         url: finalUrl
       },
       notes: note || (orderSubmitted
@@ -1830,6 +1853,12 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
   return null;
 }
 
+function planRequiresManualFinalReview(plan = null) {
+  if (!plan || typeof plan !== 'object') return true;
+  if (plan?.limits?.stopBeforeFinalSubmit === true) return true;
+  return !plan.actions?.some((action) => action?.type === 'final_submit' && action.autoSubmitAfterVerifiedCheckout === true);
+}
+
 function stopForBoundary(report = {}, plan = null, action = null) {
   if (report.finalSubmitRequested) return null;
   const violation = checkoutConstraintViolation(report, plan, action);
@@ -1844,7 +1873,9 @@ function stopForBoundary(report = {}, plan = null, action = null) {
   if (report.paymentRequired || report.checkoutSummary?.paymentNeedsHuman) {
     return { state: 'payment_required', evidence: report.checkoutSummary?.paymentIssue || 'Payment information stays in the browser payment surface.' };
   }
-  if (report.finalApprovalVisible) return { state: 'final_approval_required', evidence: 'Final order approval is visible and was not clicked.' };
+  if (report.finalApprovalVisible && planRequiresManualFinalReview(plan)) {
+    return { state: 'final_approval_required', evidence: 'Final order approval is visible and was not clicked.' };
+  }
   return null;
 }
 
@@ -2056,7 +2087,9 @@ async function reportAndStop(session, plan, report, note = '') {
       'checkout_profile_mismatch',
       'payment_required',
       'needs_payment',
-      'final_submit_unconfirmed'
+      'final_submit_unconfirmed',
+      'final_submit_dispatch_failed',
+      'local_checkout_profile_missing'
     ].includes(String(report.stopState || '').toLowerCase());
   await fulfillSession(session, report, note, plan);
   await clearPendingPaymentWait(session.id);
@@ -2795,7 +2828,8 @@ async function runSession(rawSession) {
     scheduleRunnerResume(8_000);
     plan = await validatePlanForSession(session);
     assertLocalMissionAuthority(session);
-    const savedCheckoutProfile = await getLocalCheckoutProfile(session.id);
+    await bindLocalCheckoutProfileToPlan(session.id, plan.planHash);
+    const savedCheckoutProfile = await getLocalCheckoutProfile(session.id, plan.planHash);
     const checkoutProfileExpected = Boolean(session.extensionCheckoutProfileEnabled);
     const checkoutProfileAvailable = Boolean(savedCheckoutProfile);
     const checkoutProfile = savedCheckoutProfile ? { ...savedCheckoutProfile } : null;
@@ -2862,9 +2896,9 @@ async function runSession(rawSession) {
       } : {})
     });
     let authorityVerifiedAt = Date.now();
-    const assertActive = async ({ force = false } = {}) => {
+    const assertActive = async ({ force = false, localOnly = false } = {}) => {
       assertLocalMissionAuthority(session);
-      if (!force && Date.now() - authorityVerifiedAt < RUNNER_STATUS_LEASE_MS) return session;
+      if (localOnly || (!force && Date.now() - authorityVerifiedAt < RUNNER_STATUS_LEASE_MS)) return session;
       session = await assertRunnerSessionActive(session);
       authorityVerifiedAt = Date.now();
       assertLocalMissionAuthority(session);
@@ -2895,7 +2929,7 @@ async function runSession(rawSession) {
           url: tab.url || startUrl,
           finalUrl: tab.url || startUrl,
           stopState: 'local_checkout_profile_missing',
-          stopEvidence: 'The Local Data Vault checkout handoff expired while Magic City was waiting for card autofill. Unlock the vault and retry.',
+          stopEvidence: 'Card autofill was not completed before the checkout wait elapsed. Reopen the checkout and use Chrome autofill to continue.',
           fulfillmentStatus: 'failed',
           fundingDisposition: 'release',
           ...progress
@@ -2907,7 +2941,7 @@ async function runSession(rawSession) {
           await clearPendingPaymentWait(session.id);
           paymentState.paymentAutofillWaitExpired = true;
           paymentState.stopState = 'payment_required';
-          paymentState.stopEvidence = 'Card entry was not completed before the local checkout handoff expired. Reopen the checkout and use Chrome autofill to continue.';
+          paymentState.stopEvidence = 'Card entry was not completed before the checkout wait elapsed. Reopen the checkout and use Chrome autofill to continue.';
           return reportAndStop(session, plan, { ...paymentState, ...progress });
         }
         const parked = await parkForPaymentAutofill(session, plan, { ...paymentState, ...progress });
@@ -2943,7 +2977,10 @@ async function runSession(rawSession) {
         selectedCandidate: progress.selectedCandidate
       });
       const presentation = planActionPresentation(action);
-      await assertActive({ force: action.type === 'final_submit' });
+      // A valid local signed capability is sufficient for the irreversible
+      // browser click. A slow control-plane heartbeat must never turn an
+      // already-authorized order into a manual-review fallback.
+      await assertActive({ force: action.type === 'final_submit', localOnly: action.type === 'final_submit' });
       if (!tab && action.type !== 'navigate') {
         return reportAndStop(session, plan, {
           url: startUrl,
@@ -3432,6 +3469,15 @@ async function runSession(rawSession) {
           retainActiveRun = true;
           return parked;
         }
+        return reportAndStop(session, plan, report);
+      }
+      if (action.type === 'final_submit' && !outcome.completed) {
+        report.stopState = outcome.localCheckoutProfileMissing === true
+          ? 'local_checkout_profile_missing'
+          : 'final_submit_dispatch_failed';
+        report.stopEvidence = outcome.reason || 'The signed final-order action did not dispatch a native merchant click.';
+        report.fulfillmentStatus = 'failed';
+        report.fundingDisposition = 'release';
         return reportAndStop(session, plan, report);
       }
       if (action.expectedMilestone && !expectedMilestoneVerified) {

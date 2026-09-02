@@ -6066,7 +6066,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.19';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.20';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -15043,6 +15043,8 @@
       if (stopState === 'checkout_profile_mismatch') return 'Delivery address needs update before checkout can continue.';
       if (stopState === 'address_verification_required') return 'Recheck the selected delivery address in the preserved Amazon tab.';
       if (stopState === 'payment_required' || stopState === 'needs_payment') return 'Select the saved payment method in Chrome to continue.';
+      if (stopState === 'local_checkout_profile_missing') return 'Unlock Local Data Vault, then retry checkout verification.';
+      if (stopState === 'final_submit_dispatch_failed') return 'The final order click did not dispatch. The order was not placed.';
       if (stopState === 'final_approval_required' || stopState === 'needs_final_approval') return 'Order is ready for final approval.';
       if (/Magic City Runner prepared the browser task locally and stopped before login, payment, or final order approval/i.test(note)) {
         return 'Checkout is ready for review.';
@@ -15075,6 +15077,22 @@
         ? resolveTravelModeValue(session.selections?.travelMode || session.paymentOrchestration?.travelMode || 'itinerary_build')
         : '';
       if (statusModel.statusValue === 'failed') {
+        if (kind === 'browser' && browserStopState === 'local_checkout_profile_missing') {
+          return {
+            title: 'Unlock checkout details',
+            detail: 'Unlock Local Data Vault, then retry this preserved checkout.',
+            badgeLabel: 'Vault needed',
+            actionLabel: 'Open checkout'
+          };
+        }
+        if (kind === 'browser' && browserStopState === 'final_submit_dispatch_failed') {
+          return {
+            title: 'Order was not submitted',
+            detail: 'The authorized final click did not dispatch. Reopen Amazon and retry the run.',
+            badgeLabel: 'Retry needed',
+            actionLabel: 'Open Amazon'
+          };
+        }
         if (kind === 'browser' && (browserStopState === 'checkout_profile_mismatch' || browserSummary.addressMatches === false)) {
           const vaultUnavailable = browserExecution.localCheckoutProfileExpected && !browserExecution.localCheckoutProfileAvailable;
           return vaultUnavailable
@@ -18666,8 +18684,7 @@
             await sendNativeRunnerExtensionMessage({
               type: 'SET_LOCAL_CHECKOUT_PROFILE',
               sessionId: session.id,
-              profile: localCheckoutProfile,
-              expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+              profile: localCheckoutProfile
             });
           }
           let executionSession = session;
@@ -18684,8 +18701,7 @@
 	                await sendNativeRunnerExtensionMessage({
 	                  type: 'SET_LOCAL_CHECKOUT_PROFILE',
 	                  sessionId: executionSession.id,
-	                  profile: localCheckoutProfile,
-	                  expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+	                  profile: localCheckoutProfile
 	                });
 	              }
 	              // Claim the renewed mission before redrawing the execution sheet.
@@ -18743,8 +18759,7 @@
 	              await sendNativeRunnerExtensionMessage({
 	                type: 'SET_LOCAL_CHECKOUT_PROFILE',
 	                sessionId: data.session?.id || session.id,
-	                profile: localCheckoutProfile,
-	                expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+	                profile: localCheckoutProfile
 	              });
 	            }
 	            // Send the exact wake before any UI or balance refresh. A fresh
@@ -18789,8 +18804,7 @@
           await sendNativeRunnerExtensionMessage({
             type: 'SET_LOCAL_CHECKOUT_PROFILE',
             sessionId: currentSession.id,
-            profile: localCheckoutProfile,
-            expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+            profile: localCheckoutProfile
           });
           const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(currentSession));
           executionPendingSessions.add(currentSession.id);
@@ -18874,8 +18888,7 @@
             await sendNativeRunnerExtensionMessage({
               type: 'SET_LOCAL_CHECKOUT_PROFILE',
               sessionId: currentSession.id,
-              profile: localCheckoutProfile,
-              expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+              profile: localCheckoutProfile
             });
           }
           executionPendingSessions.add(currentSession.id);
