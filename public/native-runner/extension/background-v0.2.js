@@ -13,6 +13,10 @@ const MAX_PLANNED_BASKET_ITEMS = 12;
 const API_TIMEOUT_MS = 20_000;
 const RUNNER_STATUS_TIMEOUT_MS = 4_000;
 const RUNNER_STATUS_LEASE_MS = 3_000;
+// The final merchant click may use a verified local capability to avoid a
+// control-plane timeout at the irreversible boundary, but only immediately
+// after this runner has confirmed the session is still live.
+const FINAL_SUBMIT_LOCAL_LEASE_MS = 45_000;
 const RUNNER_RESUME_DELAY_MS = 5_000;
 const MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 90_000;
 const MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 30_000;
@@ -28,6 +32,7 @@ const CHECKOUT_PROFILE_RECONCILE_TIMEOUT_MS = 24_000;
 const TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS = [200, 700];
 const TAB_COMMAND_TIMEOUT_MS = 15_000;
 const BROWSER_ACTION_TIMEOUT_MS = 45_000;
+const LOCAL_CHECKOUT_PROFILE_STORAGE_KEY = 'magicCityLocalCheckoutProfiles';
 const SAFE_PLAN_ACTION_TYPES = new Set(['navigate', 'inspect', 'search', 'select_candidate', 'click_intent', 'fill_checkout_profile', 'final_submit', 'pause']);
 const inFlightSessionIds = new Set();
 
@@ -383,6 +388,15 @@ function assertLocalMissionAuthority(session = {}) {
   return session;
 }
 
+function assertFinalSubmitLocalAuthority(session = {}, authorityVerifiedAt = 0) {
+  assertLocalMissionAuthority(session);
+  if (!Number.isFinite(Number(authorityVerifiedAt))
+    || Date.now() - Number(authorityVerifiedAt) > FINAL_SUBMIT_LOCAL_LEASE_MS) {
+    throw new Error('final_submit_authority_lease_expired');
+  }
+  return session;
+}
+
 async function planStartUrl(session = {}) {
   return (await validatePlanForSession(session)).startUrl;
 }
@@ -429,7 +443,6 @@ async function getConfig() {
     activeSessionId: '',
     activeRun: null,
     activeMissionTabs: {},
-    localCheckoutProfiles: {},
     pendingPaymentWaits: {},
     finalOrderDispatches: {},
     useExistingBrowser: false,
@@ -597,6 +610,36 @@ function normalizeLocalCheckoutProfile(profile = {}) {
   };
 }
 
+function localCheckoutProfileStore() {
+  const store = chrome.storage?.session;
+  if (!store?.get || !store?.set || !store?.remove) {
+    throw new Error('local_profile_session_storage_unavailable');
+  }
+  return store;
+}
+
+async function readLocalCheckoutProfiles() {
+  const store = localCheckoutProfileStore();
+  const stored = await store.get({ [LOCAL_CHECKOUT_PROFILE_STORAGE_KEY]: {} });
+  const profiles = { ...(stored?.[LOCAL_CHECKOUT_PROFILE_STORAGE_KEY] || {}) };
+  if (Object.keys(profiles).length) return { store, profiles };
+  // Older releases retained vault-derived checkout data in persistent local
+  // storage. Do not revive it across the upgrade: a fresh, session-bound
+  // vault handoff is required before another checkout can use those details.
+  await chrome.storage.local.remove('localCheckoutProfiles').catch(() => null);
+  return { store, profiles };
+}
+
+async function writeLocalCheckoutProfiles(store, profiles = {}) {
+  await store.set({ [LOCAL_CHECKOUT_PROFILE_STORAGE_KEY]: profiles });
+}
+
+async function purgeLegacyLocalCheckoutProfiles() {
+  // Older releases kept private checkout cues in persistent local storage.
+  // Never migrate them: a fresh vault handoff is required after this upgrade.
+  await chrome.storage.local.remove('localCheckoutProfiles').catch(() => null);
+}
+
 async function setLocalCheckoutProfile({ sessionId = '', profile = {}, planHash = '' } = {}, sender = null) {
   const config = await getConfig();
   const senderOrigin = String(sender?.origin || '').replace(/\/+$/, '');
@@ -606,7 +649,7 @@ async function setLocalCheckoutProfile({ sessionId = '', profile = {}, planHash 
   const now = new Date().toISOString();
   const normalized = normalizeLocalCheckoutProfile(profile);
   if (!Object.values(normalized).some((entry) => typeof entry === 'string' && entry.trim())) throw new Error('local_profile_empty');
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const { store, profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
   localCheckoutProfiles[id] = {
     profile: normalized,
     planHash: String(planHash || '').trim() || null,
@@ -617,7 +660,8 @@ async function setLocalCheckoutProfile({ sessionId = '', profile = {}, planHash 
     .sort(([, left], [, right]) => String(right?.updatedAt || '').localeCompare(String(left?.updatedAt || '')))
     .slice(0, 2);
   const retainedProfiles = Object.fromEntries(retainedEntries);
-  await saveConfig({ localCheckoutProfiles: retainedProfiles });
+  await writeLocalCheckoutProfiles(store, retainedProfiles);
+  await purgeLegacyLocalCheckoutProfiles();
   return { stored: true, sessionId: id, planHash: String(planHash || '').trim() || null };
 }
 
@@ -625,23 +669,23 @@ async function bindLocalCheckoutProfileToPlan(sessionId = '', planHash = '') {
   const id = String(sessionId || '').trim();
   const expectedPlanHash = String(planHash || '').trim();
   if (!id || !expectedPlanHash) return null;
-  const config = await getConfig();
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const { store, profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
   const entry = localCheckoutProfiles[id];
   if (!entry?.profile) return null;
-  if (entry.planHash && entry.planHash !== expectedPlanHash) return null;
+  // A recovery plan may be newly signed for this same session after a manual
+  // stop. Rebind the volatile profile only after the replacement plan passed
+  // validatePlanForSession; never carry it across sessions.
   localCheckoutProfiles[id] = {
     ...entry,
     planHash: expectedPlanHash,
     updatedAt: new Date().toISOString()
   };
-  await saveConfig({ localCheckoutProfiles });
+  await writeLocalCheckoutProfiles(store, localCheckoutProfiles);
   return normalizeLocalCheckoutProfile(entry.profile);
 }
 
 async function getLocalCheckoutProfile(sessionId = '', planHash = '') {
-  const config = await getConfig();
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const { profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
   const id = String(sessionId || '').trim();
   const expectedPlanHash = String(planHash || '').trim();
   const entry = localCheckoutProfiles[id];
@@ -651,12 +695,12 @@ async function getLocalCheckoutProfile(sessionId = '', planHash = '') {
 }
 
 async function clearLocalCheckoutProfile(sessionId = '') {
-  const config = await getConfig();
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const { store, profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
   const id = String(sessionId || '');
   if (!localCheckoutProfiles[id]) return;
   delete localCheckoutProfiles[id];
-  await saveConfig({ localCheckoutProfiles });
+  if (Object.keys(localCheckoutProfiles).length) await writeLocalCheckoutProfiles(store, localCheckoutProfiles);
+  else await store.remove(LOCAL_CHECKOUT_PROFILE_STORAGE_KEY);
 }
 
 async function getPendingPaymentWait(sessionId = '') {
@@ -2977,10 +3021,15 @@ async function runSession(rawSession) {
         selectedCandidate: progress.selectedCandidate
       });
       const presentation = planActionPresentation(action);
-      // A valid local signed capability is sufficient for the irreversible
-      // browser click. A slow control-plane heartbeat must never turn an
-      // already-authorized order into a manual-review fallback.
-      await assertActive({ force: action.type === 'final_submit', localOnly: action.type === 'final_submit' });
+      // A slow control-plane heartbeat must not race Amazon's irreversible
+      // button, but this is not an unlimited offline bypass. The signed
+      // capability must still be current and the runner must have observed a
+      // live session within one short lease window before dispatch.
+      if (action.type === 'final_submit') {
+        assertFinalSubmitLocalAuthority(session, authorityVerifiedAt);
+      } else {
+        await assertActive();
+      }
       if (!tab && action.type !== 'navigate') {
         return reportAndStop(session, plan, {
           url: startUrl,
@@ -3800,6 +3849,7 @@ async function handleMessage(message, sender = null) {
   }
   if (message?.type === 'DISCONNECT') {
     await chrome.storage.local.clear();
+    await chrome.storage.session?.clear?.().catch(() => null);
     return { disconnected: true };
   }
   return { ok: true, sender: sender?.origin || null };

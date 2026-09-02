@@ -7,6 +7,10 @@ import { spawn } from 'node:child_process';
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const apiKey = 'native-runner-extension-pairing-test-key';
+const extensionVersion = JSON.parse(fs.readFileSync(
+  path.join(rootDir, 'public/native-runner/extension/manifest.json'),
+  'utf8'
+)).version;
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -174,7 +178,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.4.19-test',
+        extensionVersion,
         extensionId: 'test-extension-id'
       }
     });

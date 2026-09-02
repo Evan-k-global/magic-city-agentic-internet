@@ -731,6 +731,11 @@ async function main() {
     // cursor, schedule a resume, and finish instead of posting a failed receipt.
     let transientRunnerStatusFailures = 3;
     let transientRunnerStatusFailureCount = 0;
+    // The final click must not depend on a slow control-plane status request.
+    // This models cs-225: the worker resumes after a long technical pause,
+    // while status reporting is temporarily unavailable at final review.
+    let blockRunnerStatusForFinalDispatch = false;
+    let blockedFinalRunnerStatusCalls = 0;
     server = https.createServer(certificate, async (req, res) => {
       const origin = `https://${req.headers.host}`;
       const url = new URL(req.url || '/', origin);
@@ -769,6 +774,12 @@ async function main() {
         return json(res, 404, { error: 'test_claim_session_not_found' });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/runner-status')) {
+        const nextAction = session?.extensionMissionPlan?.actions?.[session?.extensionMissionPlanState?.nextActionIndex || 0];
+        if (blockRunnerStatusForFinalDispatch && nextAction?.id === 'submit-final-order') {
+          blockedFinalRunnerStatusCalls += 1;
+          req.socket.destroy();
+          return;
+        }
         if (transientRunnerStatusFailures > 0) {
           transientRunnerStatusFailures -= 1;
           transientRunnerStatusFailureCount += 1;
@@ -883,6 +894,35 @@ async function main() {
     console.log('native-runner browser smoke service worker ready');
     let worker = context.serviceWorkers()[0];
     const extensionId = new URL(worker.url()).host;
+    const defaultCheckoutProfile = {
+      contactName: 'Test User',
+      streetAddress: '1 Magic City Way',
+      shippingCity: 'San Francisco',
+      shippingState: 'CA',
+      zipCode: '94107',
+      contactPhone: '4155550100',
+      billingStreetAddress: '99 Billing Plaza',
+      billingZipCode: '10001',
+      paymentCardLast4: '1817'
+    };
+    const seedSessionCheckoutProfile = async (sessionId, profile = defaultCheckoutProfile, planHash = '') => {
+      await worker.evaluate(async ({ id, value, expectedPlanHash }) => {
+        const storageKey = 'magicCityLocalCheckoutProfiles';
+        const stored = await chrome.storage.session.get({ [storageKey]: {} });
+        await chrome.storage.session.set({
+          [storageKey]: {
+            ...(stored[storageKey] || {}),
+            [id]: {
+              profile: value,
+              planHash: expectedPlanHash || null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
+          }
+        });
+        await chrome.storage.local.remove('localCheckoutProfiles');
+      }, { id: sessionId, value: profile, expectedPlanHash: planHash });
+    };
     let popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
     await popup.locator('#baseUrl').fill(baseUrl);
@@ -933,18 +973,7 @@ async function main() {
           missionBoundaryLatestHash: null,
           missionBoundaryEventCount: 0
         };
-        if (checkoutProfile) {
-          await popup.evaluate(({ sessionId, profile }) => new Promise((resolve) => {
-            chrome.storage.local.get(['localCheckoutProfiles'], (stored) => {
-              chrome.storage.local.set({
-                localCheckoutProfiles: {
-                  ...(stored.localCheckoutProfiles || {}),
-                  [sessionId]: { profile, expiresAt: new Date(Date.now() + 60_000).toISOString() }
-                }
-              }, resolve);
-            });
-          }), { sessionId: id, profile: checkoutProfile });
-        }
+        if (checkoutProfile) await seedSessionCheckoutProfile(id, checkoutProfile, recoveryPlan.planHash);
         await popup.evaluate(({ sessionId, tabId, planHash, action: interruptedAction, selected }) => new Promise((resolve) => {
           chrome.storage.local.get(['activeMissionTabs'], (stored) => {
             chrome.storage.local.set({
@@ -1051,10 +1080,20 @@ async function main() {
         return tabs.find((candidate) => candidate.url === url) || null;
       }, page.url());
       if (!tab?.id) fail(`browser_extension_policy_test_tab_missing:${page.url()}`);
-      return worker.evaluate(async ({ tabId, payload }) => {
+      const response = await worker.evaluate(async ({ tabId, payload }) => {
         await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
-        return chrome.tabs.sendMessage(tabId, payload);
+        return Promise.race([
+          chrome.tabs.sendMessage(tabId, payload),
+          new Promise((resolve) => setTimeout(() => resolve({
+            completed: false,
+            reason: 'browser_content_script_timeout'
+          }), 15_000))
+        ]);
       }, { tabId: tab.id, payload: message });
+      if (response?.reason === 'browser_content_script_timeout') {
+        fail(`browser_extension_content_script_timeout:${page.url()}`);
+      }
+      return response;
     };
     console.log('native-runner browser smoke opening signed-out fixture');
     const signedOutPage = await context.newPage();
@@ -1250,24 +1289,10 @@ async function main() {
     });
     await thirdPartyProductPage.close();
 
-   await worker.evaluate(() => chrome.storage.local.set({
-      localCheckoutProfiles: {
-        'browser-smoke-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '6383'
-          }
-        }
-      }
-    }));
+    await seedSessionCheckoutProfile('browser-smoke-session', {
+      ...defaultCheckoutProfile,
+      paymentCardLast4: '6383'
+    }, plan.planHash);
 
     const paymentConfirmPage = await context.newPage();
     await paymentConfirmPage.goto(`${baseUrl}/checkout/pay-confirm`);
@@ -2055,25 +2080,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-brand-fallback-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, brandFallbackPlan.planHash);
     const brandFallbackStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2181,25 +2189,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-conditional-prime-shipping-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, conditionalShippingPlan.planHash);
     const conditionalShippingStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2269,25 +2260,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-multi-item-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, multiItemPlan.planHash);
     const multiItemStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2362,25 +2336,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-incomplete-basket-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, incompleteBasketPlan.planHash);
     const incompleteBasketStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2437,25 +2394,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-sidecart-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, sideCartPlan.planHash);
     const sideCartStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2526,25 +2466,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-overbudget-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, overBudgetPlan.planHash);
     const overBudgetStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2611,25 +2534,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-paid-delivery-stop-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, paidDeliveryStopPlan.planHash);
     const paidDeliveryStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2700,25 +2606,12 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-mismatch-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Street Apt 303',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '9999'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, {
+      ...defaultCheckoutProfile,
+      streetAddress: '1 Magic City Street Apt 303',
+      paymentCardLast4: '9999'
+    }, mismatchPlan.planHash);
     const mismatchStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2871,25 +2764,14 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-final-review-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '2865 Sand Hill Road Suite 101',
-            shippingCity: 'Menlo Park',
-            shippingState: 'CA',
-            zipCode: '94025',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, {
+      ...defaultCheckoutProfile,
+      streetAddress: '2865 Sand Hill Road Suite 101',
+      shippingCity: 'Menlo Park',
+      shippingState: 'CA',
+      zipCode: '94025'
+    }, manualReviewPlan.planHash);
     const manualReviewStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2905,11 +2787,21 @@ async function main() {
       || fulfillment.result?.browserExecution?.orderSubmitted === true) {
       fail(`browser_extension_final_review_not_paused:${JSON.stringify(fulfillment)}`);
     }
-    const preservedReviewState = await worker.evaluate(() => new Promise((resolve) => {
-      chrome.storage.local.get(['activeMissionTabs', 'localCheckoutProfiles'], resolve);
-    }));
+    const preservedReviewState = await worker.evaluate(async () => {
+      const [local, session] = await Promise.all([
+        chrome.storage.local.get(['activeMissionTabs', 'localCheckoutProfiles']),
+        chrome.storage.session.get(['magicCityLocalCheckoutProfiles'])
+      ]);
+      return {
+        ...local,
+        sessionCheckoutProfiles: session.magicCityLocalCheckoutProfiles || {}
+      };
+    });
+    if (Object.keys(preservedReviewState.localCheckoutProfiles || {}).length) {
+      fail(`browser_extension_final_review_profile_persisted_to_local_storage:${JSON.stringify(preservedReviewState.localCheckoutProfiles)}`);
+    }
     const reviewTabId = preservedReviewState.activeMissionTabs?.['browser-smoke-final-review-session'];
-    if (!reviewTabId || !preservedReviewState.localCheckoutProfiles?.['browser-smoke-final-review-session']) {
+    if (!reviewTabId || !preservedReviewState.sessionCheckoutProfiles?.['browser-smoke-final-review-session']) {
       fail(`browser_extension_final_review_context_not_preserved:${JSON.stringify(preservedReviewState)}`);
     }
     const preparedReviewPage = context.pages().find((page) => page.url().startsWith(baseUrl)
@@ -3028,6 +2920,37 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
+    // Match the production retry path: the Magic City page re-provisions its
+    // unlocked vault snapshot to the extension before it asks the runner to
+    // resume a newly signed plan for this same session.
+    const reprovisionedProfile = await preparedReviewPage.evaluate(({ extensionId, sessionId }) => new Promise((resolve) => {
+      if (!window.chrome?.runtime?.sendMessage) {
+        resolve({ ok: false, error: 'web_chrome_runtime_unavailable' });
+        return;
+      }
+      window.chrome.runtime.sendMessage(extensionId, {
+        type: 'SET_LOCAL_CHECKOUT_PROFILE',
+        sessionId,
+        profile: {
+          contactName: 'Test User',
+          streetAddress: '2865 Sand Hill Road Suite 101',
+          shippingCity: 'Menlo Park', shippingState: 'CA', zipCode: '94025',
+          contactPhone: '4155550100', billingStreetAddress: '99 Billing Plaza',
+          billingZipCode: '10001', paymentCardLast4: '1817'
+        }
+      }, (response) => {
+        resolve({ ok: Boolean(response?.ok), error: window.chrome.runtime.lastError?.message || response?.error || '' });
+      });
+    }), { extensionId, sessionId: session.id });
+    if (!reprovisionedProfile?.ok) {
+      fail(`browser_extension_final_review_profile_reprovision_failed:${reprovisionedProfile?.error || 'unknown'}`);
+    }
+    // Persisted session data must survive an MV3 restart, and the final action
+    // must use the fresh signed local lease rather than wait on runner-status.
+    const finalReviewRecoveryCdp = await context.newCDPSession(preparedReviewPage);
+    await finalReviewRecoveryCdp.send('ServiceWorker.enable');
+    await finalReviewRecoveryCdp.send('ServiceWorker.stopAllWorkers');
+    blockRunnerStatusForFinalDispatch = true;
     const resumeFinalSubmitResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -3037,6 +2960,8 @@ async function main() {
     } catch {
       const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution'], resolve)));
       fail(`browser_extension_final_review_resume_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}`);
+    } finally {
+      blockRunnerStatusForFinalDispatch = false;
     }
     if (fulfillment.status !== 'fulfilled'
       || fulfillment.result?.browserExecution?.orderSubmitted !== true
@@ -3084,6 +3009,9 @@ async function main() {
         fulfillment: fulfillment?.result?.browserExecution || null
       })}`);
     }
+    if (blockedFinalRunnerStatusCalls !== 0) {
+      fail(`browser_extension_final_review_waited_for_control_plane:${blockedFinalRunnerStatusCalls}`);
+    }
     if (!checkpoints.some((checkpoint) => checkpoint?.browser?.browserActionReceipts?.some((receipt) => (
       receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched'
     )))) {
@@ -3123,7 +3051,10 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {}, localCheckoutProfiles: {} }));
+    await worker.evaluate(async () => {
+      await chrome.storage.local.set({ activeMissionTabs: {} });
+      await chrome.storage.session.remove('magicCityLocalCheckoutProfiles');
+    });
     const invalidStartupResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);

@@ -8,7 +8,7 @@ const POLL_ALARM = 'magic-city-runner-poll';
 const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_CONTINUATION_DELAY_MS = 30_000;
-const LEAN_RUNTIME_MODE = 'v0.4.20-session-bound-profile-auto-submit';
+const LEAN_RUNTIME_MODE = 'v0.4.21-session-profile-final-submit-lease';
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
   'https://magic-city-staging.fly.dev'
