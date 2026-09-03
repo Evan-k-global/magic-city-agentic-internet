@@ -199,6 +199,30 @@ const failedFinalDispatch = evaluateBrowserExtensionFulfillment({
 assert.equal(failedFinalDispatch.accepted, false, 'a final click that did not dispatch must never be accepted as an order');
 assert.equal(failedFinalDispatch.proofEligible, false);
 
+const confirmedOrderWithStaleCheckoutSummary = evaluateBrowserExtensionFulfillment({
+  status: 'fulfilled',
+  result: {
+    browserExecution: {
+      milestoneProtocol: 'verified-v1',
+      verifiedMilestones: ['checkout_open', 'final_review_ready', 'final_submit_requested', 'order_submitted'],
+      finalUrl: 'https://www.amazon.com/gp/buy/thankyou/handlers/display.html',
+      stopState: 'order_submitted',
+      orderSubmitted: true,
+      checkoutProgress: { checkoutOpened: true },
+      // A navigation can leave the last checkout observation stale. The
+      // confirmation milestone is terminal and must win over these fields.
+      checkoutSummary: {
+        stage: 'final_review',
+        addressVerification: 'unverified',
+        cardMatches: false
+      }
+    }
+  }
+});
+assert.equal(confirmedOrderWithStaleCheckoutSummary.status, 'fulfilled');
+assert.equal(confirmedOrderWithStaleCheckoutSummary.accepted, true);
+assert.equal(confirmedOrderWithStaleCheckoutSummary.reason, 'order_submitted');
+
 console.log(JSON.stringify({
   ok: true,
   rejectedSearchPage,

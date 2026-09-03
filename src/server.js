@@ -689,7 +689,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.21'
+  '0.4.22'
 ).trim();
 
 const SPREADSHEET_PRICING = {
@@ -2463,6 +2463,17 @@ function retailCheckoutVerifiedMilestones(session = {}) {
     ...(Array.isArray(browserExecution.verifiedMilestones) ? browserExecution.verifiedMilestones : [])
   ];
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
+function connectorSessionHasConfirmedBrowserOrder(session = {}) {
+  const browserExecution = session?.fulfillment?.result?.browserExecution || session?.fulfillment?.browserExecution || {};
+  const verifiedMilestones = Array.isArray(browserExecution.verifiedMilestones)
+    ? browserExecution.verifiedMilestones
+    : [];
+  return browserExecution.orderSubmitted === true
+    || browserExecution.milestoneSignals?.orderSubmitted === true
+    || verifiedMilestones.includes('order_submitted')
+    || retailCheckoutVerifiedMilestones(session).includes('order_submitted');
 }
 
 function latestRetailCheckoutStepReceipt(session = {}) {
@@ -19538,6 +19549,20 @@ const server = http.createServer(async (req, res) => {
         ? evaluateBrowserExtensionFulfillment({ status: requestedFulfillmentStatus, result: body.result ?? {} })
         : null;
       const fulfillmentStatus = extensionFulfillmentEvaluation?.status || requestedFulfillmentStatus;
+      // An Amazon confirmation is irreversible. A delayed retry can report a
+      // stale checkout-picker state after the order is complete; it must not
+      // downgrade the terminal session or release its proof trail.
+      if (isChromeExtensionDeclarativeRunnerRequest(req)
+        && connectorSessionHasConfirmedBrowserOrder(session)
+        && fulfillmentStatus === 'failed') {
+        return sendJson(res, 200, {
+          fulfilled: true,
+          failed: false,
+          ignoredStaleTerminalReport: true,
+          session: formatConnectorSessionForRunnerResponse(req, session, plugin.pluginId),
+          plugin
+        });
+      }
       const fulfillmentProofEligible = extensionFulfillmentEvaluation?.proofEligible !== false;
       const rejectedExtensionFulfillment = Boolean(extensionFulfillmentEvaluation && !extensionFulfillmentEvaluation.accepted);
       if (rejectedExtensionFulfillment) {

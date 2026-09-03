@@ -1538,7 +1538,20 @@ async function claimSession(session) {
 async function fulfillSession(session, report, note = '', plan = null) {
   const config = await getConfig();
   const finalUrl = report.finalUrl || report.url || getTargetUrl(session);
-  const orderSubmitted = Boolean(report.orderSubmitted);
+  const orderSubmitted = hasConfirmedMerchantOrder(report);
+  if (orderSubmitted) {
+    // Amazon's confirmation page is stronger evidence than a later stale
+    // checkout-picker observation. Preserve the terminal fact end to end.
+    report.orderSubmitted = true;
+    report.finalSubmitRequested = true;
+    report.stopState = 'order_submitted';
+    report.fulfillmentStatus = 'fulfilled';
+    report.fundingDisposition = 'capture';
+    report.checkoutSummary = {
+      ...(report.checkoutSummary || {}),
+      orderSubmitted: true
+    };
+  }
   const finalSubmitRequested = Boolean(report.finalSubmitRequested);
   const finalBoundary = stopForBoundary(report, plan);
   if (finalBoundary) {
@@ -1550,7 +1563,7 @@ async function fulfillSession(session, report, note = '', plan = null) {
     }
   }
   const proofOfPossession = await buildProofOfPossession(session, { action: 'handoff', targetUrl: finalUrl });
-  const fulfillmentStatus = report.fulfillmentStatus === 'fulfilled' ? 'fulfilled' : 'failed';
+  const fulfillmentStatus = orderSubmitted || report.fulfillmentStatus === 'fulfilled' ? 'fulfilled' : 'failed';
   const requiresManualFinalReview = planRequiresManualFinalReview(plan);
   const finalApprovalRequired = !orderSubmitted && !finalSubmitRequested && requiresManualFinalReview;
   const completionState = fulfillmentStatus === 'failed'
@@ -1617,6 +1630,14 @@ async function fulfillSession(session, report, note = '', plan = null) {
     }
   });
   return data.session || session;
+}
+
+function hasConfirmedMerchantOrder(report = {}) {
+  return Boolean(
+    report?.orderSubmitted === true
+    || report?.milestoneSignals?.orderSubmitted === true
+    || report?.merchantOrderConfirmation?.confirmed === true
+  );
 }
 
 async function reportStartupFailure(session, error) {
@@ -1774,6 +1795,9 @@ function isAmazonCartContinuationUrl(value = '') {
 }
 
 function checkoutConstraintViolation(report = {}, plan = null, action = null) {
+  // A merchant order confirmation is terminal. Do not let an unreadable
+  // historical address/card picker turn a completed order into a failure.
+  if (hasConfirmedMerchantOrder(report)) return null;
   const summary = report.checkoutSummary || {};
   const stage = String(summary.stage || report.browserState || '').toLowerCase();
   const boundaryAction = action && typeof action === 'object' ? action : (report.runnerStep || {});
@@ -1904,7 +1928,7 @@ function planRequiresManualFinalReview(plan = null) {
 }
 
 function stopForBoundary(report = {}, plan = null, action = null) {
-  if (report.finalSubmitRequested) return null;
+  if (hasConfirmedMerchantOrder(report) || report.finalSubmitRequested) return null;
   const violation = checkoutConstraintViolation(report, plan, action);
   if (violation) return violation;
   if (report.providerChallenge) return { state: 'captcha_or_challenge_required', evidence: 'Provider challenge detected.' };
@@ -2077,7 +2101,18 @@ async function acquireMissionTab(sessionId, startUrl = '', { preferExistingCheck
 }
 
 async function reportAndStop(session, plan, report, note = '') {
-  const submitted = Boolean(report.orderSubmitted);
+  const submitted = hasConfirmedMerchantOrder(report);
+  if (submitted) {
+    report.orderSubmitted = true;
+    report.finalSubmitRequested = true;
+    report.stopState = 'order_submitted';
+    report.fulfillmentStatus = 'fulfilled';
+    report.fundingDisposition = 'capture';
+    report.checkoutSummary = {
+      ...(report.checkoutSummary || {}),
+      orderSubmitted: true
+    };
+  }
   const submitRequested = Boolean(report.finalSubmitRequested);
   const boundary = stopForBoundary(report, plan);
   if (submitted) {

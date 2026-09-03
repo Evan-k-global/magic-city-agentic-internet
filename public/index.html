@@ -6066,7 +6066,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.21';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.22';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -15055,6 +15055,32 @@
       return compactExecutionSentence(note || 'Execution finished.', 96);
     }
 
+    function hasBrowserOrderSubmitted(browserExecution = {}) {
+      const summary = browserExecution?.checkoutSummary || {};
+      return browserExecution?.orderSubmitted === true
+        || summary.orderSubmitted === true
+        || browserExecution?.milestoneSignals?.orderSubmitted === true
+        || (Array.isArray(browserExecution?.verifiedMilestones) && browserExecution.verifiedMilestones.includes('order_submitted'));
+    }
+
+    function sessionHasBrowserOrderSubmitted(session = {}) {
+      const result = session?.fulfillment?.result || {};
+      const browserExecution = result.browserExecution || session?.fulfillment?.browserExecution || {};
+      if (hasBrowserOrderSubmitted(browserExecution)) return true;
+      const verifiedMilestones = Array.isArray(session?.extensionMissionPlanState?.verifiedMilestones)
+        ? session.extensionMissionPlanState.verifiedMilestones
+        : [];
+      if (verifiedMilestones.includes('order_submitted')) return true;
+      const trace = Array.isArray(session?.missionBoundaryTrace)
+        ? session.missionBoundaryTrace
+        : Array.isArray(session?.executionTrace)
+          ? session.executionTrace
+          : [];
+      return trace.some((entry) => hasBrowserOrderSubmitted(
+        entry?.browserExecution || entry?.browser || entry?.result?.browserExecution || {}
+      ));
+    }
+
     function canPlaceReviewedOrderFromSession(session = {}) {
       const kind = String(session?.handoffData?.kind || '');
       if (kind !== 'browser') return false;
@@ -15073,9 +15099,18 @@
       const browserExecution = result.browserExecution || session?.fulfillment?.result?.browserExecution || {};
       const browserSummary = browserExecution.checkoutSummary || {};
       const browserStopState = String(browserExecution.stopState || result.stopState || '').toLowerCase();
+      const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
       const travelMode = kind === 'travel'
         ? resolveTravelModeValue(session.selections?.travelMode || session.paymentOrchestration?.travelMode || 'itinerary_build')
         : '';
+      if (kind === 'browser' && browserOrderSubmitted) {
+        return {
+          title: 'Order submitted',
+          detail: 'Amazon confirmed the order.',
+          badgeLabel: 'Done',
+          actionLabel: 'Open confirmation'
+        };
+      }
       if (statusModel.statusValue === 'failed') {
         if (kind === 'browser' && browserStopState === 'local_checkout_profile_missing') {
           return {
@@ -15343,10 +15378,11 @@
 	          && !santaClawzRetryBlocked
 	          && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusBadge.statusValue);
 	        const agentMissingInputs = isAgentExecutionSheet ? getMissingAgentInputLabels(session) : [];
-	        const browserExecution = session.fulfillment?.result?.browserExecution || {};
-	        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
-	        const browserSummary = browserExecution.checkoutSummary || {};
-	        const browserNeedsCheckoutReconcile = [
+		        const browserExecution = session.fulfillment?.result?.browserExecution || {};
+		        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
+		        const browserSummary = browserExecution.checkoutSummary || {};
+		        const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
+		        const browserNeedsCheckoutReconcile = [
 	          'payment_required',
 	          'needs_payment',
 	          'checkout_profile_mismatch',
@@ -15355,8 +15391,9 @@
 	          || browserSummary.cardMatches === false
 	          || browserSummary.addressMatches === false
 	          || browserSummary.addressVerification === 'unverified';
-	        const browserCanResumeCheckoutReconcile = isBrowserExecutionSheet
-	          && browserNeedsCheckoutReconcile
+		        const browserCanResumeCheckoutReconcile = isBrowserExecutionSheet
+		          && !browserOrderSubmitted
+		          && browserNeedsCheckoutReconcile
 	          && nativeRunnerSupportsLocalCheckoutProfile()
 	          && ['fulfilled', 'failed'].includes(String(session.status || '').toLowerCase());
 	        const browserActionUrl = latestStep?.browser?.url
@@ -16978,14 +17015,19 @@
       if (!summary || typeof summary !== 'object') return '';
       const stage = String(summary.stage || '').replace(/_/g, ' ');
       const next = summary.nextAction || '';
-      const payment = summary.expectedCardLast4
+      const orderSubmitted = summary.orderSubmitted === true;
+      const payment = orderSubmitted
+        ? ''
+        : summary.expectedCardLast4
         ? (summary.cardMatches
           ? `Card ${summary.expectedCardLast4} ready`
           : summary.selectedCardLast4
             ? `Card ${summary.selectedCardLast4}; need ${summary.expectedCardLast4}`
             : `Need card ${summary.expectedCardLast4}`)
         : (summary.paymentIssue || '');
-      const address = summary.addressVerification === 'unverified'
+      const address = orderSubmitted
+        ? ''
+        : summary.addressVerification === 'unverified'
         ? 'Address not yet verified'
         : summary.addressMatches == null
           ? ''
@@ -17022,16 +17064,17 @@
 	      const checkoutProgress = browserExecution?.checkoutProgress || result.checkoutProgress || {};
 	      const safeFieldsFilled = Array.isArray(browserExecution?.safeFieldsFilled) ? browserExecution.safeFieldsFilled : [];
       const checkoutSelections = Array.isArray(browserExecution?.checkoutSelections) ? browserExecution.checkoutSelections : [];
-      const checkoutSummary = browserExecution?.checkoutSummary || result.checkoutSummary || {};
+	      const checkoutSummary = browserExecution?.checkoutSummary || result.checkoutSummary || {};
+	      const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
       const milestoneStatus = getBrowserMilestoneStatus(browserExecution || result);
       const paymentProfile = browserExecution?.paymentProfile || result.paymentProfile || {};
       const selections = session.selections || session.finalSelections || {};
       const finalReviewReady = ['needs_final_approval', 'final_approval_required', 'review_ready'].includes(stopState);
       const canPlaceReviewedOrder = finalReviewReady && canPlaceReviewedOrderFromSession(session);
-      const checkoutDetailsNeedReconcile = ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required'].includes(stopState)
+      const checkoutDetailsNeedReconcile = !browserOrderSubmitted && (['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required'].includes(stopState)
         || checkoutSummary.cardMatches === false
         || checkoutSummary.addressMatches === false
-        || checkoutSummary.addressVerification === 'unverified';
+        || checkoutSummary.addressVerification === 'unverified');
       const canResumeCheckoutReconcile = checkoutDetailsNeedReconcile
         && nativeRunnerSupportsLocalCheckoutProfile()
         && ['fulfilled', 'failed'].includes(String(session.status || '').trim().toLowerCase());
@@ -17043,7 +17086,9 @@
       const paymentProfileText = cardReady
         ? `${cardLabel}${cardLast4 ? ` ending ${cardLast4}` : ''}`
         : 'No local payment card cue was available to this run';
-      const progressLabel = milestoneStatus.completedLabel || (stopState === 'checkout_profile_mismatch'
+      const progressLabel = browserOrderSubmitted
+        ? 'Order submitted'
+        : milestoneStatus.completedLabel || (stopState === 'checkout_profile_mismatch'
         ? 'Delivery address needs update'
         : stopState === 'address_verification_required'
           ? 'Recheck delivery address'
@@ -17058,7 +17103,9 @@
           : checkoutProgress.productOpened
             ? 'Product selected'
             : 'Preparing browser task');
-      const nextStep = stopState === 'needs_login' || stopState === 'login_required'
+      const nextStep = browserOrderSubmitted
+        ? 'Amazon confirmed the order.'
+        : stopState === 'needs_login' || stopState === 'login_required'
         ? 'Sign in, then continue.'
         : stopState === 'needs_payment' || stopState === 'payment_required'
           ? cardLast4
@@ -17104,7 +17151,7 @@
                   </div>
                 `).join('')}
               </div>
-              ${renderCheckoutSummary(checkoutSummary)}
+              ${renderCheckoutSummary({ ...checkoutSummary, orderSubmitted: browserOrderSubmitted })}
               <div class="execution-live-links execution-review-actions">
                 ${canResumeCheckoutReconcile ? `<button class="execution-live-link execution-live-link-primary" type="button" data-execution-continue-checkout="${escapeExecutionValue(session.id)}">Fix saved address and card</button>` : ''}
                 ${canPlaceReviewedOrder ? `<button class="execution-live-link execution-live-link-primary" type="button" data-execution-final-submit="${escapeExecutionValue(session.id)}">Approve and place order</button>` : ''}
@@ -17148,7 +17195,7 @@
             <div class="execution-live-state">${escapeExecutionValue(phase.label)}</div>
           </div>
           ${preview?.url ? `<a class="execution-live-media" href="${preview.url}" target="_blank" rel="noopener noreferrer"><img src="${preview.url}" alt="Live execution preview" /></a>` : ''}
-          ${renderCheckoutSummary(checkoutSummary)}
+          ${renderCheckoutSummary({ ...checkoutSummary, orderSubmitted: browserOrderSubmitted })}
           <div class="execution-live-links execution-review-actions">
             ${pageUrl ? `<button class="execution-live-link execution-live-link-primary" type="button" data-native-runner-focus-tab="${escapeExecutionValue(session.id)}" data-fallback-url="${escapeExecutionValue(pageUrl)}">Open tab</button>` : ''}
             ${preview?.url ? `<a class="execution-live-link" href="${preview.url}" target="_blank" rel="noopener noreferrer">Snapshot</a>` : ''}
