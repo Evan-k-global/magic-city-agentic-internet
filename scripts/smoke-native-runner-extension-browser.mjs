@@ -179,14 +179,30 @@ function copyTestExtension(directory, externalOrigin = '', options = {}) {
       `  'https://magic-city-staging.fly.dev',\n  '${origin}'\n]);`
     ));
   }
-  if (Number.isFinite(Number(options.finalSubmitLeaseMs))) {
+  const finalSubmitLeaseMs = Number(options.finalSubmitLeaseMs);
+  if (options.finalSubmitLeaseMs != null
+    && Number.isFinite(finalSubmitLeaseMs)
+    && finalSubmitLeaseMs > 0) {
     const backgroundPath = path.join(destination, 'background-v0.2.js');
     const background = fs.readFileSync(backgroundPath, 'utf8');
     const marker = 'const FINAL_SUBMIT_LOCAL_LEASE_MS = 45_000;';
     if (!background.includes(marker)) fail('test_extension_final_submit_lease_marker_missing');
     fs.writeFileSync(backgroundPath, background.replace(
       marker,
-      `const FINAL_SUBMIT_LOCAL_LEASE_MS = ${Number(options.finalSubmitLeaseMs)};`
+      `const FINAL_SUBMIT_LOCAL_LEASE_MS = ${finalSubmitLeaseMs};`
+    ));
+  }
+  if (Number.isFinite(Number(options.finalSubmitDelayMs)) && Number(options.finalSubmitDelayMs) > 0) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const marker = '        assertFinalSubmitLocalAuthority(session, finalSubmitAuthorityLease, plan, action);';
+    if (!background.includes(marker)) fail('test_extension_final_submit_delay_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      marker,
+      [
+        `        await new Promise((resolve) => setTimeout(resolve, ${Number(options.finalSubmitDelayMs)}));`,
+        marker
+      ].join('\n')
     ));
   }
   return destination;
@@ -915,7 +931,8 @@ async function main() {
     const extensionDir = copyTestExtension(tmpDir, baseUrl, {
       // Test the actual MV3/browser boundary with a short copied lease rather
       // than exporting production internals or waiting forty-five seconds.
-      finalSubmitLeaseMs: smokeMode === 'final-submit-lease' ? 1_000 : null
+      finalSubmitLeaseMs: /^final-submit-lease-(?:renewal|expiry)$/.test(smokeMode) ? 1_000 : null,
+      finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null
     });
     const profileDir = path.join(tmpDir, 'profile');
     const launchOptions = {
@@ -1107,12 +1124,14 @@ async function main() {
       console.log('native-runner focused recovery smoke passed');
       return;
     }
-    if (smokeMode === 'final-submit-lease') {
+    if (/^final-submit-lease-(?:renewal|expiry)$/.test(smokeMode)) {
+      const shouldExpireAfterCheckpoint = smokeMode === 'final-submit-lease-expiry';
       // Drive the real worker through navigation, a normal inspection
       // checkpoint, and then the irreversible final-submit action. The
-      // checkpoint delay expires the copied one-second lease before the final
-      // action, proving that the native Amazon input and its receipts remain
-      // untouched when local authority is stale.
+      // renewal case lets the original copied one-second lease expire while
+      // the signed review checkpoint is pending. The expiry case delays only
+      // after that fresh checkpoint, so it proves a stale scoped lease still
+      // cannot dispatch the native Amazon input.
       checkoutFixture = {
         total: '$2.97',
         merchandiseSubtotal: '$2.97',
@@ -1128,7 +1147,7 @@ async function main() {
       };
       checkpoints.length = 0;
       fulfillment = null;
-      delayLeaseExpiryCheckpoint = true;
+      delayLeaseExpiryCheckpoint = !shouldExpireAfterCheckpoint;
       const leaseExpiryPlan = rehashExtensionPlan({
         ...plan,
         planId: 'mplan_browser-smoke-final-submit-lease',
@@ -1182,7 +1201,10 @@ async function main() {
           const state = await worker.evaluate(() => new Promise((resolve) => {
             chrome.storage.local.get(['lastError', 'activeRun'], resolve);
           }));
-          return state.lastError === 'final_submit_authority_lease_expired' && !state.activeRun;
+          return shouldExpireAfterCheckpoint
+            ? String(state.lastError || '').startsWith('final_submit_authority_lease_expired') && !state.activeRun
+            : checkpoints.some((checkpoint) => checkpoint.planActionId === 'submit-final-order'
+              && checkpoint.browser?.runnerStep?.finalSubmitReceipt?.phase === 'click_dispatched');
         }, 15_000);
       } catch {
         const runnerState = await worker.evaluate(() => new Promise((resolve) => {
@@ -1213,24 +1235,47 @@ async function main() {
       }));
       const finalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
       const checkpointReceipts = finalCheckpoint?.browser?.browserActionReceipts || [];
-      if (fulfillment
-        || runnerEvidence.lastError !== 'final_submit_authority_lease_expired'
-        || browserEvidence.nativeClick
-        || browserEvidence.orderSubmitted
-        || browserEvidence.receipts.some((receipt) => receipt?.kind === 'final_order')
-        || checkpointReceipts.some((receipt) => receipt?.kind === 'final_order')) {
-        fail(`browser_extension_final_submit_lease_expiry_dispatched_or_reported_order:${JSON.stringify({
+      if (shouldExpireAfterCheckpoint) {
+        if (fulfillment?.status !== 'failed'
+          || fulfillment?.result?.browserExecution?.stopState !== 'final_submit_authorization_rejected'
+          || browserEvidence.nativeClick
+          || browserEvidence.orderSubmitted
+          || browserEvidence.receipts.some((receipt) => receipt?.kind === 'final_order')
+          || checkpointReceipts.some((receipt) => receipt?.kind === 'final_order')) {
+          fail(`browser_extension_final_submit_lease_expiry_dispatched_or_reported_order:${JSON.stringify({
+            fulfillment,
+            runnerEvidence,
+            browserEvidence,
+            checkpoint: finalCheckpoint || null
+          })}`);
+        }
+      } else if (runnerEvidence.lastError
+        || browserEvidence.nativeClick !== '1'
+        || browserEvidence.orderSubmitted !== '1'
+        || !checkpointReceipts.some((receipt) => receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched')) {
+        fail(`browser_extension_final_submit_lease_renewal_did_not_dispatch:${JSON.stringify({
           fulfillment,
           runnerEvidence,
           browserEvidence,
           checkpoint: finalCheckpoint || null
         })}`);
       }
-      recordPurchaseScenario('Expired final-submit lease blocks the native Amazon click and receipts', {
-        error: runnerEvidence.lastError,
-        finalCheckpointStatus: finalCheckpoint?.planActionStatus || 'none',
-        terminalReport: fulfillment ? 'unexpected' : 'not_published_without_dispatch'
-      });
+      recordPurchaseScenario(
+        shouldExpireAfterCheckpoint
+          ? 'Expired final-submit lease blocks the native Amazon click and receipts'
+          : 'Fresh signed review checkpoint renews the exact final-submit lease once',
+        shouldExpireAfterCheckpoint
+          ? {
+            error: runnerEvidence.lastError,
+            finalCheckpointStatus: finalCheckpoint?.planActionStatus || 'none',
+            terminalReport: fulfillment?.result?.browserExecution?.stopState || 'missing'
+            }
+          : {
+              finalCheckpointStatus: finalCheckpoint?.planActionStatus || 'none',
+              nativeClick: browserEvidence.nativeClick,
+              orderSubmitted: browserEvidence.orderSubmitted
+            }
+      );
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner final-submit lease behavior smoke passed');
       return;
@@ -1559,10 +1604,29 @@ async function main() {
       const diagnosticPage = await context.newPage();
       await diagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
       const runnerState = await diagnosticPage.evaluate(() => new Promise((resolve) => {
-        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'explicitWakeSessionId'], resolve);
+        chrome.storage.local.get([
+          'lastError',
+          'lastExecution',
+          'activeSessionId',
+          'explicitWakeSessionId',
+          'activeRun'
+        ], resolve);
       }));
       await diagnosticPage.close();
-      fail(`browser_extension_smoke_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}`);
+      fail(`browser_extension_smoke_timeout:${JSON.stringify({
+        steps: checkpoints.map((checkpoint) => ({
+          id: checkpoint.planActionId,
+          status: checkpoint.planActionStatus,
+          milestones: checkpoint.verifiedMilestones
+        })),
+        runnerState,
+        session: {
+          status: session?.status,
+          planState: session?.extensionMissionPlanState,
+          fulfillment: session?.fulfillment,
+          runnerStatus: session?.runnerStatus
+        }
+      })}`);
     }
     const externalWake = await externalWakePromise;
     if (externalWake.error || !externalWake.response?.ok || !externalWake.response?.result?.requestedSessionFound) {

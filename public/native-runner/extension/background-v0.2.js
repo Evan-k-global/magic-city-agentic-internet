@@ -388,11 +388,42 @@ function assertLocalMissionAuthority(session = {}) {
   return session;
 }
 
-function assertFinalSubmitLocalAuthority(session = {}, authorityVerifiedAt = 0) {
+function normalizeFinalSubmitAuthorityLease(lease = null) {
+  const sessionId = String(lease?.sessionId || '').trim();
+  const planHash = String(lease?.planHash || '').trim();
+  const actionId = String(lease?.actionId || '').trim();
+  const verifiedAt = Number(lease?.verifiedAt || 0);
+  if (!sessionId || !planHash || !actionId || !Number.isFinite(verifiedAt) || verifiedAt <= 0) return null;
+  return { sessionId, planHash, actionId, verifiedAt };
+}
+
+function issueFinalSubmitAuthorityLease(session = {}, plan = {}, action = {}) {
+  const sessionId = String(session.id || '').trim();
+  const planHash = String(plan.planHash || '').trim();
+  const actionId = String(action.id || '').trim();
+  if (!sessionId || !planHash || !actionId || action.type !== 'final_submit') return null;
+  return { sessionId, planHash, actionId, verifiedAt: Date.now() };
+}
+
+function assertFinalSubmitLocalAuthority(session = {}, lease = null, plan = {}, action = {}) {
   assertLocalMissionAuthority(session);
-  if (!Number.isFinite(Number(authorityVerifiedAt))
-    || Date.now() - Number(authorityVerifiedAt) > FINAL_SUBMIT_LOCAL_LEASE_MS) {
-    throw new Error('final_submit_authority_lease_expired');
+  const normalizedLease = normalizeFinalSubmitAuthorityLease(lease);
+  if (!normalizedLease
+    || normalizedLease.sessionId !== String(session.id || '').trim()
+    || normalizedLease.planHash !== String(plan.planHash || '').trim()
+    || normalizedLease.actionId !== String(action.id || '').trim()) {
+    const error = new Error('final_submit_authority_lease_scope_mismatch');
+    error.code = 'final_submit_authority_lease_scope_mismatch';
+    error.finalSubmitAuthorityLease = normalizedLease;
+    throw error;
+  }
+  const ageMs = Date.now() - normalizedLease.verifiedAt;
+  if (ageMs > FINAL_SUBMIT_LOCAL_LEASE_MS) {
+    const error = new Error(`final_submit_authority_lease_expired:${Math.round(ageMs)}`);
+    error.code = 'final_submit_authority_lease_expired';
+    error.finalSubmitLeaseAgeMs = ageMs;
+    error.finalSubmitAuthorityLease = normalizedLease;
+    throw error;
   }
   return session;
 }
@@ -540,6 +571,7 @@ function normalizeActiveRun(entry = null) {
     merchantConfirmationStartedAt: String(entry?.merchantConfirmationStartedAt || '').trim() || null,
     merchantConfirmationDeadlineAt: String(entry?.merchantConfirmationDeadlineAt || '').trim() || null,
     merchantConfirmationAttempts: Math.max(0, Number(entry?.merchantConfirmationAttempts || 0) || 0),
+    finalSubmitAuthorityLease: normalizeFinalSubmitAuthorityLease(entry?.finalSubmitAuthorityLease),
     startedAt: String(entry?.startedAt || '').trim() || new Date().toISOString(),
     updatedAt: String(entry?.updatedAt || '').trim() || new Date().toISOString()
   };
@@ -808,7 +840,10 @@ function isExecutionCancelledError(error) {
 
 function isFinalSubmitPolicyError(error) {
   const message = String(error?.message || error || '').trim().toLowerCase();
-  return message.startsWith('mission_final_submit_')
+  const code = String(error?.code || '').trim().toLowerCase();
+  return code.startsWith('final_submit_')
+    || message.startsWith('final_submit_')
+    || message.startsWith('mission_final_submit_')
     || message === 'mission_action_requires_user_approval';
 }
 
@@ -2917,6 +2952,7 @@ async function runSession(rawSession) {
       ? session.extensionMissionPlanState
       : { nextActionIndex: 0 };
     const interruptedRun = resumingPersistedRun ? persistedActiveRun : await getActiveRun();
+    let finalSubmitAuthorityLease = normalizeFinalSubmitAuthorityLease(interruptedRun?.finalSubmitAuthorityLease);
     const resumesInterruptedAction = Boolean(
       interruptedRun?.sessionId === session.id
       && interruptedRun.phase === 'executing_step'
@@ -3055,13 +3091,23 @@ async function runSession(rawSession) {
         nextActionIndex: index,
         selectedCandidate: progress.selectedCandidate
       });
+      // A worker can restart after Amazon accepted the irreversible click but
+      // before the runner reports it. On an order-confirmation page, recover
+      // that observed fact without demanding a new click lease or replaying
+      // the merchant control. Every other final-submit surface still needs a
+      // fresh, scoped local lease before it can dispatch a click.
+      const recoveredState = recoveringInterruptedAction && tab
+        ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
+        : null;
+      const recoveredFinalOrderAlreadyConfirmed = action.type === 'final_submit'
+        && hasConfirmedMerchantOrder(recoveredState);
       const presentation = planActionPresentation(action);
       // A slow control-plane heartbeat must not race Amazon's irreversible
       // button, but this is not an unlimited offline bypass. The signed
       // capability must still be current and the runner must have observed a
       // live session within one short lease window before dispatch.
-      if (action.type === 'final_submit') {
-        assertFinalSubmitLocalAuthority(session, authorityVerifiedAt);
+      if (action.type === 'final_submit' && !recoveredFinalOrderAlreadyConfirmed) {
+        assertFinalSubmitLocalAuthority(session, finalSubmitAuthorityLease, plan, action);
       } else {
         await assertActive();
       }
@@ -3164,9 +3210,6 @@ async function runSession(rawSession) {
           });
         }
       }
-      const recoveredState = recoveringInterruptedAction && tab
-        ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
-        : null;
       const resumedActionAlreadySatisfied = recoveredState
         ? actionWasSatisfiedBeforeRestart(executionAction, recoveredState)
         : false;
@@ -3449,12 +3492,22 @@ async function runSession(rawSession) {
         planAction: action,
         planActionStatus: actionStatus
       });
-      // A failed final-order action must remain at its signed cursor. In
-      // particular, never make recovery believe the irreversible click ran
-      // unless the content script recorded its pre-dispatch receipt.
+      // The authenticated checkpoint immediately before the signed
+      // final-submit action renews a short, one-action local lease. This
+      // avoids a slow but healthy checkout expiring an authority timestamp
+      // captured at run start, without permitting a later or different plan
+      // action to reuse the lease.
+      const nextAction = plan.actions[index + 1] || null;
+      if (actionStatus === 'completed' && nextAction?.type === 'final_submit') {
+        finalSubmitAuthorityLease = issueFinalSubmitAuthorityLease(session, plan, nextAction);
+      }
+      // A failed final-order action must remain at its signed cursor. A
+      // persisted dispatch receipt proves a click; a recovered merchant
+      // confirmation proves the same action completed without replaying it.
       const finalSubmitReceiptRecorded = action.type !== 'final_submit'
         || (report.runnerStep.finalSubmitReceipt?.kind === 'final_order'
-          && report.runnerStep.finalSubmitReceipt?.phase === 'click_dispatched');
+          && report.runnerStep.finalSubmitReceipt?.phase === 'click_dispatched')
+        || outcome.orderSubmitted === true;
       await saveActiveRun({
         sessionId: session.id,
         planHash: plan.planHash,
@@ -3463,7 +3516,8 @@ async function runSession(rawSession) {
         actionId: finalSubmitReceiptRecorded ? null : action.id,
         actionIndex: finalSubmitReceiptRecorded ? null : index,
         nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
-        selectedCandidate: progress.selectedCandidate
+        selectedCandidate: progress.selectedCandidate,
+        finalSubmitAuthorityLease: finalSubmitReceiptRecorded ? null : finalSubmitAuthorityLease
       });
       if (action.awaitMerchantOrderConfirmation === true && report.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
         const confirmationDeadlineMs = Date.parse(String(executionAction.merchantConfirmationDeadlineAt || ''));
@@ -3493,7 +3547,8 @@ async function runSession(rawSession) {
           selectedCandidate: progress.selectedCandidate,
           merchantConfirmationStartedAt: durableRun?.merchantConfirmationStartedAt || new Date().toISOString(),
           merchantConfirmationDeadlineAt: executionAction.merchantConfirmationDeadlineAt || null,
-          merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0)) + 1
+          merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0)) + 1,
+          finalSubmitAuthorityLease: null
         });
         retainActiveRun = true;
         scheduleRunnerResume(RUNNER_RESUME_DELAY_MS);
@@ -3635,7 +3690,18 @@ async function runSession(rawSession) {
       });
       return { sessionId: session.id, status: 'retrying_browser_step', retrying: true };
     }
-    await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'step_needs_review', actionId: currentAction?.id || null, durationMs: actionDurationMs, at: new Date().toISOString() } });
+    await saveConfig({
+      lastError: message,
+      lastExecution: {
+        sessionId: session.id,
+        status: 'step_needs_review',
+        actionId: currentAction?.id || null,
+        durationMs: actionDurationMs,
+        ...(Number.isFinite(error?.finalSubmitLeaseAgeMs) ? { finalSubmitLeaseAgeMs: error.finalSubmitLeaseAgeMs } : {}),
+        ...(error?.finalSubmitAuthorityLease ? { finalSubmitAuthorityLease: error.finalSubmitAuthorityLease } : {}),
+        at: new Date().toISOString()
+      }
+    });
     if (!plan && session?.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID) return reportStartupFailure(session, error);
     if (!plan) throw error;
     const planState = session.extensionMissionPlanState?.planHash === plan.planHash
