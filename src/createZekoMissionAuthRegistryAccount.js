@@ -47,6 +47,8 @@ const publicPath = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_PATH || DEFAULT
 const configuredRelayerPrivateKey =
   process.env.ZEKO_RELAYER_PRIVATE_KEY ||
   process.env.ZEKO_MISSION_AUTH_RELAYER_PRIVATE_KEY ||
+  process.env.DEPLOYER_PRIVATE_KEY ||
+  process.env.MAGIC_CITY_DEPLOYER_PRIVATE_KEY ||
   process.env.SUBMITTER_PRIVATE_KEY ||
   '';
 const relayerKey = configuredRelayerPrivateKey
@@ -55,6 +57,14 @@ const relayerKey = configuredRelayerPrivateKey
 const registryKey = PrivateKey.random();
 const relayerPublicKey = relayerKey.toPublicKey().toBase58();
 const registryPublicKey = registryKey.toPublicKey().toBase58();
+const expectedRelayerPublicKey = String(
+  process.env.DEPLOYER_PUBLIC_KEY ||
+  process.env.MAGIC_CITY_DEPLOYER_PUBLIC_KEY ||
+  ''
+).trim();
+if (expectedRelayerPublicKey && expectedRelayerPublicKey !== relayerPublicKey) {
+  throw new Error('Configured deployer private key does not match DEPLOYER_PUBLIC_KEY.');
+}
 const generatedAtIso = new Date().toISOString();
 
 const privateDeployment = {

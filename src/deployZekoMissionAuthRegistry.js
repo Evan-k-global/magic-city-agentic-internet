@@ -124,6 +124,8 @@ if (!isMainnet && (endpointLooksMainnet(mina) || endpointLooksMainnet(archive)))
 const relayerPrivateKey =
   process.env.ZEKO_RELAYER_PRIVATE_KEY ||
   process.env.ZEKO_MISSION_AUTH_RELAYER_PRIVATE_KEY ||
+  process.env.DEPLOYER_PRIVATE_KEY ||
+  process.env.MAGIC_CITY_DEPLOYER_PRIVATE_KEY ||
   existing.relayerPrivateKey;
 const registryPrivateKey =
   process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY ||
@@ -138,6 +140,14 @@ const relayer = PrivateKey.fromBase58(relayerPrivateKey);
 const registryKey = PrivateKey.fromBase58(registryPrivateKey);
 const relayerPublicKey = relayer.toPublicKey();
 const registryPublicKey = registryKey.toPublicKey();
+const expectedRelayerPublicKey = String(
+  process.env.DEPLOYER_PUBLIC_KEY ||
+  process.env.MAGIC_CITY_DEPLOYER_PUBLIC_KEY ||
+  ''
+).trim();
+if (expectedRelayerPublicKey && expectedRelayerPublicKey !== relayerPublicKey.toBase58()) {
+  throw new Error('Configured deployer private key does not match DEPLOYER_PUBLIC_KEY.');
+}
 
 const relayerAccount = await fetchAccountViaGraphql(mina, relayerPublicKey.toBase58());
 if (!relayerAccount) {
