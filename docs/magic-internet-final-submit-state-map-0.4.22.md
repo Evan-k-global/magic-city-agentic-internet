@@ -16,7 +16,7 @@ does not grant authority or decide that an order was submitted.
 | State or evidence | Producer | Canonical owner | Consumers | Survives navigation | Sensitive data | Required regression |
 | --- | --- | --- | --- | --- | --- | --- |
 | Signed plan/action scope | Server and MBA signer | Mission session + signed plan | Background authorization gate, proof export | Yes | No private checkout values | Final-submit policy and receipt tests |
-| Final-submit lease | Background after reviewed-checkout verification | Active runner action | `assertFinalSubmitLocalAuthority` | Service-worker lifetime only | No | Fresh lease and expired 45-second lease tests |
+| Final-submit lease | Background after reviewed-checkout verification | Active runner action | `assertFinalSubmitLocalAuthority` | Service-worker lifetime only | No | Fresh-lease dispatch and behavioral expired-lease MV3 tests |
 | `final_submit_intent` | Executor before scheduling the native click | Browser receipt ledger, projected to checkpoint | Background diagnostics and recovery | No; never sufficient for submission | No portable private data | Intent-only interruption test |
 | `click_dispatched` | Executor timer callback immediately before native click | `finalOrderDispatches` in extension background storage | Cursor advancement, checkpoints, recovery | Yes | No portable private data | Wrapper-label/native-input click and worker interruption tests |
 | Native click diagnostic | Executor | Receipt diagnostic only | Debug trace | No | No | Native target click test |

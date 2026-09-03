@@ -154,7 +154,7 @@ function createCertificate(directory) {
   return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
 }
 
-function copyTestExtension(directory, externalOrigin = '') {
+function copyTestExtension(directory, externalOrigin = '', options = {}) {
   const destination = path.join(directory, 'extension');
   fs.cpSync(extensionSource, destination, { recursive: true });
   const manifestPath = path.join(destination, 'manifest.json');
@@ -177,6 +177,16 @@ function copyTestExtension(directory, externalOrigin = '') {
     fs.writeFileSync(backgroundPath, background.replace(
       marker,
       `  'https://magic-city-staging.fly.dev',\n  '${origin}'\n]);`
+    ));
+  }
+  if (Number.isFinite(Number(options.finalSubmitLeaseMs))) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const marker = 'const FINAL_SUBMIT_LOCAL_LEASE_MS = 45_000;';
+    if (!background.includes(marker)) fail('test_extension_final_submit_lease_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      marker,
+      `const FINAL_SUBMIT_LOCAL_LEASE_MS = ${Number(options.finalSubmitLeaseMs)};`
     ));
   }
   return destination;
@@ -736,6 +746,7 @@ async function main() {
     // while status reporting is temporarily unavailable at final review.
     let blockRunnerStatusForFinalDispatch = false;
     let blockedFinalRunnerStatusCalls = 0;
+    let delayLeaseExpiryCheckpoint = false;
     // The full browser matrix intentionally runs longer than the initial
     // ten-minute test capability. Keep the fixture's active capabilities
     // fresh; expiry itself is covered by the focused mocked-clock regression.
@@ -818,6 +829,9 @@ async function main() {
           && !reportedMilestones.includes(expected.expectedMilestone)) {
           return json(res, 409, { error: 'test_plan_milestone_not_verified', expectedMilestone: expected.expectedMilestone });
         }
+        if (delayLeaseExpiryCheckpoint && expected.id === 'inspect-before-final-submit') {
+          await new Promise((resolve) => setTimeout(resolve, 1_250));
+        }
         checkpoints.push(body);
         const advanced = body.planActionStatus !== 'waiting';
         session = {
@@ -898,7 +912,11 @@ async function main() {
       }
     };
 
-    const extensionDir = copyTestExtension(tmpDir, baseUrl);
+    const extensionDir = copyTestExtension(tmpDir, baseUrl, {
+      // Test the actual MV3/browser boundary with a short copied lease rather
+      // than exporting production internals or waiting forty-five seconds.
+      finalSubmitLeaseMs: smokeMode === 'final-submit-lease' ? 1_000 : null
+    });
     const profileDir = path.join(tmpDir, 'profile');
     const launchOptions = {
       headless: false,
@@ -1087,6 +1105,134 @@ async function main() {
       recordPurchaseScenario('Forced MV3 restart recovers cart, checkout, payment confirmation, and final-order mutations', { scenarios: 4 });
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner focused recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'final-submit-lease') {
+      // Drive the real worker through navigation, a normal inspection
+      // checkpoint, and then the irreversible final-submit action. The
+      // checkpoint delay expires the copied one-second lease before the final
+      // action, proving that the native Amazon input and its receipts remain
+      // untouched when local authority is stale.
+      checkoutFixture = {
+        total: '$2.97',
+        merchandiseSubtotal: '$2.97',
+        shipping: '$0.00',
+        itemCount: 1,
+        selectedCardLast4: '6383',
+        matchingAddressAvailable: true,
+        matchingAddressChecked: true,
+        selectedFreeDelivery: true,
+        showAddressPrimeModal: false,
+        showPickupDisclosure: false,
+        showPickupModal: false
+      };
+      checkpoints.length = 0;
+      fulfillment = null;
+      delayLeaseExpiryCheckpoint = true;
+      const leaseExpiryPlan = rehashExtensionPlan({
+        ...plan,
+        planId: 'mplan_browser-smoke-final-submit-lease',
+        startUrl: `${baseUrl}/checkout/final-review`,
+        limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+        actions: [
+          {
+            ...plan.actions.find((action) => action.id === 'open-site'),
+            id: 'open-final-review',
+            url: `${baseUrl}/checkout/final-review`
+          },
+          {
+            ...plan.actions.find((action) => action.id === 'inspect-review'),
+            id: 'inspect-before-final-submit',
+            expectedMilestone: undefined
+          },
+          {
+            ...plan.actions.find((action) => action.id === 'submit-final-order'),
+            autoSubmitAfterVerifiedCheckout: true
+          },
+          { ...plan.actions.find((action) => action.id === 'confirm-merchant-order') },
+          { ...plan.actions.find((action) => action.id === 'pause-for-user') }
+        ]
+      });
+      session = {
+        ...session,
+        id: 'browser-smoke-final-submit-lease',
+        status: 'queued',
+        claimedByPluginId: null,
+        fulfillment: null,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          subject: { sessionId: 'browser-smoke-final-submit-lease' }
+        },
+        extensionMissionPlan: leaseExpiryPlan,
+        extensionMissionPlanState: { planHash: leaseExpiryPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+        missionBoundaryLatestHash: null,
+        missionBoundaryEventCount: 0
+      };
+      await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {}, activeRun: null, activeSessionId: null }));
+      await seedSessionCheckoutProfile(session.id, {
+        ...defaultCheckoutProfile,
+        paymentCardLast4: '6383'
+      }, leaseExpiryPlan.planHash);
+      const leaseRun = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+      }), session.id);
+      if (!leaseRun?.ok) fail(`browser_extension_final_submit_lease_start_failed:${leaseRun?.error || 'no_response'}`);
+      try {
+        await waitFor(async () => {
+          const state = await worker.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['lastError', 'activeRun'], resolve);
+          }));
+          return state.lastError === 'final_submit_authority_lease_expired' && !state.activeRun;
+        }, 15_000);
+      } catch {
+        const runnerState = await worker.evaluate(() => new Promise((resolve) => {
+          chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun', 'activeMissionTabs'], resolve);
+        }));
+        fail(`browser_extension_final_submit_lease_timeout:${JSON.stringify({
+          checkpoints: checkpoints.map((checkpoint) => ({
+            actionId: checkpoint.planActionId,
+            status: checkpoint.planActionStatus,
+            detail: checkpoint.detail
+          })),
+          runnerState,
+          sessionState: session.extensionMissionPlanState
+        })}`);
+      } finally {
+        delayLeaseExpiryCheckpoint = false;
+      }
+      const checkoutPage = context.pages().find((page) => page.url().startsWith(baseUrl)
+        && page.url().includes('/checkout/final-review'));
+      if (!checkoutPage) fail('browser_extension_final_submit_lease_checkout_page_missing');
+      const browserEvidence = await checkoutPage.evaluate(() => ({
+        nativeClick: sessionStorage.getItem('magic-city-native-final-click') || '',
+        orderSubmitted: document.body.dataset.orderSubmitted || '',
+        receipts: JSON.parse(sessionStorage.getItem('magic_city_browser_action_receipts_v1') || '[]')
+      }));
+      const runnerEvidence = await worker.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
+      }));
+      const finalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+      const checkpointReceipts = finalCheckpoint?.browser?.browserActionReceipts || [];
+      if (fulfillment
+        || runnerEvidence.lastError !== 'final_submit_authority_lease_expired'
+        || browserEvidence.nativeClick
+        || browserEvidence.orderSubmitted
+        || browserEvidence.receipts.some((receipt) => receipt?.kind === 'final_order')
+        || checkpointReceipts.some((receipt) => receipt?.kind === 'final_order')) {
+        fail(`browser_extension_final_submit_lease_expiry_dispatched_or_reported_order:${JSON.stringify({
+          fulfillment,
+          runnerEvidence,
+          browserEvidence,
+          checkpoint: finalCheckpoint || null
+        })}`);
+      }
+      recordPurchaseScenario('Expired final-submit lease blocks the native Amazon click and receipts', {
+        error: runnerEvidence.lastError,
+        finalCheckpointStatus: finalCheckpoint?.planActionStatus || 'none',
+        terminalReport: fulfillment ? 'unexpected' : 'not_published_without_dispatch'
+      });
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner final-submit lease behavior smoke passed');
       return;
     }
     console.log('native-runner browser smoke running full checkout matrix');

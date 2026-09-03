@@ -49,7 +49,7 @@ Do not reimplement those fixes during cleanup.
 ### 0.4.22 follow-up before reduction
 
 - Preserve the successful live 0.4.22 Amazon canary before changing checkout logic again.
-- `npm run test:native-runner-final-submit-lease` proves that a final-submit authority lease older than 45 seconds rejects before dispatch, then permits the same signed action after fresh verification.
+- `npm run test:native-runner-final-submit-lease` drives the copied MV3 runner through the real final-submit path with a short test-only lease. It proves an expired production-equivalent lease cannot click, create a final-order receipt, or claim submission. The frozen canary runner leaves this pre-dispatch rejection local rather than publishing a terminal final-submit report; changing that recovery policy belongs in a separately versioned runner change. Keep the positive fresh-lease dispatch regression separate.
 - Preserve the existing positive regression proving that a fresh lease can dispatch without making a final synchronous runner-status request.
 - Describe checkout-profile storage accurately as **volatile extension session storage**, not encrypted storage. If application-layer encryption is added later, treat it as a separate security change rather than part of code reduction.
 - Preserve explicit cleanup of volatile profiles after success, cancellation, disconnect, or abandonment. Do not move the profile back to `chrome.storage.local` merely to simplify recovery.
