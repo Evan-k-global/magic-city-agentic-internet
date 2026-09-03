@@ -51,7 +51,9 @@ function cleanBaseUrl(value, fallback) {
 
 function sourceConfig() {
   return {
-    enabled: envBoolean('SANTACLAWZ_AGENT_SOURCE_ENABLED', true),
+    // SantaClawz is an optional marketplace integration. Keep it opt-in so a
+    // missing production variable cannot silently re-enable remote discovery.
+    enabled: envBoolean('SANTACLAWZ_AGENT_SOURCE_ENABLED', false),
     apiBase: cleanBaseUrl(
       process.env.SANTACLAWZ_API_BASE
         || process.env.CLAWZ_API_BASE

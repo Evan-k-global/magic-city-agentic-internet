@@ -5598,7 +5598,7 @@
           <div id="controlsTopupHint" class="wallet-policy-line">Choose credits and payment method.</div>
           <div id="controlsCreditsMsg" class="muted"></div>
           <div id="stripeTopupSuccess" class="wallet-success-note" hidden></div>
-          <div class="wallet-agent-payment-default">
+          <div class="wallet-agent-payment-default" data-santaclawz-feature>
             <label class="wallet-topup-field">
               <span>SantaClawz default</span>
               <span class="wallet-select-shell">
@@ -5772,7 +5772,7 @@
         <div class="execution-job-ledger" id="jobsDashboardList"></div>
       </details>
 
-	      <details id="settingsAgentHubSection" hidden>
+      <details id="settingsAgentHubSection" data-santaclawz-feature hidden>
         <summary>Explore</summary>
         <div class="settings-note">Explore agents or register your own. Magic City handles the retail listing and MCP wiring; SantaClawz handles activation, payments, delivery, and Zeko-backed proof/reputation.</div>
         <div class="agent-summary-card">
@@ -6037,7 +6037,7 @@
                 <div class="helper-list" id="helperSavedAgentsList"></div>
               </div>
               <div class="helper-panel" id="helperAllAgentsPanel" role="tabpanel" aria-labelledby="helperAllTab">
-                <div class="helper-platform-section" id="helperPlatformAgentsSection" hidden>
+                <div class="helper-platform-section" id="helperPlatformAgentsSection" data-santaclawz-feature hidden>
                   <div class="helper-group-heading">
                     <div class="helper-group-title">SantaClawz Agents</div>
                     <a class="helper-add-agent-link" href="https://www.santaclawz.ai/" target="_blank" rel="noopener noreferrer">Add agent</a>
@@ -6081,6 +6081,17 @@
     const PERSONAL_AGENT_SETTINGS_KEY = 'magic_city_personal_agent_v1';
     const NATIVE_RUNNER_SETTINGS_KEY = 'magic_city_native_runner_v1';
     const SANTACLAWZ_PAYMENT_PREFERENCE_KEY = 'magic_city_santaclawz_payment_preference_v1';
+    const SANTACLAWZ_PRODUCT_MODE = String(window.__MAGIC_CITY_SANTACLAWZ_MODE__ || 'disabled').trim().toLowerCase();
+    const SANTACLAWZ_LIVE = SANTACLAWZ_PRODUCT_MODE === 'live';
+
+    function applySantaClawzProductMode() {
+      if (SANTACLAWZ_LIVE) return;
+      document.querySelectorAll('[data-santaclawz-feature]').forEach((element) => {
+        element.hidden = true;
+      });
+    }
+
+    applySantaClawzProductMode();
     const SAVED_AGENTS_KEY = 'magic_city_saved_agents_v1';
     const RUNNER_EXTENSION_PLUGIN_ID = 'magic-city-runner-extension';
     const RUNNER_EXTENSION_OWNER_AGENT_ID = 'magic-city-runner-extension';
@@ -9657,9 +9668,9 @@
       return lane && lane !== 'Magic City' ? `Workflow: Magic City · ${lane}` : 'Workflow: Magic City';
     }
 
-	    function buildProtocolLine(agentFollowUp = null) {
-	      return agentFollowUp ? 'Protocol: SantaClawz' : '';
-	    }
+    function buildProtocolLine(agentFollowUp = null) {
+      return SANTACLAWZ_LIVE && agentFollowUp ? 'Protocol: SantaClawz' : '';
+    }
 
 	    function clearStartupReturnParams(names = []) {
 	      const params = new URLSearchParams(window.location.search);
@@ -10319,6 +10330,9 @@
     }
 
     function applySantaClawzPaymentPreferenceToSelections(selections = {}) {
+      if (!SANTACLAWZ_LIVE) return {
+        ...(selections && typeof selections === 'object' ? selections : {})
+      };
       return {
         ...(selections && typeof selections === 'object' ? selections : {}),
         santaclawzPaymentPreference: getSantaClawzPaymentPreference()
@@ -11636,6 +11650,16 @@
     }
 
     async function refreshAgentHub(force = false) {
+      if (!SANTACLAWZ_LIVE) {
+        agentHubState = {
+          ...agentHubState,
+          allAgents: [],
+          featuredAgents: [],
+          userAgents: [],
+          sources: null
+        };
+        return agentHubState;
+      }
       if (lazyBootState.agentHub && !force) return agentHubState;
       const data = await api(`/agent-hub/agents?scope=helper-${Date.now()}`, {
         headers: { 'cache-control': 'no-store' }
@@ -12091,9 +12115,11 @@
 	      };
 	    }
 
-	    function isHiddenAgentCompletionAgent(agent = {}) {
-	      const id = getAgentCompletionId(agent);
-	      return id === 'local-developer-tools-plugin' || isRetiredAgentCompletionAgent(agent);
+    function isHiddenAgentCompletionAgent(agent = {}) {
+      const id = getAgentCompletionId(agent);
+      return id === 'local-developer-tools-plugin'
+        || isRetiredAgentCompletionAgent(agent)
+        || (!SANTACLAWZ_LIVE && isSantaClawzRecommendationAgent(agent));
 	    }
 
 	    function getSavedAgentStorageKeys() {
@@ -12256,8 +12282,9 @@
 	      return match ? match[0] : '';
 	    }
 
-	    function normalizeAgentHubRowForHelper(row = {}) {
-	      const pluginId = String(row.agentId || row.pluginId || '').trim();
+    function normalizeAgentHubRowForHelper(row = {}) {
+      if (!SANTACLAWZ_LIVE) return null;
+      const pluginId = String(row.agentId || row.pluginId || '').trim();
 	      if (!pluginId || isHiddenAgentCompletionAgent({ pluginId })) return null;
 	      const isSantaClawz = pluginId.startsWith('santaclawz:')
 	        || /santaclawz/i.test(String(row.owner || row.metadata?.source || row.metadata?.providerId || ''));
@@ -12307,8 +12334,9 @@
 	      };
 	    }
 
-	    function getHelperPlatformAgentsFromHub() {
-	      const rows = Array.isArray(agentHubState.allAgents) && agentHubState.allAgents.length
+    function getHelperPlatformAgentsFromHub() {
+      if (!SANTACLAWZ_LIVE) return [];
+      const rows = Array.isArray(agentHubState.allAgents) && agentHubState.allAgents.length
 	        ? agentHubState.allAgents
 	        : agentHubState.featuredAgents;
 	      const seen = new Set();
@@ -12324,10 +12352,16 @@
 	        .slice(0, 10);
 	    }
 
-	    function renderHelperPlatformAgents({ loading = false, error = '' } = {}) {
-	      const section = $('helperPlatformAgentsSection');
-	      const list = $('helperPlatformAgentsList');
-	      if (!section || !list) return;
+    function renderHelperPlatformAgents({ loading = false, error = '' } = {}) {
+      const section = $('helperPlatformAgentsSection');
+      const list = $('helperPlatformAgentsList');
+      if (!section || !list) return;
+      if (!SANTACLAWZ_LIVE) {
+        helperPlatformAgents = [];
+        section.hidden = true;
+        list.replaceChildren();
+        return;
+      }
 	      const popup = $('helperPopup');
 	      const platformScroll = section.querySelector('.helper-platform-scroll');
 	      const scrollState = {
@@ -12384,8 +12418,12 @@
 	        || null;
 	    }
 
-	    async function refreshHelperPlatformAgents(force = false) {
-	      renderHelperPlatformAgents({ loading: true });
+    async function refreshHelperPlatformAgents(force = false) {
+      if (!SANTACLAWZ_LIVE) {
+        renderHelperPlatformAgents();
+        return [];
+      }
+      renderHelperPlatformAgents({ loading: true });
 	      try {
 	        const needsAgentRows = !Array.isArray(agentHubState.allAgents) || !agentHubState.allAgents.length;
 	        await refreshAgentHub(force || needsAgentRows);
@@ -12737,8 +12775,9 @@
 	      `;
 	    }
 
-	    function attachAgentCompletionCard(target, agentFollowUp = null, context = {}) {
-	      if (!target?.el || !agentFollowUp || typeof agentFollowUp !== 'object') return null;
+    function attachAgentCompletionCard(target, agentFollowUp = null, context = {}) {
+      if (!SANTACLAWZ_LIVE) return null;
+      if (!target?.el || !agentFollowUp || typeof agentFollowUp !== 'object') return null;
 	      target.el.querySelector('.agent-completion-card')?.remove();
 	      const santaClawzAgents = (Array.isArray(agentFollowUp.agents) ? agentFollowUp.agents : agentFollowUp.agent ? [agentFollowUp.agent] : [])
 	        .filter((agent) => isSantaClawzRecommendationAgent(agent) && !isHiddenAgentCompletionAgent(agent));
@@ -13715,7 +13754,7 @@
         renderHelperSavedAgents();
         setHelperAgentView(loadSavedAgents().length ? 'saved' : 'all');
         positionHelperPopup();
-        refreshHelperPlatformAgents().catch(() => {});
+        if (SANTACLAWZ_LIVE) refreshHelperPlatformAgents().catch(() => {});
         ensurePlatformWorkflowRegistryLoaded().catch(() => {});
       }
     }
@@ -20545,7 +20584,7 @@
         renderHelperSavedAgents();
         setHelperAgentView(loadSavedAgents().length ? 'saved' : 'all');
         positionHelperPopup();
-        refreshHelperPlatformAgents().catch(() => {});
+        if (SANTACLAWZ_LIVE) refreshHelperPlatformAgents().catch(() => {});
         ensurePlatformWorkflowRegistryLoaded().catch(() => {});
       }
     });
@@ -20896,6 +20935,7 @@
           return;
         }
         if (sectionId === 'settingsAgentHubSection') {
+          if (!SANTACLAWZ_LIVE) return;
           bootstrapSessionIfNeeded(false)
             .then(() => refreshAgentHub(true))
             .catch(() => {});
