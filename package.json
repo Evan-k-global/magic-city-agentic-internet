@@ -39,6 +39,7 @@
     "test:native-runner-security": "node scripts/test-native-runner-security.mjs",
     "test:native-runner-address-reconciliation": "node scripts/test-native-runner-address-reconciliation.mjs",
     "test:native-runner-card-reconciliation": "node scripts/test-native-runner-card-reconciliation.mjs",
+    "test:native-runner-final-submit-lease": "node scripts/test-native-runner-final-submit-lease.mjs",
     "test:native-runner-extension-pairing": "node scripts/test-native-runner-extension-pairing.mjs",
     "test:browser-affiliate-safety": "node scripts/test-browser-affiliate-safety.mjs",
     "test:execution-artifact-privacy": "node scripts/test-execution-artifact-privacy.mjs",

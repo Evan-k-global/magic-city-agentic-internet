@@ -736,6 +736,19 @@ async function main() {
     // while status reporting is temporarily unavailable at final review.
     let blockRunnerStatusForFinalDispatch = false;
     let blockedFinalRunnerStatusCalls = 0;
+    // The full browser matrix intentionally runs longer than the initial
+    // ten-minute test capability. Keep the fixture's active capabilities
+    // fresh; expiry itself is covered by the focused mocked-clock regression.
+    const renewTestCapability = (candidate) => {
+      if (!candidate?.missionBoundAuth?.capabilityId?.startsWith('browser-smoke-')) return candidate;
+      return {
+        ...candidate,
+        missionBoundAuth: {
+          ...candidate.missionBoundAuth,
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+        }
+      };
+    };
     server = https.createServer(certificate, async (req, res) => {
       const origin = `https://${req.headers.host}`;
       const url = new URL(req.url || '/', origin);
@@ -754,6 +767,8 @@ async function main() {
       }
       if (req.method === 'POST' && url.pathname === '/plugins/register') return json(res, 201, { registered: true });
       if (req.method === 'GET' && url.pathname === '/connectors/sessions') {
+        session = renewTestCapability(session);
+        distractorSession = renewTestCapability(distractorSession);
         const active = [distractorSession, session]
           .filter(Boolean)
           .filter((candidate) => !['fulfilled', 'failed'].includes(candidate.status));
@@ -774,6 +789,7 @@ async function main() {
         return json(res, 404, { error: 'test_claim_session_not_found' });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/runner-status')) {
+        session = renewTestCapability(session);
         const nextAction = session?.extensionMissionPlan?.actions?.[session?.extensionMissionPlanState?.nextActionIndex || 0];
         if (blockRunnerStatusForFinalDispatch && nextAction?.id === 'submit-final-order') {
           blockedFinalRunnerStatusCalls += 1;

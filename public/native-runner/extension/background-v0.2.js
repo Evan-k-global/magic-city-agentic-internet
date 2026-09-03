@@ -809,6 +809,7 @@ function isExecutionCancelledError(error) {
 function isFinalSubmitPolicyError(error) {
   const message = String(error?.message || error || '').trim().toLowerCase();
   return message.startsWith('mission_final_submit_')
+    || message === 'final_submit_authority_lease_expired'
     || message === 'mission_action_requires_user_approval';
 }
 
@@ -3890,4 +3891,11 @@ async function handleMessage(message, sender = null) {
   return { ok: true, sender: sender?.origin || null };
 }
 
-export { activateRunner, handleMessage, pollAndExecute, pollOnly, resumeActiveRun };
+export {
+  activateRunner,
+  assertFinalSubmitLocalAuthority,
+  handleMessage,
+  pollAndExecute,
+  pollOnly,
+  resumeActiveRun
+};
