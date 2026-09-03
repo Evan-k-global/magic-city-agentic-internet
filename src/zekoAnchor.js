@@ -1,4 +1,8 @@
 import crypto from 'node:crypto';
+import {
+  getMbaMissionRegistryConfig,
+  submitMbaMissionRegistryAnchor
+} from './mba/missionRegistryAnchor.js';
 
 const DEFAULT_MAGIC_CITY_MISSION_PROOF_NETWORK_ID = 'zeko:testnet';
 function resolveMissionProofNetworkId() {
@@ -36,6 +40,7 @@ const ZEKO_RELAYER_PRIVATE_KEY =
   '';
 const ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY || '';
 const ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY || '';
+const ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || process.env.MISSION_REGISTRY_PUBLIC_KEY || '';
 
 function hasInProcessMissionAuthRelayer() {
   return Boolean(
@@ -43,6 +48,11 @@ function hasInProcessMissionAuthRelayer() {
     ZEKO_RELAYER_PRIVATE_KEY &&
     ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY
   );
+}
+
+function hasInProcessMbaMissionRegistryRelayer() {
+  const config = getMbaMissionRegistryConfig();
+  return Boolean(ZEKO_RELAYER_MODE === 'mba_mission_registry' && config.configured);
 }
 
 function stableHash(value) {
@@ -68,7 +78,15 @@ export function getAnchorConfig() {
     relayerConfigured: Boolean(ZEKO_RELAYER_URL),
     externalRelayerConfigured: Boolean(ZEKO_EXPLICIT_RELAYER_URL),
     inProcessRelayerConfigured: hasInProcessMissionAuthRelayer(),
-    submitterConfigured: Boolean(ZEKO_RELAYER_URL || hasInProcessMissionAuthRelayer())
+    mbaMissionRegistry: {
+      ...getMbaMissionRegistryConfig(),
+      registryAddress: ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || getMbaMissionRegistryConfig().registryAddress
+    },
+    submitterConfigured: Boolean(
+      ZEKO_RELAYER_URL ||
+      hasInProcessMissionAuthRelayer() ||
+      hasInProcessMbaMissionRegistryRelayer()
+    )
   };
 }
 
@@ -271,6 +289,31 @@ export async function submitAnchorPayload(anchorPayload) {
   const payloadHash = `0x${stableHash(anchorPayload)}`;
 
   if (ZEKO_SUBMIT_MODE === 'relay') {
+    // The deployed MBA registry needs the authority signature and durable
+    // Merkle-index mirror available only in this process. Do not route it
+    // through the legacy localhost relayer even when that URL remains set for
+    // backwards-compatible deployments.
+    if (hasInProcessMbaMissionRegistryRelayer()) {
+      const direct = await submitMbaMissionRegistryAnchor(anchorPayload, payloadHash);
+      return {
+        mode: 'relay',
+        status: direct.status || 'submitted',
+        payloadHash,
+        relayer: {
+          mode: 'in_process',
+          response: direct
+        },
+        txHash: direct.txHash ?? null,
+        networkId: ZEKO_NETWORK_ID,
+        registryAddress: direct.registryAddress ?? null,
+        previousRegistryRoot: direct.previousRegistryRoot ?? null,
+        registryRoot: direct.registryRoot ?? null,
+        registrySequence: direct.sequence ?? null,
+        capabilityCommitment: direct.capabilityCommitment ?? null,
+        approvalCommitment: direct.approvalCommitment ?? null,
+        registryKey: direct.registryKey ?? null
+      };
+    }
     if (!ZEKO_EXPLICIT_RELAYER_URL && hasInProcessMissionAuthRelayer()) {
       const direct = await submitInProcessMissionAuthAnchor(anchorPayload, payloadHash);
       return {

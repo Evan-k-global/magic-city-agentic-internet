@@ -46,6 +46,7 @@
     "test:execution-artifact-privacy": "node scripts/test-execution-artifact-privacy.mjs",
     "test:agent-sdk-api": "node scripts/test-agent-sdk-api.mjs",
     "test:zeko-proof-worker": "node scripts/test-zeko-proof-worker.mjs",
+    "test:mba-mission-registry-bootstrap": "node scripts/test-mba-mission-registry-bootstrap.mjs",
     "test:magic-internet-extraction": "node scripts/test-magic-internet-agent-extraction.mjs",
     "test:santaclawz-paid-flow-wiring": "node scripts/test-santaclawz-paid-flow-wiring.mjs",
     "test:code-audit-chat-intake": "node scripts/test-code-audit-chat-intake.mjs",
@@ -77,10 +78,11 @@
   },
   "dependencies": {
     "ethers": "^6.16.0",
-    "o1js": "^2.13.1",
+    "o1js": "^2.14.0",
     "pdfjs-dist": "^4.10.38",
     "pg": "^8.20.0",
     "playwright": "^1.58.2",
+    "reflect-metadata": "^0.2.2",
     "xlsx": "^0.18.5"
   }
 }

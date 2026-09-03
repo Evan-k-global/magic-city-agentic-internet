@@ -36,6 +36,7 @@ const defaultState = () => ({
   santaclawzPreflightSnapshots: [],
   santaclawzRuntimeHealth: [],
   anchorSubmissions: [],
+  mbaMissionRegistryStates: {},
   settlementRegistry: [],
   balances: {},
   stakes: {},
@@ -99,6 +100,7 @@ function withDefaults(raw = {}) {
   raw.santaclawzPreflightSnapshots = raw.santaclawzPreflightSnapshots ?? [];
   raw.santaclawzRuntimeHealth = raw.santaclawzRuntimeHealth ?? [];
   raw.anchorSubmissions = raw.anchorSubmissions ?? [];
+  raw.mbaMissionRegistryStates = raw.mbaMissionRegistryStates ?? {};
   raw.settlementRegistry = raw.settlementRegistry ?? [];
   raw.balances = raw.balances ?? {};
   raw.stakes = raw.stakes ?? {};
@@ -871,6 +873,34 @@ export function createAnchorSubmission(submission) {
   state.anchorSubmissions.push(row);
   persistState();
   return row;
+}
+
+// This mirror contains only public Merkle keys, roots, and transaction state.
+// It lets the single Magic City writer resume a submitted MBA registry anchor
+// without guessing whether a prior transaction landed on Zeko.
+export function getMbaMissionRegistryState(registryAddress) {
+  const key = String(registryAddress || '').trim();
+  if (!key) return null;
+  return state.mbaMissionRegistryStates[key] ?? null;
+}
+
+export function upsertMbaMissionRegistryState(registryAddress, patch = {}) {
+  const key = String(registryAddress || '').trim();
+  if (!key) throw new Error('mba_mission_registry_address_required');
+  const now = new Date().toISOString();
+  const current = state.mbaMissionRegistryStates[key] ?? {
+    registryAddress: key,
+    createdAt: now
+  };
+  const next = {
+    ...current,
+    ...patch,
+    registryAddress: key,
+    updatedAt: now
+  };
+  state.mbaMissionRegistryStates[key] = next;
+  persistState();
+  return next;
 }
 
 export function createSettlementRegistryEntry(entry) {

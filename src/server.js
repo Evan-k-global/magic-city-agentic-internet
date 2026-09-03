@@ -11227,17 +11227,19 @@ function buildExecutionVerificationSummary({
   error
 }) {
   const missionBoundary = anchorPayload?.missionBoundary ?? null;
+  const mbaRegistrySubmission = submission?.mbaMissionRegistry ?? submission?.relay?.response ?? null;
   const protocolRegistryAnchor = missionBoundary?.portableReceiptId && missionBoundary?.protocolCapabilityHash
     ? buildMbaRegistryAnchor({
-        sequence: 0,
+        sequence: mbaRegistrySubmission?.sequence ?? 0,
         missionIdHash: strip0x(missionBoundary.protocolMissionIdHash || missionBoundary.missionIdHash || anchorPayload?.publicInputs?.protocolMissionIdHash || ''),
         capabilityHash: strip0x(missionBoundary.protocolCapabilityHash),
         statementHash: strip0x(zkProof?.publicInput?.statementHash ?? anchorPayload?.statementHash ?? ''),
         receiptIdHash: mbaSha256Hex(missionBoundary.portableReceiptId),
         nullifier: strip0x(missionBoundary.portableReceiptNullifier || missionBoundary.protocolNullifier || ''),
-        previousRoot: '0',
+        previousRoot: mbaRegistrySubmission?.previousRegistryRoot ?? '0',
+        newRoot: mbaRegistrySubmission?.registryRoot ?? undefined,
         networkId: anchorPayload?.network ?? resolveZekoNetworkLabel(),
-        registryAddress: anchorConfig?.registryPublicKey || anchorConfig?.registryAddress || null,
+        registryAddress: mbaRegistrySubmission?.registryAddress ?? anchorConfig?.mbaMissionRegistry?.registryAddress ?? anchorConfig?.registryPublicKey ?? anchorConfig?.registryAddress ?? null,
         txHash: submission?.txHash || null,
         anchoredAt: generatedAt ?? new Date().toISOString()
       })
@@ -11669,7 +11671,18 @@ async function processSponsoredExecutionVerification({ kind, id, reason, submiss
         payloadHash: submitResult.payloadHash,
         submitMode: submitResult.mode,
         relay: submitResult.relay ?? null,
-        networkId: submitResult.networkId
+        networkId: submitResult.networkId,
+        mbaMissionRegistry: submitResult.registryAddress
+          ? {
+              registryAddress: submitResult.registryAddress,
+              previousRegistryRoot: submitResult.previousRegistryRoot ?? null,
+              registryRoot: submitResult.registryRoot ?? null,
+              sequence: submitResult.registrySequence ?? null,
+              capabilityCommitment: submitResult.capabilityCommitment ?? null,
+              approvalCommitment: submitResult.approvalCommitment ?? null,
+              registryKey: submitResult.registryKey ?? null
+            }
+          : null
       }) ?? submission;
     }
 
@@ -22043,7 +22056,18 @@ const server = http.createServer(async (req, res) => {
           payloadHash: result.payloadHash,
           submitMode: result.mode,
           relay: result.relay ?? null,
-          networkId: result.networkId
+          networkId: result.networkId,
+          mbaMissionRegistry: result.registryAddress
+            ? {
+                registryAddress: result.registryAddress,
+                previousRegistryRoot: result.previousRegistryRoot ?? null,
+                registryRoot: result.registryRoot ?? null,
+                sequence: result.registrySequence ?? null,
+                capabilityCommitment: result.capabilityCommitment ?? null,
+                approvalCommitment: result.approvalCommitment ?? null,
+                registryKey: result.registryKey ?? null
+              }
+            : null
         });
 
         if (receipt) {

@@ -65,7 +65,8 @@ primary_region = "sjc"
   ZEKO_EXPLORER_TX_BASE = "https://sepolia.zeko.io/v1/explorer/transactions/{tx}"
   ZEKO_RELAYER_URL = "http://127.0.0.1:4412/submit"
   ZEKO_RELAYER_HOST = "127.0.0.1"
-  ZEKO_RELAYER_MODE = "mission_auth_registry"
+  ZEKO_RELAYER_MODE = "mba_mission_registry"
+  ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY = "B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe"
   TX_FEE = "200000"
 
 [http_service]
