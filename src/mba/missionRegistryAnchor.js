@@ -27,9 +27,15 @@ function canonicalize(value) {
 }
 
 function canonicalValueToField(value, Field) {
+  return Field(canonicalValueToFieldDecimal(value, Field.ORDER));
+}
+
+// Keep the pre-submit authorization commitment deterministic without making
+// the checkout server import o1js just to derive a Field-compatible value.
+export function canonicalValueToFieldDecimal(value, fieldOrder) {
   const input = typeof value === 'string' ? value : canonicalize(value);
   const digest = crypto.createHash('sha256').update(input).digest('hex');
-  return Field(BigInt(`0x${digest}`) % Field.ORDER);
+  return (BigInt(`0x${digest}`) % BigInt(fieldOrder)).toString();
 }
 
 function configuredRegistryAddress() {

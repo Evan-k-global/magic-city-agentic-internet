@@ -1553,6 +1553,36 @@ async function assertRunnerSessionActive(session) {
   return data.session || session;
 }
 
+async function assertFinalSubmitChainAuthorization(session, plan, action) {
+  const config = await getConfig();
+  let lastError = null;
+  // The anchor was started with the mission, so this is normally one fast
+  // status read. A healthy chain that is still settling gets a short bounded
+  // wait; an explicitly unavailable Sepolia endpoint is a signed-local
+  // fail-open, never an Amazon checkout failure.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/final-submit-chain-authorization`, {
+        method: 'POST',
+        bearer: config.deviceToken,
+        body: {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          planHash: plan.planHash,
+          actionId: action.id
+        },
+        timeoutMs: 10_000
+      });
+      if (data.ready === true) return data.session || session;
+      lastError = new Error('final_submit_chain_authorization_pending');
+    } catch (error) {
+      lastError = error;
+      if (!/final_submit_chain_authorization_pending/.test(String(error?.message || ''))) throw error;
+    }
+    await delay(900);
+  }
+  throw lastError || new Error('final_submit_chain_authorization_pending');
+}
+
 async function claimSession(session) {
   if (session.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID && session.missionBoundAuth?.confirmation?.method === 'proof-of-possession') {
     return session;
@@ -3108,6 +3138,9 @@ async function runSession(rawSession) {
       // live session within one short lease window before dispatch.
       if (action.type === 'final_submit' && !recoveredFinalOrderAlreadyConfirmed) {
         assertFinalSubmitLocalAuthority(session, finalSubmitAuthorityLease, plan, action);
+        if (session.finalSubmitChainAuthorization) {
+          session = await assertFinalSubmitChainAuthorization(session, plan, action);
+        }
       } else {
         await assertActive();
       }

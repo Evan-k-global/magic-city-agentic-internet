@@ -226,6 +226,7 @@ import { toUnits, fromUnits, CREDIT_SCALE } from './units.js';
 import { buildSeededAgents, executeProvider, executeProviderStream, getConfiguredProviders, rankAmazonCandidatesWithProvider } from './providers.js';
 import { buildAnchorPayload, compileArtifactProofProgram, generateArtifactProof, verifyArtifactProof } from './zekoProof.js';
 import { getAnchorConfig, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
+import { canonicalValueToFieldDecimal } from './mba/missionRegistryAnchor.js';
 import { inferCapabilityFromPrompt, isMagicInternetPurchaseRequest, looksLikeCodeAuditRequest, buildActionPlanAsync, finalizeActionRun } from './actionRuntime.js';
 import { CONNECTOR_SPECS, getConnector, getConnectorHandoffData } from './connectors.js';
 import { rankExecutionAgentsForSession } from './executionAgents.js';
@@ -695,8 +696,15 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.23'
+  '0.4.24'
 ).trim();
+const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
+  1_000,
+  Number(process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS || 7_500)
+);
+const MINA_FIELD_ORDER = '28948022309329048855892746252171976963363056481941647379679742748393362948097';
+const finalSubmitChainAuthorizationTasks = new Map();
+let zekoNetworkStatusCache = null;
 
 const SPREADSHEET_PRICING = {
   'Quick cleanup': { 'Up to 500 rows': 3, '500-5k rows': 8, '5k+ rows': 22 },
@@ -2631,6 +2639,195 @@ function buildAutoSubmitMissionApprovalReceipt({ req, session = {}, selections =
     ...receipt,
     approvalHash: hashHex(stableJsonStringify(receipt))
   });
+}
+
+function finalSubmitChainAuthorizationForRunner(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    schema: value.schema || null,
+    status: value.status || 'preparing',
+    network: value.network || null,
+    sessionId: value.sessionId || null,
+    planHash: value.planHash || null,
+    actionId: value.actionId || null,
+    approvalHash: value.approvalHash || null,
+    expiresAt: value.expiresAt || null,
+    txHash: value.txHash || null,
+    explorerUrl: value.explorerUrl || null,
+    registryAddress: value.registryAddress || null,
+    registrySequence: value.registrySequence || null,
+    preparedAt: value.preparedAt || null,
+    settledAt: value.settledAt || null,
+    bypassAllowed: value.bypassAllowed === true,
+    bypassReason: value.bypassReason || null,
+    detail: value.detail || null
+  };
+}
+
+function buildFinalSubmitChainAuthorization(session = {}) {
+  const approval = session.finalSubmitApproval || null;
+  const plan = getExtensionMissionPlanForSession(session);
+  const action = plan?.actions?.find((item) => item?.type === 'final_submit') || null;
+  const capability = session.missionBoundAuth?.protocol?.capability || null;
+  if (!approval?.approvalHash || !plan?.planHash || !action?.id || !capability?.capabilityHash) return null;
+  const commitment = {
+    schema: 'magic-city-final-submit-chain-authorization-v1',
+    sessionId: session.id,
+    planHash: plan.planHash,
+    actionId: action.id,
+    approvalHash: approval.approvalHash,
+    expiresAt: approval.expiresAt,
+    targetDomain: approval.targetDomain || null
+  };
+  return {
+    ...commitment,
+    status: 'preparing',
+    network: getAnchorConfig().networkId,
+    preparedAt: new Date().toISOString(),
+    statementHash: canonicalValueToFieldDecimal(commitment, MINA_FIELD_ORDER),
+    missionBoundary: {
+      schema: 'magic-city-mba-final-submit-chain-authorization-v1',
+      sessionId: session.id,
+      protocolCapabilityHash: capability.capabilityHash,
+      protocolMissionIdHash: capability.missionIdHash || null,
+      protocolPolicyHash: session.missionBoundAuth?.protocol?.policy?.policyHash || null,
+      targetDomain: approval.targetDomain || null
+    },
+    publicInputs: {
+      schema: 'magic-city-mba-final-submit-chain-authorization-v1',
+      sessionId: session.id,
+      planHash: plan.planHash,
+      actionId: action.id,
+      approvalHash: approval.approvalHash,
+      protocolCapabilityHash: capability.capabilityHash
+    }
+  };
+}
+
+function chainAuthorizationUnavailable(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return error?.statusCode === 502
+    || error?.statusCode === 503
+    || error?.statusCode === 504
+    || /timeout|fetch|network|not_deployed|not_configured|out_of_sync|pending_confirmation/.test(message);
+}
+
+function setFinalSubmitChainAuthorization(sessionId, authorization, trace = null) {
+  const session = getConnectorSession(sessionId);
+  if (!session) return null;
+  return updateConnectorSession(sessionId, withTaskPackage(session, {
+    finalSubmitChainAuthorization: authorization,
+    executionTrace: trace
+      ? [...(Array.isArray(session.executionTrace) ? session.executionTrace : []), trace]
+      : session.executionTrace
+  }));
+}
+
+function beginFinalSubmitChainAuthorization(sessionId) {
+  const existing = finalSubmitChainAuthorizationTasks.get(sessionId);
+  if (existing) return existing;
+  const prepared = buildFinalSubmitChainAuthorization(getConnectorSession(sessionId));
+  if (!prepared) return null;
+  setFinalSubmitChainAuthorization(sessionId, finalSubmitChainAuthorizationForRunner(prepared), {
+    pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+    label: 'Preparing Zeko final-submit authorization',
+    detail: 'Submitting the signed one-order authorization while checkout proceeds.',
+    state: 'final_submit_chain_preparing',
+    createdAt: new Date().toISOString()
+  });
+  const task = (async () => {
+    try {
+      const anchor = await submitAnchorPayload({
+        schema: 'magic-city-final-submit-chain-anchor-v1',
+        network: prepared.network,
+        statementHash: prepared.statementHash,
+        statementKind: 'final_submit_authorization',
+        sourceKind: 'mission_auto_submit',
+        sourceId: prepared.sessionId,
+        missionBoundary: prepared.missionBoundary,
+        publicInputs: prepared.publicInputs
+      });
+      const settled = finalSubmitChainAuthorizationForRunner({
+        ...prepared,
+        status: 'anchored',
+        txHash: anchor.txHash || null,
+        explorerUrl: anchor.txHash ? zekoExplorerTxUrl(anchor.txHash) : null,
+        registryAddress: anchor.registryAddress || null,
+        registrySequence: anchor.registrySequence || null,
+        settledAt: new Date().toISOString(),
+        detail: 'Zeko confirmed this exact one-order authorization.'
+      });
+      setFinalSubmitChainAuthorization(sessionId, settled, {
+        pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+        label: 'Zeko authorization anchored',
+        detail: 'The signed final-submit authorization settled before checkout completed.',
+        state: 'final_submit_chain_anchored',
+        createdAt: new Date().toISOString()
+      });
+      return settled;
+    } catch (error) {
+      const unavailable = chainAuthorizationUnavailable(error);
+      const fallback = finalSubmitChainAuthorizationForRunner({
+        ...prepared,
+        status: unavailable ? 'unavailable' : 'failed',
+        bypassAllowed: unavailable,
+        bypassReason: unavailable ? 'zeko_sepolia_unavailable' : null,
+        detail: unavailable
+          ? 'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
+          : 'The Zeko final-submit authorization could not be prepared.'
+      });
+      setFinalSubmitChainAuthorization(sessionId, fallback, {
+        pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+        label: unavailable ? 'Zeko Sepolia unavailable' : 'Zeko authorization failed',
+        detail: fallback.detail,
+        state: unavailable ? 'final_submit_chain_bypassed' : 'final_submit_chain_failed',
+        createdAt: new Date().toISOString()
+      });
+      return fallback;
+    } finally {
+      finalSubmitChainAuthorizationTasks.delete(sessionId);
+    }
+  })();
+  finalSubmitChainAuthorizationTasks.set(sessionId, task);
+  return task;
+}
+
+async function getZekoNetworkStatus({ force = false } = {}) {
+  const checkedAtMs = Date.parse(String(zekoNetworkStatusCache?.checkedAt || ''));
+  if (!force && Number.isFinite(checkedAtMs) && Date.now() - checkedAtMs < 15_000) return zekoNetworkStatusCache;
+  const anchor = getAnchorConfig();
+  const graphql = String(process.env.ZEKO_GRAPHQL || 'https://sepolia.zeko.io/graphql').trim();
+  const registryAddress = anchor.mbaMissionRegistry?.registryAddress || null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const response = await fetch(graphql, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: 'query ZekoNetworkStatus($pk: PublicKey!) { account(publicKey: $pk) { publicKey } }',
+        variables: { pk: registryAddress }
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok || payload?.errors?.length || !payload?.data?.account?.publicKey) throw new Error('zeko_graphql_unavailable');
+    zekoNetworkStatusCache = {
+      network: anchor.networkId,
+      available: true,
+      checkedAt: new Date().toISOString()
+    };
+  } catch {
+    zekoNetworkStatusCache = {
+      network: anchor.networkId,
+      available: false,
+      checkedAt: new Date().toISOString(),
+      warning: 'Zeko Sepolia is unavailable. Checkout will continue under the signed local authorization.'
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+  return zekoNetworkStatusCache;
 }
 
 function verifyRetailFinalSubmitApproval(session = {}, {
@@ -6827,6 +7024,7 @@ function formatConnectorSessionForExtension(session = null) {
         }
       : null,
     missionBoundAuth: formatExtensionMissionCapability(session.missionBoundAuth),
+    finalSubmitChainAuthorization: finalSubmitChainAuthorizationForRunner(session.finalSubmitChainAuthorization),
     missionBoundaryLatestHash: session.missionBoundaryLatestHash || null,
     missionBoundaryEventCount: Array.isArray(session.missionBoundaryTrace) ? session.missionBoundaryTrace.length : 0,
     executionLive: session.executionLive
@@ -15245,6 +15443,10 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (req.method === 'GET' && urlPath === '/network/zeko/status') {
+      return sendJson(res, 200, await getZekoNetworkStatus());
+    }
+
     if (req.method === 'GET' && urlPath === '/developer/config') {
       ensureSeededAgentsReady();
       const auth = getAuthenticatedContext(req);
@@ -19074,6 +19276,12 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const refreshedSession = getConnectorSession(sessionId) ?? updated;
+      // Do not hold the browser launch on an on-chain transaction. The runner
+      // receives this same session field at each signed checkpoint and checks
+      // it only at the one irreversible final-submit action.
+      if (freshAutoSubmitAuthorized) {
+        void beginFinalSubmitChainAuthorization(sessionId);
+      }
 	      if (completionMode === 'agent_checkout') {
 	        const kind = String(session.handoffData?.kind || '').trim();
 	        if (!directPersonalAgentHandoff && !directSantaClawzX402Payment) {
@@ -19249,6 +19457,58 @@ const server = http.createServer(async (req, res) => {
         });
       }
       return sendJson(res, 200, { released: true, session: updated });
+    }
+
+    if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/final-submit-chain-authorization$/.test(urlPath)) {
+      const sessionId = urlPath.split('/')[3];
+      const session = getConnectorSession(sessionId);
+      if (!session) return notFound(res);
+      const body = await readBody(req);
+      requireFields(body, ['pluginId', 'planHash', 'actionId']);
+      requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
+        return sendJson(res, 409, { error: 'final_submit_chain_agent_mismatch' });
+      }
+      const current = session.finalSubmitChainAuthorization || null;
+      if (!current
+        || current.planHash !== String(body.planHash || '')
+        || current.actionId !== String(body.actionId || '')
+        || current.sessionId !== sessionId) {
+        return sendJson(res, 409, { error: 'final_submit_chain_authorization_scope_mismatch' });
+      }
+      const task = current.status === 'preparing'
+        ? (finalSubmitChainAuthorizationTasks.get(sessionId) || beginFinalSubmitChainAuthorization(sessionId))
+        : null;
+      if (current.status === 'preparing' && task) {
+        await Promise.race([
+          task.catch(() => null),
+          new Promise((resolve) => setTimeout(resolve, FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS))
+        ]);
+      }
+      const refreshed = getConnectorSession(sessionId) || session;
+      const authorization = finalSubmitChainAuthorizationForRunner(refreshed.finalSubmitChainAuthorization);
+      if (authorization?.status === 'anchored') {
+        return sendJson(res, 200, {
+          ready: true,
+          authorization,
+          session: formatConnectorSessionForRunnerResponse(req, refreshed, body.pluginId)
+        });
+      }
+      if (authorization?.status === 'unavailable' && authorization.bypassAllowed === true) {
+        return sendJson(res, 200, {
+          ready: true,
+          bypassed: true,
+          authorization,
+          session: formatConnectorSessionForRunnerResponse(req, refreshed, body.pluginId)
+        });
+      }
+      return sendJson(res, 409, {
+        error: authorization?.status === 'failed'
+          ? 'final_submit_chain_authorization_failed'
+          : 'final_submit_chain_authorization_pending',
+        authorization,
+        session: formatConnectorSessionForRunnerResponse(req, refreshed, body.pluginId)
+      });
     }
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/checkpoint$/.test(urlPath)) {

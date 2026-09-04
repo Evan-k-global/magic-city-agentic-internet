@@ -13975,6 +13975,7 @@
 
     let activeExecutionSessionId = null;
     let executionPollHandle = null;
+    let zekoNetworkStatus = null;
     let pendingSelectedAgentExecution = null;
     let softRecommendedAgentExecution = null;
     const MAX_LOCAL_EXECUTION_SESSIONS = 3;
@@ -15349,6 +15350,19 @@
       const anchorUrl = verification?.anchorSubmissionId ? `/anchors/status/${encodeURIComponent(verification.anchorSubmissionId)}` : '';
       const txExplorerUrl = verification?.txExplorerUrl || verification?.explorerUrl || verification?.zekoScanUrl || '';
       const txHash = verification?.txHash || '';
+      const chainAuthorization = session.finalSubmitChainAuthorization || null;
+      const chainAuthorizationReady = chainAuthorization?.status === 'anchored';
+      const chainAuthorizationBypassed = (chainAuthorization?.status === 'unavailable' && chainAuthorization?.bypassAllowed === true)
+        || (!chainAuthorization && zekoNetworkStatus?.available === false);
+      const chainAuthorizationLabel = chainAuthorizationReady
+        ? 'Zeko authorization ready'
+        : chainAuthorizationBypassed
+          ? 'Zeko Sepolia unavailable - continuing'
+          : chainAuthorization?.status === 'preparing'
+            ? 'Preparing Zeko authorization'
+            : chainAuthorization?.status === 'failed'
+              ? 'Zeko authorization needs review'
+              : '';
       const offchainProof = String(verification?.submitMode || '').toLowerCase() === 'record'
         || String(verification?.network || '').toLowerCase() === 'offchain';
       const offchainTarget = verification?.offchainTargetNetwork ? ` Zeko ${String(verification.offchainTargetNetwork).replace(/^zeko:/i, '')} anchoring is deferred.` : '';
@@ -15361,6 +15375,7 @@
             <span class="execution-proof-badge ${traceHash ? 'ready' : 'prepared'}">${escapeExecutionValue(traceHash ? `${traceCount} events` : 'Trace pending')}</span>
             ${missionContractHash ? `<span class="execution-proof-badge ready">contract ${escapeExecutionValue(String(missionContractHash).slice(0, 12))}</span>` : ''}
             ${traceHash ? `<span class="execution-proof-badge">trace ${escapeExecutionValue(String(traceHash).slice(0, 12))}</span>` : ''}
+            ${chainAuthorizationLabel ? `<span class="execution-proof-badge ${chainAuthorizationReady ? 'ready' : chainAuthorizationBypassed || chainAuthorization?.status === 'failed' ? 'failed' : 'prepared'}">${escapeExecutionValue(chainAuthorizationLabel)}</span>` : ''}
           </div>
           <div class="execution-proof-links">
             ${missionTraceUrl ? `<a href="${missionTraceUrl}" target="_blank" rel="noopener noreferrer">Trace</a>` : ''}
@@ -15369,6 +15384,7 @@
             ${txHash && txExplorerUrl ? `<a href="${escapeExecutionValue(txExplorerUrl)}" target="_blank" rel="noopener noreferrer">Zeko tx</a>` : ''}
           </div>
           ${!txHash ? `<div class="execution-inline-note">${offchainProof ? `Off-chain proof retained locally.${escapeExecutionValue(offchainTarget)}` : 'Zeko anchor after receipt.'}</div>` : ''}
+          ${chainAuthorizationBypassed ? `<div class="execution-inline-note">Zeko Sepolia is unavailable. Checkout continues under the signed one-order authorization.</div>` : ''}
         </div>
       `;
     }
@@ -21179,6 +21195,18 @@
       if (unlocked) writeVaultDraftToInputs(JSON.parse(unlocked));
     } catch {}
     syncRequesterFields();
+    fetch('/network/zeko/status', { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() : null)
+      .then((status) => {
+        zekoNetworkStatus = status;
+        if (status?.available === false && activeExecutionSessionId) {
+          return renderExecutionSheet(activeExecutionSessionId, { focus: false });
+        }
+        return null;
+      })
+      .catch(() => {
+        zekoNetworkStatus = { available: false };
+      });
 	    bootstrapSessionIfNeeded(false)
       .then(() => {
         if ($('settingsWalletSection')?.open) return ensureWalletSectionData(true);
