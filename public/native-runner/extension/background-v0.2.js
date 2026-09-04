@@ -3964,11 +3964,46 @@ async function handleMessage(message, sender = null) {
   }
   if (message?.type === 'CHECK_STATUS') {
     let config = await getConfig();
-    if (config.deviceToken) await registerExecutor(config);
-    const poll = config.deviceToken ? await pollSessions() : { paired: false, sessions: [] };
+    const checkedAt = new Date().toISOString();
+    if (config.deviceToken) {
+      config = await saveConfig({
+        lastPollAt: checkedAt,
+        lastError: ''
+      });
+    }
+    const refreshPromise = config.deviceToken
+      ? (async () => {
+          await registerExecutor(config);
+          return pollSessions();
+        })()
+      : Promise.resolve({ paired: false, sessions: [], actionableCount: 0 });
+    refreshPromise.catch((error) => {
+      void saveConfig({ lastError: error?.message || String(error) });
+    });
+    const poll = await withTimeout(
+      () => refreshPromise,
+      2500,
+      'runner_status_refresh_pending'
+    ).catch((error) => ({
+      paired: Boolean(config.deviceToken),
+      sessions: [],
+      actionableCount: 0,
+      refreshPending: error?.message === 'runner_status_refresh_pending',
+      error: error?.message || String(error)
+    }));
     config = await getConfig();
-    const origins = await extensionHostPermissions();
-    return { config: { ...config, deviceToken: undefined, holderPrivateJwk: undefined }, poll, origins };
+    const origins = await extensionHostPermissions().catch(() => []);
+    return {
+      config: {
+        ...config,
+        extensionId: chrome.runtime.id || '',
+        extensionVersion: chrome.runtime.getManifest().version,
+        deviceToken: undefined,
+        holderPrivateJwk: undefined
+      },
+      poll,
+      origins
+    };
   }
   if (message?.type === 'GET_PENDING_MISSION_SITE') return getPendingMissionSite();
   if (message?.type === 'START_PENDING_MISSION_SITE') return startPendingMissionSite(message);

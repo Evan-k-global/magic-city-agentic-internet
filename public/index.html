@@ -6099,7 +6099,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.23';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.25';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -10551,6 +10551,14 @@
       return Number.isFinite(ms) && Date.now() - ms < 2 * 60 * 1000;
     }
 
+    function newerNativeRunnerTimestamp(left = '', right = '') {
+      const leftMs = Date.parse(left || '');
+      const rightMs = Date.parse(right || '');
+      if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) return leftMs >= rightMs ? left : right;
+      if (Number.isFinite(leftMs)) return left;
+      return Number.isFinite(rightMs) ? right : '';
+    }
+
     function nativeRunnerLastHeartbeatAt(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
       const pollMs = Date.parse(normalized.lastPollAt || '');
@@ -10829,6 +10837,8 @@
       }
       const lastHeartbeat = device.lastPollAt || device.lastSeenAt || '';
       const hasHeartbeat = Boolean(lastHeartbeat);
+      const lastSeenAt = newerNativeRunnerTimestamp(device.lastSeenAt || '', base.lastSeenAt || '');
+      const lastPollAt = newerNativeRunnerTimestamp(device.lastPollAt || '', base.lastPollAt || '');
       const trustMode = device.trustMode === 'trusted_under_cap'
         ? 'trusted_under_cap'
         : (base.trustMode === 'trusted_under_cap' ? 'trusted_under_cap' : 'local_runner');
@@ -10842,8 +10852,8 @@
           ? (trustMode === 'trusted_under_cap' ? 'trusted_ready' : 'installed')
           : (base.installStatus === 'not_started' ? 'setup_copied' : base.installStatus),
         installedAt: hasHeartbeat ? (base.installedAt || lastHeartbeat) : base.installedAt,
-        lastSeenAt: device.lastSeenAt || base.lastSeenAt,
-        lastPollAt: device.lastPollAt || base.lastPollAt,
+        lastSeenAt,
+        lastPollAt,
         lastQueueCount: Number(device.lastQueueCount || 0) || 0,
         executableReady: Boolean(readiness?.executableReady ?? base.executableReady),
         runnerReadyReason: readiness?.reason || base.runnerReadyReason || '',
@@ -10944,7 +10954,13 @@
         const extensionStatus = extensionCheck?.result || extensionCheck || {};
         const extensionPollAt = String(extensionStatus?.config?.lastPollAt || '').trim();
         const heartbeatSettings = extensionPollAt
-          ? { ...statusSettings, lastPollAt: extensionPollAt, lastSeenAt: extensionPollAt }
+          ? {
+              ...statusSettings,
+              lastPollAt: extensionPollAt,
+              lastSeenAt: extensionPollAt,
+              extensionId: extensionStatus?.config?.extensionId || statusSettings.extensionId || '',
+              extensionVersion: extensionStatus?.config?.extensionVersion || statusSettings.extensionVersion || ''
+            }
           : statusSettings;
         const saved = saveNativeRunnerSettings(mergeNativeRunnerDeviceStatus(heartbeatSettings, data.device || null, data.checkoutReadiness || data.readiness || null));
         applyNativeRunnerSettingsUi(saved);

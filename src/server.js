@@ -696,7 +696,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.24'
+  '0.4.25'
 ).trim();
 const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
   1_000,
@@ -18588,6 +18588,7 @@ const server = http.createServer(async (req, res) => {
       let extensionDispatchDeviceId = null;
       let missionPlanPreview = null;
       let extensionPlanForRun = null;
+      let freshAutoSubmitAuthorized = false;
       if (
         completionMode === 'agent_checkout'
         && isBrowserSession
@@ -18625,7 +18626,7 @@ const server = http.createServer(async (req, res) => {
           && !finalSubmitResumeRequested
           && !checkoutReconcileResumeRequested;
         extensionPlanForRun = preserveStoredPlan ? storedPlan.plan : missionPlanPreview;
-        const freshAutoSubmitAuthorized = !finalSubmitResumeRequested
+        freshAutoSubmitAuthorized = !finalSubmitResumeRequested
           && !checkoutReconcileResumeRequested
           && extensionPlanForRun.limits?.stopBeforeFinalSubmit === false
           && extensionFinalSubmitEnabled;
