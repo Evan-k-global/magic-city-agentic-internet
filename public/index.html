@@ -14960,8 +14960,10 @@
 	      const latestSummary = latestStep?.label || latestPhase.label;
 	      const runState = describeExecutionRunState(session, statusBadge, latestSummary);
 	      const displayStatusLabel = runState.badgeLabel || statusBadge.label;
-	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', latestSummary].filter(Boolean).join(' · ');
+	      const terminalSummary = sessionHasBrowserOrderSubmitted(session) ? 'Amazon confirmed the order.' : latestSummary;
+	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	      const statusLine = getConciseExecutionStatusLine(session, statusBadge, fundingStatus, localExecutionError);
+	      const showActivityBar = shouldShowExecutionActivityBar(session, statusBadge);
 
 	      const meta = panel.querySelector('.execution-panel-meta');
 	      if (meta) meta.textContent = compactMeta || statusLine;
@@ -14969,6 +14971,13 @@
 	        badge.className = `execution-status-badge ${statusBadge.cls}`;
 	        badge.textContent = displayStatusLabel;
 	      });
+	      const activityBar = panel.querySelector('.execution-activity-bar');
+	      if (showActivityBar && !activityBar) {
+	        const headTarget = panel.querySelector('.execution-panel-open-target');
+	        headTarget?.insertAdjacentHTML('afterend', '<div class="execution-activity-bar"></div>');
+	      } else if (!showActivityBar) {
+	        activityBar?.remove();
+	      }
 	      const runTitle = panel.querySelector('.execution-run-state > div > strong');
 	      const runDetail = panel.querySelector('.execution-run-state > div > span');
 	      if (runTitle) runTitle.textContent = runState.title;
@@ -15001,15 +15010,17 @@
 	      }
 	      executionSessionCache.set(session.id, session);
 	      syncExecutionProtocolPollingSession(session);
-	      const nextBucket = executionPollingRenderBucket(session);
-	      if (previousBucket !== nextBucket || !refreshExecutionPanelInPlace(session)) {
-	        await renderExecutionSheet(session.id, { focus: false });
-	        return { mode: 'lifecycle-render', previousBucket, nextBucket };
-	      }
-	      if (isTerminalExecutionStatus(session.status)) {
+	      const terminalBrowserOrder = sessionHasBrowserOrderSubmitted(session);
+	      if (isTerminalExecutionStatus(session.status) || terminalBrowserOrder) {
 	        executionPendingSessions.delete(session.id);
 	        executionProtocolPollingSessions.delete(session.id);
 	        clearSelectedAgentExecution(session.id);
+	      }
+	      const nextBucket = executionPollingRenderBucket(session);
+	      if (previousBucket !== nextBucket || !refreshExecutionPanelInPlace(session)) {
+	        await renderExecutionSheet(session.id, { focus: false });
+	        ensureExecutionPolling();
+	        return { mode: 'lifecycle-render', previousBucket, nextBucket };
 	      }
 	      ensureExecutionPolling();
 	      return { mode: 'in-place', previousBucket, nextBucket };
@@ -15060,6 +15071,9 @@
       const awaitingConfirmation = isAwaitingExecutionConfirmation(session);
       const locallyPending = session?.id && executionPendingSessions.has(session.id) && !isTerminalExecutionStatus(statusValue);
       const localError = session?.id ? executionLocalErrors.get(session.id) : null;
+      if (sessionHasBrowserOrderSubmitted(session)) {
+        return { statusValue: 'fulfilled', label: 'Order placed', cls: 'completed', phase: 2 };
+      }
       if (locallyPending) return { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
       if (localError && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusValue)) {
         return { statusValue: 'failed', label: 'Needs attention', cls: 'failed', phase: 1 };
@@ -15113,6 +15127,7 @@
       const note = String(session?.fulfillment?.notes || fallback || '').replace(/\s+/g, ' ').trim();
       const browserExecution = session?.fulfillment?.result?.browserExecution || {};
       const stopState = String(browserExecution.stopState || '').toLowerCase();
+      if (sessionHasBrowserOrderSubmitted(session)) return 'Order placed and confirmed by Amazon.';
       if (String(session?.status || '').toLowerCase() === 'failed' && browserExecution.stopEvidence) {
         return compactExecutionSentence(browserExecution.stopEvidence, 96);
       }
@@ -15155,6 +15170,11 @@
       return trace.some((entry) => hasBrowserOrderSubmitted(
         entry?.browserExecution || entry?.browser || entry?.result?.browserExecution || {}
       ));
+    }
+
+    function shouldShowExecutionActivityBar(session, statusModel) {
+      return !sessionHasBrowserOrderSubmitted(session)
+        && ['queued', 'claimed', 'executing'].includes(String(statusModel?.statusValue || ''));
     }
 
     function canPlaceReviewedOrderFromSession(session = {}) {
@@ -15439,7 +15459,8 @@
         const latestSummary = latestStep?.label || latestPhase.label;
         const runState = describeExecutionRunState(session, statusBadge, latestSummary);
         const displayStatusLabel = runState.badgeLabel || statusBadge.label;
-        const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', latestSummary].filter(Boolean).join(' · ');
+	        const terminalSummary = sessionHasBrowserOrderSubmitted(session) ? 'Amazon confirmed the order.' : latestSummary;
+	        const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	        const isBrowserExecutionSheet = session.handoffData?.kind === 'browser';
 	        const isAgentExecutionSheet = session.handoffData?.kind === 'agent';
 	        const canCancelExecution = !isTerminalExecutionStatus(session.status);
@@ -15454,10 +15475,11 @@
 	          && !santaClawzRetryBlocked
 	          && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusBadge.statusValue);
 	        const agentMissingInputs = isAgentExecutionSheet ? getMissingAgentInputLabels(session) : [];
-		        const browserExecution = session.fulfillment?.result?.browserExecution || {};
-		        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
-		        const browserSummary = browserExecution.checkoutSummary || {};
-		        const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
+	        const browserExecution = session.fulfillment?.result?.browserExecution || {};
+	        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
+	        const browserSummary = browserExecution.checkoutSummary || {};
+	        const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
+	        const showActivityBar = shouldShowExecutionActivityBar(session, statusBadge);
 		        const browserNeedsCheckoutReconcile = [
 	          'payment_required',
 	          'needs_payment',
@@ -15539,7 +15561,7 @@
                   <span class="execution-panel-title">${escapeExecutionValue(title)}</span>
                   <span class="execution-panel-meta">${escapeExecutionValue(compactMeta || statusLine)}</span>
                 </button>
-                ${['queued', 'claimed', 'executing'].includes(statusBadge.statusValue) ? '<div class="execution-activity-bar"></div>' : ''}
+	                ${showActivityBar ? '<div class="execution-activity-bar"></div>' : ''}
               </div>
               <div class="execution-panel-controls">
                 <span class="execution-status-badge ${statusBadge.cls}">${escapeExecutionValue(displayStatusLabel)}</span>
