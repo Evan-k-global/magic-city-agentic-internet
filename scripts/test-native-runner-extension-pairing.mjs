@@ -210,6 +210,22 @@ async function main() {
     if (extensionRegister.response.status !== 201) {
       throw new Error(`extension_plugin_register_failed:${extensionRegister.response.status}:${JSON.stringify(extensionRegister.data)}`);
     }
+    const statusAfterExtensionRegister = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
+      cookie: auth.cookie
+    });
+    if (!statusAfterExtensionRegister.response.ok
+      || !statusAfterExtensionRegister.data.device?.lastSeenAt
+      || !statusAfterExtensionRegister.data.ready) {
+      throw new Error(`extension_register_did_not_mark_runner_seen:${statusAfterExtensionRegister.response.status}:${JSON.stringify(statusAfterExtensionRegister.data)}`);
+    }
+    const staleDeviceStatus = await request(baseUrl, '/native-runner/status?deviceId=nrd-stale-local-cache', {
+      cookie: auth.cookie
+    });
+    if (!staleDeviceStatus.response.ok
+      || !staleDeviceStatus.data.requestedDeviceMissing
+      || staleDeviceStatus.data.device?.id !== claim.data.device.id) {
+      throw new Error(`stale_device_id_did_not_fall_back_to_owned_runner:${staleDeviceStatus.response.status}:${JSON.stringify(staleDeviceStatus.data)}`);
+    }
 
     const customStart = await request(baseUrl, '/native-runner/helper/pairing/start', {
       method: 'POST',

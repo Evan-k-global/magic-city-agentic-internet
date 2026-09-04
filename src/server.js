@@ -17556,24 +17556,26 @@ const server = http.createServer(async (req, res) => {
         row?.authUserId === auth.authUser.id
         || (requesterHash && row?.requesterHash === requesterHash)
       );
+      const requestedDeviceMissing = Boolean(deviceId && !ownedDevices.some((row) => row.id === deviceId));
+      const preferredDeviceId = requestedDeviceMissing ? '' : deviceId;
       const device = deviceId
-        ? ownedDevices.find((row) => row.id === deviceId)
+        ? ownedDevices.find((row) => row.id === deviceId) || ownedDevices[0] || null
         : ownedDevices[0] || null;
       const readiness = buildNativeRunnerReadiness({
         devices: ownedDevices,
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-        preferredDeviceId: deviceId
+        preferredDeviceId
       });
       const checkoutReadiness = buildNativeRunnerReadiness({
         devices: ownedDevices,
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-        preferredDeviceId: deviceId,
+        preferredDeviceId,
         requireExecutableWorker: true
       });
       const nativeHelperReadiness = buildNativeRunnerReadiness({
         devices: ownedDevices,
         pluginId: NATIVE_RUNNER_PLUGIN_ID,
-        preferredDeviceId: deviceId,
+        preferredDeviceId,
         requireExecutableWorker: true
       });
       const statusDevice = readiness.device?.id
@@ -17593,6 +17595,8 @@ const server = http.createServer(async (req, res) => {
           ready: false,
           checkoutReady: false,
           executableReady: false,
+          requestedDeviceId: deviceId || null,
+          requestedDeviceMissing,
           readiness,
           checkoutReadiness,
           nativeHelperReadiness
@@ -17612,6 +17616,8 @@ const server = http.createServer(async (req, res) => {
         ready: readiness.ready,
         checkoutReady: checkoutReadiness.ready,
         executableReady: checkoutReadiness.executableReady,
+        requestedDeviceId: deviceId || null,
+        requestedDeviceMissing,
         readiness,
         checkoutReadiness,
         nativeHelperReadiness
@@ -20137,6 +20143,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       requireFields(body, ['pluginId', 'ownerAgentId', 'kind', 'endpoint']);
       const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, pluginId: body.pluginId });
+      const nativeRunnerSeenAt = new Date().toISOString();
       if (pluginAuth.type === 'native_runner') {
         if (!nativeRunnerDeviceCanActAsPlugin(pluginAuth.nativeRunnerDevice, body.ownerAgentId)) {
           return sendJson(res, 403, { error: 'native_runner_owner_mismatch' });
@@ -20165,6 +20172,7 @@ const server = http.createServer(async (req, res) => {
         const isExtensionExecutor = isDeclarativeExtensionExecutionAgentId(plugin.pluginId);
         const registeredDevice = isExtensionExecutor
           ? updateNativeRunnerDevice(pluginAuth.nativeRunnerDevice.id, {
+              lastSeenAt: nativeRunnerSeenAt,
               metadata: sanitizeMetadata({
                 ...(pluginAuth.nativeRunnerDevice.metadata || {}),
                 extensionVersion: body.metadata?.version || pluginAuth.nativeRunnerDevice.metadata?.extensionVersion || null,
@@ -20172,7 +20180,9 @@ const server = http.createServer(async (req, res) => {
                 runnerSurface: 'chrome_extension_executor'
               })
             }) || pluginAuth.nativeRunnerDevice
-          : pluginAuth.nativeRunnerDevice;
+          : touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice, {
+              lastSeenAt: nativeRunnerSeenAt
+            });
         recordNativeRunnerActivity(registeredDevice, {
           action: 'plugin_registered',
           status: 'success',

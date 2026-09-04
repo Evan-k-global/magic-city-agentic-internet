@@ -10546,9 +10546,23 @@
 
     function nativeRunnerHeartbeatIsFresh(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
-      const lastHeartbeat = normalized.lastPollAt;
+      const lastHeartbeat = nativeRunnerLastHeartbeatAt(normalized);
       const ms = Date.parse(lastHeartbeat || '');
       return Number.isFinite(ms) && Date.now() - ms < 2 * 60 * 1000;
+    }
+
+    function nativeRunnerLastHeartbeatAt(settings = nativeRunnerSettings) {
+      const normalized = normalizeNativeRunnerSettings(settings);
+      const pollMs = Date.parse(normalized.lastPollAt || '');
+      const seenMs = Date.parse(normalized.lastSeenAt || '');
+      if (Number.isFinite(pollMs) && Number.isFinite(seenMs)) {
+        return pollMs >= seenMs ? normalized.lastPollAt : normalized.lastSeenAt;
+      }
+      return Number.isFinite(pollMs)
+        ? normalized.lastPollAt
+        : Number.isFinite(seenMs)
+          ? normalized.lastSeenAt
+          : '';
     }
 
     function nativeRunnerPairingIsFresh(settings = nativeRunnerSettings) {
@@ -10813,7 +10827,7 @@
           runnerReadyReason: readiness?.reason || base.runnerReadyReason || ''
         });
       }
-      const lastHeartbeat = device.lastPollAt || '';
+      const lastHeartbeat = device.lastPollAt || device.lastSeenAt || '';
       const hasHeartbeat = Boolean(lastHeartbeat);
       const trustMode = device.trustMode === 'trusted_under_cap'
         ? 'trusted_under_cap'
@@ -10852,13 +10866,14 @@
       const selected = nativeRunnerDevices.find((device) => device.id && device.id === nativeRunnerSettings.deviceId)
         || nativeRunnerDevices[0];
       const active = selected.status === 'active';
-      const heartbeat = selected.lastPollAt || '';
+      const heartbeat = selected.lastPollAt || selected.lastSeenAt || '';
       const online = heartbeat && Date.now() - Date.parse(heartbeat) < 2 * 60 * 1000;
+      const heartbeatLabel = selected.lastPollAt ? 'polled' : 'seen';
       $('nativeRunnerDeviceList').innerHTML = `
         <div class="connector-activity-item native-runner-advanced-item">
           <div>
             <strong>Current runner</strong>
-            <span>${escapeHtml(online ? 'online' : active ? 'not polling' : selected.status || 'unknown')}${heartbeat ? ` · polled ${escapeHtml(nativeRunnerTimeAgo(heartbeat))}` : ''}${selected.tokenLast4 ? ` · Token ending ${escapeHtml(selected.tokenLast4)}` : ''}</span>
+            <span>${escapeHtml(online ? 'online' : active ? 'not polling' : selected.status || 'unknown')}${heartbeat ? ` · ${heartbeatLabel} ${escapeHtml(nativeRunnerTimeAgo(heartbeat))}` : ''}${selected.tokenLast4 ? ` · Token ending ${escapeHtml(selected.tokenLast4)}` : ''}</span>
           </div>
         </div>
       `;
@@ -10970,7 +10985,7 @@
         primaryIsRefresh ? null : refreshButton
       ].filter(Boolean)));
       const status = $('nativeRunnerStatus');
-      const baselinePollAt = String(nativeRunnerSettings.lastPollAt || '').trim();
+      const baselinePollAt = String(nativeRunnerLastHeartbeatAt(nativeRunnerSettings) || '').trim();
       const startedAt = Date.now();
       let lastError = null;
       const setCheckingUi = () => {
@@ -10990,8 +11005,8 @@
         while (Date.now() - startedAt < NATIVE_RUNNER_CHECK_TIMEOUT_MS) {
           try {
             const latest = await refreshNativeRunnerStatus({ silent: true, wakeExtension: true });
-            const currentPollAt = String(latest?.lastPollAt || '').trim();
-            if (currentPollAt && currentPollAt !== baselinePollAt) return latest;
+            const currentHeartbeatAt = String(nativeRunnerLastHeartbeatAt(latest) || '').trim();
+            if (currentHeartbeatAt && currentHeartbeatAt !== baselinePollAt) return latest;
           } catch (error) {
             lastError = error;
           }
@@ -11019,7 +11034,7 @@
 
     function getNativeRunnerUiState(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
-      const heartbeat = normalized.lastPollAt;
+      const heartbeat = nativeRunnerLastHeartbeatAt(normalized);
       const heartbeatAgo = nativeRunnerTimeAgo(heartbeat);
       const heartbeatFresh = nativeRunnerHeartbeatIsFresh(normalized);
       if (normalized.installStatus === 'revoked') {
