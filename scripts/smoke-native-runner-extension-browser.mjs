@@ -985,6 +985,43 @@ async function main() {
       throw error;
     });
     console.log(`native-runner browser smoke paired (${smokeMode})`);
+    const verifyAmazonNavFlyout = async () => {
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/cart-preview-start`);
+      await page.setContent([
+        '<main><h1>Results for nature valley granola bars</h1></main>',
+        '<div id="nav-flyout-ewc" class="a-popover" aria-label="Shopping cart">',
+        '<div id="ewc-content"><p>Subtotal: $1.82</p>',
+        '<div class="a-button"><span class="a-button-inner"><button id="nav-flyout-go-to-cart" onclick="location.href=\'/cart?source=nav-flyout-ewc\'"><span class="a-button-text">Go to Cart</span></button></span></div>',
+        '</div></div>'
+      ].join(''));
+      const tab = await worker.evaluate(async (url) => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.find((candidate) => candidate.url === url) || null;
+      }, page.url());
+      if (!tab?.id) fail(`browser_extension_cart_flyout_tab_missing:${page.url()}`);
+      const outcome = await worker.evaluate(async (tabId) => {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+        return chrome.tabs.sendMessage(tabId, {
+          type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+          action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true }
+        });
+      }, tab.id);
+      await page.waitForURL(/\/cart\?source=nav-flyout-ewc/, { timeout: 5_000 });
+      if (!outcome?.completed || outcome.controlStrategy !== 'amazon_nav_cart_flyout') {
+        fail(`browser_extension_amazon_nav_flyout_cart_transition_failed:${JSON.stringify(outcome)}`);
+      }
+      recordPurchaseScenario('Amazon nav flyout Go to Cart uses the exact native control immediately', {
+        strategy: outcome.controlStrategy
+      });
+      await page.close();
+    };
+    if (smokeMode === 'cart-flyout') {
+      await verifyAmazonNavFlyout();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner cart flyout smoke passed');
+      return;
+    }
     if (smokeMode === 'recovery') {
       const runRecoveryScenario = async ({ id, startPath, action, selectedCandidate = null, checkoutProfile = null, assertCheckpoint }) => {
         checkpoints.length = 0;
@@ -1396,6 +1433,7 @@ async function main() {
       strategy: directResultOpenCartAction.controlStrategy
     });
     await directResultCartPage.close();
+    await verifyAmazonNavFlyout();
 
     const headerCartPage = await context.newPage();
     await headerCartPage.goto(`${baseUrl}/header-cart-search`);

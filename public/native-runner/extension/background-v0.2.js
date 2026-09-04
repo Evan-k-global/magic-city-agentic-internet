@@ -1317,42 +1317,64 @@ async function amazonSearchCardAddToCart(tabId, action = {}) {
   return result?.[0]?.result || null;
 }
 
-async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null) {
+async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null, cartUrl = '') {
   // Keep the result-card click and cart entry inside one local browser turn.
   // Amazon may render either an inline side cart or a full-page "Added to
   // cart" confirmation. Crossing a signed checkpoint between those two
   // controls lets MV3 suspend the worker while the obvious Go to Cart button
   // is already visible.
-  await delay(300);
-  let before = await chrome.tabs.get(tabId).catch(() => ({ url: '', status: '' }));
-  if (before.status === 'loading') {
-    await waitForTabReady(tabId, 3_500).catch(() => null);
-    before = await chrome.tabs.get(tabId).catch(() => before);
-  }
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const outcome = await tabCommand(tabId, {
-      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
-      action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true },
-      checkoutProfile
-    }, { injectionTimeoutMs: 4_000, responseTimeoutMs: 4_000 }).catch(() => null);
-    if (outcome?.completed && !outcome.cartFallbackRequested) {
-      if (outcome.navigationRequested && !outcome.skipped) {
-        await waitForTabUrlChange(tabId, before.url, 2_500)
-          .catch(() => waitForTabNavigation(tabId, before.url, 1_500).catch(() => null));
-        await waitForTabReady(tabId, 3_500).catch(() => null);
-      }
-      const state = await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 180 }).catch(() => outcome.state || null);
-      return {
-        advanced: true,
-        outcome,
-        state,
-        attempts: attempt + 1
-      };
+  await delay(120);
+  const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+  const outcome = await tabCommand(tabId, {
+    type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+    action: {
+      type: 'navigate',
+      intent: 'open_cart',
+      preferExistingCartControl: true,
+      url: cartUrl
+    },
+    checkoutProfile
+  }, { injectionTimeoutMs: 2_500, responseTimeoutMs: 2_500 }).catch(() => null);
+  if (outcome?.completed && !outcome.cartFallbackRequested) {
+    if (outcome.navigationRequested && !outcome.skipped) {
+      await waitForTabUrlChange(tabId, before.url, 2_000).catch(() => null);
     }
-    await delay(300);
-    before = await chrome.tabs.get(tabId).catch(() => before);
+    return {
+      advanced: true,
+      outcome,
+      state: outcome.state || null,
+      attempts: 1
+    };
   }
-  return { advanced: false, outcome: null, state: null, attempts: 3 };
+  // The URL is part of the signed open-cart plan action. When Amazon did not
+  // expose an exact live cart control, navigate there immediately instead of
+  // spending several command timeouts re-probing the same search page.
+  const fallbackUrl = withAmazonEnglishLocale(cartUrl || 'https://www.amazon.com/gp/cart/view.html');
+  const fallbackTab = await navigateMissionTab(tabId, fallbackUrl, {
+    timeoutMs: 5_000,
+    timeoutLabel: 'browser_cart_fallback_navigation_timeout'
+  }).catch(() => null);
+  if (!fallbackTab) return { advanced: false, outcome, state: null, attempts: 1 };
+  return {
+    advanced: true,
+    outcome: {
+      ...(outcome || {}),
+      completed: true,
+      navigationRequested: true,
+      cartFallbackRequested: true,
+      controlStrategy: 'stable_cart_fallback'
+    },
+    state: {
+      url: fallbackTab.url || fallbackUrl,
+      title: fallbackTab.title || '',
+      browserState: 'browse',
+      browserStateConfidence: 0,
+      browserStateReason: 'The signed Amazon cart URL opened after no exact live cart control was available.',
+      checkoutSummary: { stage: 'browse', nextAction: 'Inspecting cart' },
+      navigationReady: true
+    },
+    attempts: 1
+  };
 }
 
 async function tabBrowserState(tabId, checkoutProfile = null, {
@@ -2632,7 +2654,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     if (amazonFastPathAllowed && searchSurfaceAllowed) {
       const quickOutcome = await amazonSearchCardAddToCart(tabId, action);
       if (quickOutcome?.completed) {
-        const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile);
+        const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
         if (cartAdvance.advanced) {
           return {
             ...quickOutcome,
@@ -2696,7 +2718,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
   let before = await chrome.tabs.get(tabId);
   let outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
   if (action.type === 'select_candidate' && outcome?.directSearchResultCart === true) {
-    const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile);
+    const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
     if (cartAdvance.advanced) {
       return {
         ...outcome,

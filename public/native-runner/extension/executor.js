@@ -1310,6 +1310,25 @@
         if (candidate) return candidate;
       }
     }
+    // Amazon's current search-result cart flyout is not consistently marked
+    // as a dialog or side-cart. It commonly lives under these EWC containers
+    // beside the page, with the native button nested under presentation spans.
+    // Restrict this to an exact cart label inside a visible cart summary so a
+    // page-wide "Cart" disclosure can never become a navigation target.
+    const flyoutRoots = roots.flatMap((root) => Array.from(root.querySelectorAll([
+      '#nav-flyout-ewc',
+      '#ewc-content',
+      '[id*="nav-flyout" i][id*="cart" i]',
+      '[id*="ewc" i]'
+    ].join(','))))
+      .filter((root) => visible(root) && /\b(?:subtotal|cart)\b/i.test(compactText(root.innerText || root.textContent || '', 1200)));
+    for (const root of flyoutRoots) {
+      const control = interactiveControls(root).find((candidate) =>
+        /^(?:go to cart|view cart|view shopping cart)$/i.test(compactText(visibleControlLabel(candidate), 120))
+      );
+      const candidate = add(control, 'amazon_nav_cart_flyout');
+      if (candidate) return candidate;
+    }
     const previewRoots = roots.flatMap((root) => Array.from(root.querySelectorAll([
       '#attach-sidesheet-view-cart-button',
       '[id*="sidecart" i]',
