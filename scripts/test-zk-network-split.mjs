@@ -33,7 +33,13 @@ assert.equal(offchainSubmission.txHash, null);
 process.env.ZEKO_SUBMIT_MODE = 'relay';
 process.env.ZEKO_RELAYER_MODE = 'mba_mission_registry';
 delete process.env.ZEKO_MBA_RELAYER_URL;
-const { submitAnchorPayload: submitMbaAnchor } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-relayer-boundary=${Date.now()}`);
+const { getAnchorConfig: getMbaAnchorConfig, submitAnchorPayload: submitMbaAnchor } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-relayer-boundary=${Date.now()}`);
+const mbaAnchorConfig = getMbaAnchorConfig();
+assert.equal(mbaAnchorConfig.relayerConfigured, false);
+assert.equal(mbaAnchorConfig.externalRelayerConfigured, false);
+assert.equal(mbaAnchorConfig.submitterConfigured, false);
+assert.equal(mbaAnchorConfig.mbaMissionRegistry.externalRelayerConfigured, false);
+assert.equal(mbaAnchorConfig.mbaMissionRegistry.configured, false);
 await assert.rejects(
   () => submitMbaAnchor({ statementHash: '0x01', network: 'zeko:sepolia' }),
   /mba_external_relayer_not_configured/

@@ -55,6 +55,10 @@ function hasExternalMbaMissionRegistryRelayer() {
   return Boolean(ZEKO_RELAYER_MODE === 'mba_mission_registry' && ZEKO_MBA_RELAYER_URL);
 }
 
+function usesMbaMissionRegistryRelayer() {
+  return ZEKO_RELAYER_MODE === 'mba_mission_registry';
+}
+
 function stableHash(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
@@ -67,6 +71,9 @@ function makeTimeoutSignal(timeoutMs) {
 }
 
 export function getAnchorConfig() {
+  const mbaRelayerMode = usesMbaMissionRegistryRelayer();
+  const mbaRelayerConfigured = hasExternalMbaMissionRegistryRelayer();
+  const mbaRegistry = getMbaMissionRegistryConfig();
   return {
     mode: ZEKO_SUBMIT_MODE,
     networkId: ZEKO_NETWORK_ID,
@@ -75,18 +82,21 @@ export function getAnchorConfig() {
     o1jsNetworkId: ZEKO_O1JS_NETWORK_ID,
     explorerTxBase: ZEKO_EXPLORER_TX_BASE,
     relayerMode: ZEKO_RELAYER_MODE,
-    relayerConfigured: Boolean(ZEKO_RELAYER_URL || ZEKO_MBA_RELAYER_URL),
-    externalRelayerConfigured: Boolean(ZEKO_EXPLICIT_RELAYER_URL || ZEKO_MBA_RELAYER_URL),
+    // MBA writes are never routed through the legacy relayer URL. Report
+    // readiness for the active mode only so status cannot imply a usable MBA
+    // relayer when the dedicated service has not been configured.
+    relayerConfigured: mbaRelayerMode ? mbaRelayerConfigured : Boolean(ZEKO_RELAYER_URL),
+    externalRelayerConfigured: mbaRelayerMode ? mbaRelayerConfigured : Boolean(ZEKO_EXPLICIT_RELAYER_URL),
     inProcessRelayerConfigured: hasInProcessMissionAuthRelayer(),
     mbaMissionRegistry: {
-      ...getMbaMissionRegistryConfig(),
-      registryAddress: ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || getMbaMissionRegistryConfig().registryAddress
+      ...mbaRegistry,
+      registryAddress: ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || mbaRegistry.registryAddress,
+      externalRelayerConfigured: mbaRelayerConfigured,
+      configured: mbaRegistry.configured && mbaRelayerConfigured
     },
-    submitterConfigured: Boolean(
-      ZEKO_RELAYER_URL ||
-      hasInProcessMissionAuthRelayer() ||
-      hasExternalMbaMissionRegistryRelayer()
-    )
+    submitterConfigured: mbaRelayerMode
+      ? mbaRelayerConfigured
+      : Boolean(ZEKO_RELAYER_URL || hasInProcessMissionAuthRelayer())
   };
 }
 
