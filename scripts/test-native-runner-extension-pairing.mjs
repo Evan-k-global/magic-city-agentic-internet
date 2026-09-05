@@ -119,6 +119,12 @@ async function main() {
     EXECUTION_WATCHDOG_ENABLED: 'true',
     ETHEREUM_CONFIRMATION_INDEXER_ENABLED: 'false',
     ETHEREUM_SHADOW_RELAYER_ENABLED: 'false',
+    // Exercise the production-risk configuration without ever allowing the
+    // test server to start an in-process MBA compile/prove task.
+    ZEKO_SUBMIT_MODE: 'relay',
+    ZEKO_RELAYER_MODE: 'mba_mission_registry',
+    ZEKO_GRAPHQL: 'http://127.0.0.1:9/graphql',
+    MAGIC_CITY_FINAL_SUBMIT_CHAIN_GATE_ENABLED: 'false',
     MISSION_BOUND_AUTH_SECRET: 'native-runner-extension-test-secret'
   };
   let stderr = '';
@@ -1404,6 +1410,27 @@ async function main() {
       || autoSubmitPlan.planHash !== autoApproval.planHash
       || autoSubmitPlan.limits?.stopBeforeFinalSubmit !== false) {
       throw new Error(`fresh_auto_submit_claim_missing_authority:${autoSubmitClaim.response.status}:${JSON.stringify(autoSubmitClaim.data)}`);
+    }
+    if (autoSubmitSession.finalSubmitChainAuthorization) {
+      throw new Error(`disabled_chain_gate_started_background_work:${JSON.stringify(autoSubmitSession.finalSubmitChainAuthorization)}`);
+    }
+    const autoSubmitFinalAction = autoSubmitPlan.actions?.find((action) => action.type === 'final_submit');
+    const disabledChainGate = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/final-submit-chain-authorization`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        planHash: autoSubmitPlan.planHash,
+        actionId: autoSubmitFinalAction?.id
+      }
+    });
+    if (!disabledChainGate.response.ok
+      || disabledChainGate.data?.ready !== true
+      || disabledChainGate.data?.bypassed !== true
+      || disabledChainGate.data?.authorization?.bypassReason !== 'chain_gate_disabled') {
+      throw new Error(`disabled_chain_gate_did_not_fail_open:${disabledChainGate.response.status}:${JSON.stringify(disabledChainGate.data)}`);
     }
     const verifiedMilestones = new Set();
     for (const action of autoSubmitPlan.actions || []) {

@@ -702,6 +702,12 @@ const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
   1_000,
   Number(process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS || 7_500)
 );
+// Anchoring is useful evidence, but checkout must never depend on a proving
+// workload running inside the web process. Keep the irreversible chain gate
+// explicitly opt-in until it has a separately deployed relayer.
+const FINAL_SUBMIT_CHAIN_GATE_ENABLED = String(
+  process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_GATE_ENABLED || ''
+).trim().toLowerCase() === 'true';
 const MINA_FIELD_ORDER = '28948022309329048855892746252171976963363056481941647379679742748393362948097';
 const finalSubmitChainAuthorizationTasks = new Map();
 let zekoNetworkStatusCache = null;
@@ -2660,6 +2666,7 @@ function finalSubmitChainAuthorizationForRunner(value = null) {
     settledAt: value.settledAt || null,
     bypassAllowed: value.bypassAllowed === true,
     bypassReason: value.bypassReason || null,
+    gateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
     detail: value.detail || null
   };
 }
@@ -2712,6 +2719,16 @@ function chainAuthorizationUnavailable(error) {
     || /timeout|fetch|network|not_deployed|not_configured|out_of_sync|pending_confirmation/.test(message);
 }
 
+function localFinalSubmitChainBypass(prepared, reason, detail) {
+  return finalSubmitChainAuthorizationForRunner({
+    ...prepared,
+    status: 'unavailable',
+    bypassAllowed: true,
+    bypassReason: reason,
+    detail
+  });
+}
+
 function setFinalSubmitChainAuthorization(sessionId, authorization, trace = null) {
   const session = getConnectorSession(sessionId);
   if (!session) return null;
@@ -2728,6 +2745,21 @@ function beginFinalSubmitChainAuthorization(sessionId) {
   if (existing) return existing;
   const prepared = buildFinalSubmitChainAuthorization(getConnectorSession(sessionId));
   if (!prepared) return null;
+  if (!FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
+    const bypass = localFinalSubmitChainBypass(
+      prepared,
+      'chain_gate_disabled',
+      'Zeko final-submit gating is temporarily disabled. Magic City will continue with the signed local one-order authorization.'
+    );
+    setFinalSubmitChainAuthorization(sessionId, bypass, {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      label: 'Zeko final-submit gate disabled',
+      detail: bypass.detail,
+      state: 'final_submit_chain_bypassed',
+      createdAt: new Date().toISOString()
+    });
+    return Promise.resolve(bypass);
+  }
   setFinalSubmitChainAuthorization(sessionId, finalSubmitChainAuthorizationForRunner(prepared), {
     pluginId: RUNNER_EXTENSION_PLUGIN_ID,
     label: 'Preparing Zeko final-submit authorization',
@@ -2737,6 +2769,24 @@ function beginFinalSubmitChainAuthorization(sessionId) {
   });
   const task = (async () => {
     try {
+      // This is intentionally the first on-chain operation. It makes an
+      // outage a cheap, explicit local bypass instead of an o1js compile.
+      const networkStatus = await getZekoNetworkStatus();
+      if (!networkStatus.available) {
+        const fallback = localFinalSubmitChainBypass(
+          prepared,
+          'zeko_sepolia_unavailable',
+          'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
+        );
+        setFinalSubmitChainAuthorization(sessionId, fallback, {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          label: 'Zeko Sepolia unavailable',
+          detail: fallback.detail,
+          state: 'final_submit_chain_bypassed',
+          createdAt: new Date().toISOString()
+        });
+        return fallback;
+      }
       const anchor = await submitAnchorPayload({
         schema: 'magic-city-final-submit-chain-anchor-v1',
         network: prepared.network,
@@ -2747,6 +2797,11 @@ function beginFinalSubmitChainAuthorization(sessionId) {
         missionBoundary: prepared.missionBoundary,
         publicInputs: prepared.publicInputs
       });
+      if (anchor?.mode !== 'relay' || !anchor?.txHash) {
+        const err = new Error('final_submit_chain_anchor_not_settled');
+        err.statusCode = 503;
+        throw err;
+      }
       const settled = finalSubmitChainAuthorizationForRunner({
         ...prepared,
         status: 'anchored',
@@ -2767,15 +2822,17 @@ function beginFinalSubmitChainAuthorization(sessionId) {
       return settled;
     } catch (error) {
       const unavailable = chainAuthorizationUnavailable(error);
-      const fallback = finalSubmitChainAuthorizationForRunner({
-        ...prepared,
-        status: unavailable ? 'unavailable' : 'failed',
-        bypassAllowed: unavailable,
-        bypassReason: unavailable ? 'zeko_sepolia_unavailable' : null,
-        detail: unavailable
-          ? 'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
-          : 'The Zeko final-submit authorization could not be prepared.'
-      });
+      const fallback = unavailable
+        ? localFinalSubmitChainBypass(
+            prepared,
+            'zeko_sepolia_unavailable',
+            'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
+          )
+        : finalSubmitChainAuthorizationForRunner({
+            ...prepared,
+            status: 'failed',
+            detail: 'The Zeko final-submit authorization could not be prepared.'
+          });
       setFinalSubmitChainAuthorization(sessionId, fallback, {
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
         label: unavailable ? 'Zeko Sepolia unavailable' : 'Zeko authorization failed',
@@ -2815,12 +2872,14 @@ async function getZekoNetworkStatus({ force = false } = {}) {
     zekoNetworkStatusCache = {
       network: anchor.networkId,
       available: true,
+      finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
       checkedAt: new Date().toISOString()
     };
   } catch {
     zekoNetworkStatusCache = {
       network: anchor.networkId,
       available: false,
+      finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
       checkedAt: new Date().toISOString(),
       warning: 'Zeko Sepolia is unavailable. Checkout will continue under the signed local authorization.'
     };
@@ -19280,7 +19339,7 @@ const server = http.createServer(async (req, res) => {
       // Do not hold the browser launch on an on-chain transaction. The runner
       // receives this same session field at each signed checkpoint and checks
       // it only at the one irreversible final-submit action.
-      if (freshAutoSubmitAuthorized) {
+      if (freshAutoSubmitAuthorized && FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
         void beginFinalSubmitChainAuthorization(sessionId);
       }
 	      if (completionMode === 'agent_checkout') {
@@ -19469,6 +19528,25 @@ const server = http.createServer(async (req, res) => {
       requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'final_submit_chain_agent_mismatch' });
+      }
+      if (!FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
+        const plan = getExtensionMissionPlanForSession(session);
+        const action = plan?.actions?.find((item) => item?.type === 'final_submit' && item?.id === String(body.actionId || '')) || null;
+        if (!plan || plan.planHash !== String(body.planHash || '') || !action) {
+          return sendJson(res, 409, { error: 'final_submit_chain_authorization_scope_mismatch' });
+        }
+        const bypass = localFinalSubmitChainBypass({
+          sessionId,
+          planHash: plan.planHash,
+          actionId: action.id,
+          network: getAnchorConfig().networkId
+        }, 'chain_gate_disabled', 'Zeko final-submit gating is temporarily disabled. Magic City will continue with the signed local one-order authorization.');
+        return sendJson(res, 200, {
+          ready: true,
+          bypassed: true,
+          authorization: bypass,
+          session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId)
+        });
       }
       const current = session.finalSubmitChainAuthorization || null;
       if (!current
