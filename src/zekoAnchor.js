@@ -1,8 +1,5 @@
 import crypto from 'node:crypto';
-import {
-  getMbaMissionRegistryConfig,
-  submitMbaMissionRegistryAnchor
-} from './mba/missionRegistryAnchor.js';
+import { getMbaMissionRegistryConfig } from './mba/missionRegistryAnchor.js';
 
 const DEFAULT_MAGIC_CITY_MISSION_PROOF_NETWORK_ID = 'zeko:testnet';
 function resolveMissionProofNetworkId() {
@@ -20,6 +17,10 @@ const ZEKO_O1JS_NETWORK_ID =
   (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'zeko-mainnet' : 'testnet');
 const ZEKO_RELAYER_URL = process.env.ZEKO_RELAYER_URL || process.env.ZEKO_SUBMITTER_URL || '';
 const ZEKO_EXPLICIT_RELAYER_URL = process.env.ZEKO_RELAYER_URL || '';
+// MBA proof work is intentionally never run in the web process. This URL
+// must point at a separately deployed relayer when on-chain MBA anchoring is
+// enabled again; the legacy localhost relayer is not an MBA worker.
+const ZEKO_MBA_RELAYER_URL = process.env.ZEKO_MBA_RELAYER_URL || '';
 const ZEKO_RELAYER_TOKEN = process.env.ZEKO_RELAYER_TOKEN || process.env.ZEKO_SUBMITTER_TOKEN || '';
 const ZEKO_RELAYER_TIMEOUT_MS = Math.max(
   30_000,
@@ -50,9 +51,8 @@ function hasInProcessMissionAuthRelayer() {
   );
 }
 
-function hasInProcessMbaMissionRegistryRelayer() {
-  const config = getMbaMissionRegistryConfig();
-  return Boolean(ZEKO_RELAYER_MODE === 'mba_mission_registry' && config.configured);
+function hasExternalMbaMissionRegistryRelayer() {
+  return Boolean(ZEKO_RELAYER_MODE === 'mba_mission_registry' && ZEKO_MBA_RELAYER_URL);
 }
 
 function stableHash(value) {
@@ -75,8 +75,8 @@ export function getAnchorConfig() {
     o1jsNetworkId: ZEKO_O1JS_NETWORK_ID,
     explorerTxBase: ZEKO_EXPLORER_TX_BASE,
     relayerMode: ZEKO_RELAYER_MODE,
-    relayerConfigured: Boolean(ZEKO_RELAYER_URL),
-    externalRelayerConfigured: Boolean(ZEKO_EXPLICIT_RELAYER_URL),
+    relayerConfigured: Boolean(ZEKO_RELAYER_URL || ZEKO_MBA_RELAYER_URL),
+    externalRelayerConfigured: Boolean(ZEKO_EXPLICIT_RELAYER_URL || ZEKO_MBA_RELAYER_URL),
     inProcessRelayerConfigured: hasInProcessMissionAuthRelayer(),
     mbaMissionRegistry: {
       ...getMbaMissionRegistryConfig(),
@@ -85,7 +85,7 @@ export function getAnchorConfig() {
     submitterConfigured: Boolean(
       ZEKO_RELAYER_URL ||
       hasInProcessMissionAuthRelayer() ||
-      hasInProcessMbaMissionRegistryRelayer()
+      hasExternalMbaMissionRegistryRelayer()
     )
   };
 }
@@ -289,30 +289,10 @@ export async function submitAnchorPayload(anchorPayload) {
   const payloadHash = `0x${stableHash(anchorPayload)}`;
 
   if (ZEKO_SUBMIT_MODE === 'relay') {
-    // The deployed MBA registry needs the authority signature and durable
-    // Merkle-index mirror available only in this process. Do not route it
-    // through the legacy localhost relayer even when that URL remains set for
-    // backwards-compatible deployments.
-    if (hasInProcessMbaMissionRegistryRelayer()) {
-      const direct = await submitMbaMissionRegistryAnchor(anchorPayload, payloadHash);
-      return {
-        mode: 'relay',
-        status: direct.status || 'submitted',
-        payloadHash,
-        relayer: {
-          mode: 'in_process',
-          response: direct
-        },
-        txHash: direct.txHash ?? null,
-        networkId: ZEKO_NETWORK_ID,
-        registryAddress: direct.registryAddress ?? null,
-        previousRegistryRoot: direct.previousRegistryRoot ?? null,
-        registryRoot: direct.registryRoot ?? null,
-        registrySequence: direct.sequence ?? null,
-        capabilityCommitment: direct.capabilityCommitment ?? null,
-        approvalCommitment: direct.approvalCommitment ?? null,
-        registryKey: direct.registryKey ?? null
-      };
+    if (ZEKO_RELAYER_MODE === 'mba_mission_registry' && !hasExternalMbaMissionRegistryRelayer()) {
+      const err = new Error('mba_external_relayer_not_configured');
+      err.statusCode = 503;
+      throw err;
     }
     if (!ZEKO_EXPLICIT_RELAYER_URL && hasInProcessMissionAuthRelayer()) {
       const direct = await submitInProcessMissionAuthAnchor(anchorPayload, payloadHash);
@@ -329,7 +309,10 @@ export async function submitAnchorPayload(anchorPayload) {
       };
     }
 
-    if (!ZEKO_RELAYER_URL) {
+    const relayerUrl = ZEKO_RELAYER_MODE === 'mba_mission_registry'
+      ? ZEKO_MBA_RELAYER_URL
+      : ZEKO_RELAYER_URL;
+    if (!relayerUrl) {
       const err = new Error('zeko_relayer_not_configured');
       err.statusCode = 503;
       throw err;
@@ -338,7 +321,7 @@ export async function submitAnchorPayload(anchorPayload) {
     const { controller, timeout } = makeTimeoutSignal(ZEKO_RELAYER_TIMEOUT_MS);
     let response;
     try {
-      response = await fetch(ZEKO_RELAYER_URL, {
+      response = await fetch(relayerUrl, {
         method: 'POST',
         signal: controller.signal,
         headers: {
@@ -355,7 +338,7 @@ export async function submitAnchorPayload(anchorPayload) {
         ? `zeko_relayer_timeout:${ZEKO_RELAYER_TIMEOUT_MS}`
         : `zeko_relayer_fetch_failed:${error instanceof Error ? error.message : String(error)}`);
       err.statusCode = error?.name === 'AbortError' ? 504 : 502;
-      err.details = { relayerUrl: ZEKO_RELAYER_URL, timeoutMs: ZEKO_RELAYER_TIMEOUT_MS };
+      err.details = { relayerUrl, timeoutMs: ZEKO_RELAYER_TIMEOUT_MS };
       throw err;
     } finally {
       clearTimeout(timeout);
@@ -381,11 +364,11 @@ export async function submitAnchorPayload(anchorPayload) {
       status: parsed?.status || 'submitted',
       payloadHash,
       relayer: {
-        url: ZEKO_RELAYER_URL,
+        url: relayerUrl,
         response: parsed
       },
       relay: {
-        url: ZEKO_RELAYER_URL,
+        url: relayerUrl,
         response: parsed
       },
       txHash: parsed?.txHash ?? null,

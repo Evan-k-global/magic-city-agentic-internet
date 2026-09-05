@@ -28,6 +28,17 @@ assert.equal(offchainSubmission.mode, 'record');
 assert.equal(offchainSubmission.status, 'prepared');
 assert.equal(offchainSubmission.txHash, null);
 
+// MBA registry writes must never fall back to an o1js path in the web process.
+// A separately deployed relayer is required before relay mode can be enabled.
+process.env.ZEKO_SUBMIT_MODE = 'relay';
+process.env.ZEKO_RELAYER_MODE = 'mba_mission_registry';
+delete process.env.ZEKO_MBA_RELAYER_URL;
+const { submitAnchorPayload: submitMbaAnchor } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-relayer-boundary=${Date.now()}`);
+await assert.rejects(
+  () => submitMbaAnchor({ statementHash: '0x01', network: 'zeko:sepolia' }),
+  /mba_external_relayer_not_configured/
+);
+
 const discovery = buildMbaDiscoveryDocument({ baseUrl: 'https://magic-city-staging.fly.dev' });
 assert.deepEqual(discovery.capabilities.anchoring, [
   'zeko:sepolia',
