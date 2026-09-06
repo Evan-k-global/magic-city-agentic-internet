@@ -466,6 +466,8 @@ async function getConfig() {
     expiresAt: '',
     pluginId: RUNNER_EXTENSION_PLUGIN_ID,
     ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+    extensionId: '',
+    extensionVersion: '',
     holderPublicJwk: null,
     holderPrivateJwk: null,
     lastPollAt: '',
@@ -769,6 +771,8 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
         ...(body ? { 'content-type': 'application/json' } : {}),
         'x-magic-city-runner-surface': 'chrome-extension',
         'x-magic-city-runner-protocol': RUNNER_PROTOCOL,
+        'x-magic-city-runner-extension-id': chrome.runtime.id || '',
+        'x-magic-city-runner-extension-version': chrome.runtime.getManifest().version,
         ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
       },
       body: body ? JSON.stringify(body) : undefined
@@ -3955,6 +3959,8 @@ async function pairWithCode({ baseUrl = DEFAULT_BASE_URL, code = '' } = {}) {
     expiresAt: setup.expiresAt || claimed.device?.expiresAt || '',
     pluginId: RUNNER_EXTENSION_PLUGIN_ID,
     ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+    extensionId: chrome.runtime.id || '',
+    extensionVersion: chrome.runtime.getManifest().version,
     useExistingBrowser: Boolean(setup.useExistingBrowser ?? claimed.device?.useExistingBrowser),
     pairedAt: new Date().toISOString(),
     lastError: ''
@@ -3990,6 +3996,8 @@ async function handleMessage(message, sender = null) {
     if (config.deviceToken) {
       config = await saveConfig({
         lastPollAt: checkedAt,
+        extensionId: chrome.runtime.id || '',
+        extensionVersion: chrome.runtime.getManifest().version,
         lastError: ''
       });
     }

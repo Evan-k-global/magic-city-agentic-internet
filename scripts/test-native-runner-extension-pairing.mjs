@@ -61,7 +61,16 @@ async function getAvailablePort() {
   });
 }
 
-async function request(baseUrl, pathName, { method = 'GET', body = null, cookie = '', bearer = '', runnerSurface = '', runnerProtocol = '' } = {}) {
+async function request(baseUrl, pathName, {
+  method = 'GET',
+  body = null,
+  cookie = '',
+  bearer = '',
+  runnerSurface = '',
+  runnerProtocol = '',
+  runnerExtensionVersion = '',
+  runnerExtensionId = ''
+} = {}) {
   const response = await fetch(`${baseUrl}${pathName}`, {
     method,
     headers: {
@@ -69,7 +78,9 @@ async function request(baseUrl, pathName, { method = 'GET', body = null, cookie 
       ...(cookie ? { cookie } : {}),
       ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
       ...(runnerSurface ? { 'x-magic-city-runner-surface': runnerSurface } : {}),
-      ...(runnerProtocol ? { 'x-magic-city-runner-protocol': runnerProtocol } : {})
+      ...(runnerProtocol ? { 'x-magic-city-runner-protocol': runnerProtocol } : {}),
+      ...(runnerExtensionVersion ? { 'x-magic-city-runner-extension-version': runnerExtensionVersion } : {}),
+      ...(runnerExtensionId ? { 'x-magic-city-runner-extension-id': runnerExtensionId } : {})
     },
     body: body ? JSON.stringify(body) : undefined
   });
@@ -231,6 +242,24 @@ async function main() {
       || !staleDeviceStatus.data.requestedDeviceMissing
       || staleDeviceStatus.data.device?.id !== claim.data.device.id) {
       throw new Error(`stale_device_id_did_not_fall_back_to_owned_runner:${staleDeviceStatus.response.status}:${JSON.stringify(staleDeviceStatus.data)}`);
+    }
+    const versionedPollVersion = '0.4.99';
+    const versionedPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: versionedPollVersion,
+      runnerExtensionId: 'test-extension-id'
+    });
+    if (!versionedPoll.response.ok) {
+      throw new Error(`versioned_extension_poll_failed:${versionedPoll.response.status}:${JSON.stringify(versionedPoll.data)}`);
+    }
+    const statusAfterVersionedPoll = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
+      cookie: auth.cookie
+    });
+    if (!statusAfterVersionedPoll.response.ok
+      || statusAfterVersionedPoll.data.device?.extensionVersion !== versionedPollVersion) {
+      throw new Error(`versioned_extension_poll_did_not_update_device:${statusAfterVersionedPoll.response.status}:${JSON.stringify(statusAfterVersionedPoll.data)}`);
     }
 
     const customStart = await request(baseUrl, '/native-runner/helper/pairing/start', {

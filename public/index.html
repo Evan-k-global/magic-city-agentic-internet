@@ -10559,6 +10559,16 @@
       return Number.isFinite(rightMs) ? right : '';
     }
 
+    function newerNativeRunnerVersion(left = '', right = '') {
+      const normalizedLeft = String(left || '').trim();
+      const normalizedRight = String(right || '').trim();
+      if (!normalizedLeft) return normalizedRight;
+      if (!normalizedRight) return normalizedLeft;
+      return compareDottedVersions(normalizedLeft, normalizedRight) >= 0
+        ? normalizedLeft
+        : normalizedRight;
+    }
+
     function nativeRunnerLastHeartbeatAt(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
       const pollMs = Date.parse(normalized.lastPollAt || '');
@@ -10839,6 +10849,11 @@
       const hasHeartbeat = Boolean(lastHeartbeat);
       const lastSeenAt = newerNativeRunnerTimestamp(device.lastSeenAt || '', base.lastSeenAt || '');
       const lastPollAt = newerNativeRunnerTimestamp(device.lastPollAt || '', base.lastPollAt || '');
+      const extensionVersion = newerNativeRunnerVersion(base.extensionVersion || '', device.extensionVersion || '');
+      const runnerReadyReason = readiness?.reason === 'runner_extension_outdated'
+        && !nativeRunnerExtensionNeedsUpgrade({ ...base, extensionVersion })
+          ? ''
+          : readiness?.reason || base.runnerReadyReason || '';
       const trustMode = device.trustMode === 'trusted_under_cap'
         ? 'trusted_under_cap'
         : (base.trustMode === 'trusted_under_cap' ? 'trusted_under_cap' : 'local_runner');
@@ -10856,9 +10871,9 @@
         lastPollAt,
         lastQueueCount: Number(device.lastQueueCount || 0) || 0,
         executableReady: Boolean(readiness?.executableReady ?? base.executableReady),
-        runnerReadyReason: readiness?.reason || base.runnerReadyReason || '',
+        runnerReadyReason,
         extensionId: device.extensionId || base.extensionId || '',
-        extensionVersion: device.extensionVersion || base.extensionVersion || '',
+        extensionVersion,
         pairingStatus: device.id && base.pairingStatus !== 'pending' ? 'claimed' : base.pairingStatus,
         pairingCode: base.pairingStatus === 'pending' ? base.pairingCode : (device.id ? '' : base.pairingCode),
         pairingExpiresAt: base.pairingStatus === 'pending' ? base.pairingExpiresAt : (device.id ? '' : base.pairingExpiresAt),
@@ -10971,7 +10986,7 @@
             $('nativeRunnerStatus').textContent = `Runner needs attention: ${extensionError}`;
             return saved;
           }
-          const heartbeat = saved.lastPollAt;
+          const heartbeat = nativeRunnerLastHeartbeatAt(saved);
           const readiness = data.checkoutReadiness || data.readiness || {};
           const updateRequired = Boolean(readiness.extensionUpdateRequired) || nativeRunnerExtensionNeedsUpgrade(saved);
           $('nativeRunnerStatus').textContent = data.device

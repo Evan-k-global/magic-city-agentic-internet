@@ -16404,9 +16404,22 @@ const server = http.createServer(async (req, res) => {
             || isActiveExtensionClaimForDevice(session, nativeRunnerDevice)
           );
         }
+        const reportedExtensionVersion = String(req.headers['x-magic-city-runner-extension-version'] || '').trim().slice(0, 64);
+        const reportedExtensionId = String(req.headers['x-magic-city-runner-extension-id'] || '').trim().slice(0, 128);
+        const metadataPatch = (isChromeExtensionRunnerRequest(req) && (reportedExtensionVersion || reportedExtensionId))
+          ? {
+              metadata: sanitizeMetadata({
+                ...(nativeRunnerDevice.metadata || {}),
+                ...(reportedExtensionVersion ? { extensionVersion: reportedExtensionVersion } : {}),
+                ...(reportedExtensionId ? { extensionId: reportedExtensionId } : {}),
+                runnerSurface: 'chrome_extension_executor'
+              })
+            }
+          : {};
         touchNativeRunnerDevice(nativeRunnerDevice, {
           lastPollAt: new Date().toISOString(),
-          lastQueueCount: sessions.length
+          lastQueueCount: sessions.length,
+          ...metadataPatch
         });
         if (sessions.length > 20) {
           recordNativeRunnerActivity(nativeRunnerDevice, {
