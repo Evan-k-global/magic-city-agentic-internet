@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,18 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const registryAddress = 'B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe';
 const bootstrapRoot = '28831116683740239225579803815979923155620183932789174387615564682385525427460';
+
+const missingDatabase = spawnSync(process.execPath, ['--input-type=module', '--eval', "await import('./src/mbaRegistryStore.js')"], {
+  cwd: rootDir,
+  env: {
+    ...process.env,
+    DATABASE_URL: '',
+    MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE: 'true'
+  },
+  encoding: 'utf8'
+});
+assert.notEqual(missingDatabase.status, 0);
+assert.match(`${missingDatabase.stdout}${missingDatabase.stderr}`, /mba_mission_registry_database_required/);
 
 function getAvailablePort() {
   return new Promise((resolve, reject) => {

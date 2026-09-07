@@ -41,6 +41,11 @@ function persistFileState() {
 
 async function initializeStore() {
   if (!pool) {
+    if (REQUIRE_PRODUCTION_PERSISTENCE) {
+      const error = new Error('mba_mission_registry_database_required');
+      persistence = { ...persistence, ready: false, healthy: false, lastWriteError: error.message };
+      throw error;
+    }
     persistence = { ...persistence, ready: true, healthy: true };
     return;
   }
