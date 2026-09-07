@@ -22,6 +22,7 @@ const ZEKO_EXPLICIT_RELAYER_URL = process.env.ZEKO_RELAYER_URL || '';
 // enabled again; the legacy localhost relayer is not an MBA worker.
 const ZEKO_MBA_RELAYER_URL = process.env.ZEKO_MBA_RELAYER_URL || '';
 const ZEKO_RELAYER_TOKEN = process.env.ZEKO_RELAYER_TOKEN || process.env.ZEKO_SUBMITTER_TOKEN || '';
+const ZEKO_MBA_RELAYER_TOKEN = process.env.ZEKO_MBA_RELAYER_TOKEN || '';
 const ZEKO_RELAYER_TIMEOUT_MS = Math.max(
   30_000,
   Number(process.env.ZEKO_RELAYER_TIMEOUT_MS || 6 * 60 * 1000) || 6 * 60 * 1000
@@ -385,6 +386,9 @@ export async function submitAnchorPayload(anchorPayload) {
     const relayerUrl = ZEKO_RELAYER_MODE === 'mba_mission_registry'
       ? ZEKO_MBA_RELAYER_URL
       : ZEKO_RELAYER_URL;
+    const relayerToken = ZEKO_RELAYER_MODE === 'mba_mission_registry'
+      ? ZEKO_MBA_RELAYER_TOKEN
+      : ZEKO_RELAYER_TOKEN;
     if (!relayerUrl) {
       const err = new Error('zeko_relayer_not_configured');
       err.statusCode = 503;
@@ -399,7 +403,7 @@ export async function submitAnchorPayload(anchorPayload) {
         signal: controller.signal,
         headers: {
           'content-type': 'application/json',
-          ...(ZEKO_RELAYER_TOKEN ? { authorization: `Bearer ${ZEKO_RELAYER_TOKEN}` } : {})
+          ...(relayerToken ? { authorization: `Bearer ${relayerToken}` } : {})
         },
         body: JSON.stringify({
           networkId: ZEKO_NETWORK_ID,
