@@ -7,6 +7,7 @@ const { Pool } = pg;
 const DATA_PATH = path.resolve(process.cwd(), 'data', 'mba-mission-registry-state.json');
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const REQUIRE_PRODUCTION_PERSISTENCE = String(process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE || '').toLowerCase() === 'true';
+const SCHEMA_MANAGED_EXTERNALLY = String(process.env.MAGIC_CITY_RELAYER_SCHEMA_MANAGED || '').toLowerCase() === 'true';
 const pool = DATABASE_URL
   ? new Pool(buildPostgresPoolOptions({ connectionString: DATABASE_URL, requirePersistence: REQUIRE_PRODUCTION_PERSISTENCE }))
   : null;
@@ -19,6 +20,7 @@ let persistence = {
   lastWriteAt: null,
   lastWriteError: null
 };
+let localMutationTail = Promise.resolve();
 
 function readFileState() {
   try {
@@ -50,13 +52,17 @@ async function initializeStore() {
     return;
   }
   try {
-    await pool.query(`
-      create table if not exists mba_mission_registry_states (
-        registry_address text primary key,
-        state_json jsonb not null,
-        updated_at timestamptz not null
-      )
-    `);
+    if (SCHEMA_MANAGED_EXTERNALLY) {
+      await pool.query('select registry_address from mba_mission_registry_states limit 1');
+    } else {
+      await pool.query(`
+        create table if not exists mba_mission_registry_states (
+          registry_address text primary key,
+          state_json jsonb not null,
+          updated_at timestamptz not null
+        )
+      `);
+    }
     persistence = { ...persistence, ready: true, healthy: true };
   } catch (error) {
     persistence = { ...persistence, ready: false, healthy: false, lastWriteError: error instanceof Error ? error.message : String(error) };
@@ -116,5 +122,31 @@ export async function upsertMbaMissionRegistryState(registryAddress, patch = {})
 }
 
 export function getMbaMissionRegistryPersistenceStatus() {
-  return { ...persistence, databaseConfigured: Boolean(DATABASE_URL) };
+  return { ...persistence, databaseConfigured: Boolean(DATABASE_URL), schemaManagedExternally: SCHEMA_MANAGED_EXTERNALLY };
+}
+
+export async function withMbaMissionRegistryMutationLock(registryAddress, work) {
+  const lockKey = `magic-city-mba-registry:${String(registryAddress || '').trim()}`;
+  if (!pool || persistence.driver !== 'postgres') {
+    const previous = localMutationTail;
+    let release;
+    localMutationTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('select pg_advisory_lock(hashtext($1))', [lockKey]);
+    return await work();
+  } finally {
+    try {
+      await client.query('select pg_advisory_unlock(hashtext($1))', [lockKey]);
+    } finally {
+      client.release();
+    }
+  }
 }

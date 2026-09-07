@@ -3,8 +3,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import {
-  createSubmission,
-  findSubmissionByPayloadHash,
+  createOrGetSubmission,
   getSubmission,
   getZekoRelayerPersistenceStatus,
   listSubmissions,
@@ -19,7 +18,8 @@ import { MBA_MISSION_REGISTRY_ADDRESS } from './mba/registryConfig.js';
 import {
   getMbaMissionRegistryPersistenceStatus,
   getMbaMissionRegistryState,
-  upsertMbaMissionRegistryState
+  upsertMbaMissionRegistryState,
+  withMbaMissionRegistryMutationLock
 } from './mbaRegistryStore.js';
 
 // The relayer is an internal capability. Expose it only when an operator opts in.
@@ -138,10 +138,16 @@ async function readBody(req, maxBytes = 512 * 1024) {
 }
 
 function assertToken(req) {
-  if (!TOKEN) return true;
+  if (!TOKEN) {
+    const err = new Error('relayer_auth_not_configured');
+    err.statusCode = 503;
+    throw err;
+  }
   const header = req.headers.authorization || '';
   const expected = `Bearer ${TOKEN}`;
-  if (header !== expected) {
+  const actualBytes = Buffer.from(header);
+  const expectedBytes = Buffer.from(expected);
+  if (actualBytes.length !== expectedBytes.length || !crypto.timingSafeEqual(actualBytes, expectedBytes)) {
     const err = new Error('unauthorized');
     err.statusCode = 401;
     throw err;
@@ -642,7 +648,8 @@ async function runSubmitOnce(submissionId) {
   }
   try {
     const sent = MODE === 'mba_mission_registry'
-      ? await submitMbaMissionRegistryAnchor(submission.anchorPayload, submission.payloadHash)
+      ? await withMbaMissionRegistryMutationLock(MBA_MISSION_REGISTRY_PUBLIC_KEY, () =>
+        submitMbaMissionRegistryAnchor(submission.anchorPayload, submission.payloadHash))
       : await submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash);
     const updated = await updateSubmission(submission.id, {
       status: sent.txHash ? 'submitted' : 'pending',
@@ -748,12 +755,16 @@ async function handleSubmit(req, res) {
   const networkId = body.networkId || ZEKO_NETWORK_ID;
   const anchorKey = buildAnchorKey(anchorPayload, networkId);
 
-  const recentSubmissions = await listSubmissions(200);
-  const previous = recentSubmissions.find((candidate) => {
-    if (candidate.anchorKey === anchorKey) return true;
-    if (!candidate.anchorPayload) return candidate.payloadHash === payloadHash;
-    return buildAnchorKey(candidate.anchorPayload, candidate.networkId || ZEKO_NETWORK_ID) === anchorKey;
-  }) || await findSubmissionByPayloadHash(payloadHash);
+  const reservation = await createOrGetSubmission({
+    status: 'received',
+    mode: MODE,
+    payloadHash,
+    anchorKey,
+    networkId,
+    anchorPayload,
+    txPlan: buildTxPlan(anchorPayload, payloadHash)
+  });
+  const previous = reservation.created ? null : reservation.submission;
   if (previous?.status === 'submitted' && previous.txHash) {
     return sendJson(res, 200, {
       id: previous.id,
@@ -789,26 +800,16 @@ async function handleSubmit(req, res) {
     });
   }
 
-  const submission = previous?.status === 'failed'
-    ? await updateSubmission(previous.id, {
-        status: 'received',
-        mode: MODE,
-        payloadHash,
-        anchorKey,
-        networkId,
-        anchorPayload,
-        txPlan: buildTxPlan(anchorPayload, payloadHash),
-        result: { retryingSamePayload: true }
-      })
-    : await createSubmission({
-        status: 'received',
-        mode: MODE,
-        payloadHash,
-        anchorKey,
-        networkId,
-        anchorPayload,
-        txPlan: buildTxPlan(anchorPayload, payloadHash)
-      });
+  if (previous) {
+    return sendJson(res, 409, {
+      error: 'mission_auth_submission_not_retryable',
+      id: previous.id,
+      status: previous.status || 'failed',
+      payloadHash: previous.payloadHash,
+      anchorKey
+    });
+  }
+  const submission = reservation.submission;
 
   if (MODE === 'record') {
     const updated = await updateSubmission(submission.id, {

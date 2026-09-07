@@ -10,6 +10,30 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const registryAddress = 'B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe';
 const bootstrapRoot = '28831116683740239225579803815979923155620183932789174387615564682385525427460';
 
+const localLock = spawnSync(process.execPath, ['--input-type=module', '--eval', [
+  "import { withMbaMissionRegistryMutationLock } from './src/mbaRegistryStore.js';",
+  "import { createOrGetSubmission } from './src/zekoSubmitterStore.js';",
+  'let active = 0; let maximum = 0;',
+  "await Promise.all([1, 2, 3].map(() => withMbaMissionRegistryMutationLock('test-registry', async () => {",
+  '  active += 1; maximum = Math.max(maximum, active);',
+  '  await new Promise((resolve) => setTimeout(resolve, 15));',
+  '  active -= 1;',
+  '})));',
+  'if (maximum !== 1) throw new Error(`local_lock_not_serialized:${maximum}`);',
+  "const reservations = await Promise.all(Array.from({ length: 8 }, () => createOrGetSubmission({ anchorKey: 'test-anchor', payloadHash: '0xtest' })));",
+  'if (reservations.filter((entry) => entry.created).length !== 1) throw new Error(`idempotency_not_atomic:${JSON.stringify(reservations)}`);',
+  'if (new Set(reservations.map((entry) => entry.submission.id)).size !== 1) throw new Error(`idempotency_duplicate_rows:${JSON.stringify(reservations)}`);'
+].join('\n')], {
+  cwd: rootDir,
+  env: {
+    ...process.env,
+    DATABASE_URL: '',
+    MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE: 'false'
+  },
+  encoding: 'utf8'
+});
+assert.equal(localLock.status, 0, `${localLock.stdout}${localLock.stderr}`);
+
 const missingDatabase = spawnSync(process.execPath, ['--input-type=module', '--eval', "await import('./src/mbaRegistryStore.js')"], {
   cwd: rootDir,
   env: {
@@ -21,6 +45,18 @@ const missingDatabase = spawnSync(process.execPath, ['--input-type=module', '--e
 });
 assert.notEqual(missingDatabase.status, 0);
 assert.match(`${missingDatabase.stdout}${missingDatabase.stderr}`, /mba_mission_registry_database_required/);
+
+const missingSubmissionDatabase = spawnSync(process.execPath, ['--input-type=module', '--eval', "await import('./src/zekoSubmitterStore.js')"], {
+  cwd: rootDir,
+  env: {
+    ...process.env,
+    DATABASE_URL: '',
+    MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE: 'true'
+  },
+  encoding: 'utf8'
+});
+assert.notEqual(missingSubmissionDatabase.status, 0);
+assert.match(`${missingSubmissionDatabase.stdout}${missingSubmissionDatabase.stderr}`, /zeko_relayer_database_required/);
 
 function getAvailablePort() {
   return new Promise((resolve, reject) => {
@@ -115,6 +151,14 @@ try {
   assert.equal(healthy.mba.chain.sequence, '1');
   assert.equal(healthy.mba.mirror.matchesOnchain, true);
   assert.equal(healthy.mba.ready, false, 'private keys are absent in this health-only fixture');
+
+  const unauthenticatedSubmit = await fetch(`http://127.0.0.1:${relayerPort}/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ anchorPayload: { schema: 'magic-city-final-submit-chain-anchor-v1' } })
+  });
+  assert.equal(unauthenticatedSubmit.status, 503);
+  assert.equal((await unauthenticatedSubmit.json()).error, 'relayer_auth_not_configured');
 
   chainRegistryRoot = '999';
   const rootMismatch = await (await fetch(`http://127.0.0.1:${relayerPort}/health`)).json();
