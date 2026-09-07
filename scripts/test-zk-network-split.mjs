@@ -32,6 +32,9 @@ assert.equal(offchainSubmission.txHash, null);
 // A separately deployed relayer is required before relay mode can be enabled.
 process.env.ZEKO_SUBMIT_MODE = 'relay';
 process.env.ZEKO_RELAYER_MODE = 'mba_mission_registry';
+// This reproduces the stale production configuration: the legacy relayer is
+// present, but MBA anchoring has no separately deployed relayer.
+process.env.ZEKO_RELAYER_URL = 'http://127.0.0.1:4412/submit';
 delete process.env.ZEKO_MBA_RELAYER_URL;
 const { getAnchorConfig: getMbaAnchorConfig, submitAnchorPayload: submitMbaAnchor } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-relayer-boundary=${Date.now()}`);
 const mbaAnchorConfig = getMbaAnchorConfig();
@@ -40,10 +43,23 @@ assert.equal(mbaAnchorConfig.externalRelayerConfigured, false);
 assert.equal(mbaAnchorConfig.submitterConfigured, false);
 assert.equal(mbaAnchorConfig.mbaMissionRegistry.externalRelayerConfigured, false);
 assert.equal(mbaAnchorConfig.mbaMissionRegistry.configured, false);
+assert.equal(mbaAnchorConfig.mbaMissionRegistry.readiness, 'external_relayer_not_configured');
 await assert.rejects(
   () => submitMbaAnchor({ statementHash: '0x01', network: 'zeko:sepolia' }),
   /mba_external_relayer_not_configured/
 );
+
+// MBA configuration is endpoint-based. Web-process private keys must not be
+// required or surfaced to decide that a dedicated relayer is configured.
+process.env.ZEKO_MBA_RELAYER_URL = 'https://mba-relayer.example.test/submit';
+const { getAnchorConfig: getExternalMbaAnchorConfig } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-external-readiness=${Date.now()}`);
+const externalMbaAnchorConfig = getExternalMbaAnchorConfig();
+assert.equal(externalMbaAnchorConfig.relayerConfigured, true);
+assert.equal(externalMbaAnchorConfig.externalRelayerConfigured, true);
+assert.equal(externalMbaAnchorConfig.submitterConfigured, true);
+assert.equal(externalMbaAnchorConfig.mbaMissionRegistry.externalRelayerConfigured, true);
+assert.equal(externalMbaAnchorConfig.mbaMissionRegistry.configured, true);
+assert.equal(externalMbaAnchorConfig.mbaMissionRegistry.readiness, 'external_relayer_configured');
 
 const discovery = buildMbaDiscoveryDocument({ baseUrl: 'https://magic-city-staging.fly.dev' });
 assert.deepEqual(discovery.capabilities.anchoring, [

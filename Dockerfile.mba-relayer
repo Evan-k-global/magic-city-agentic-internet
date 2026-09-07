@@ -1,0 +1,13 @@
+FROM mcr.microsoft.com/playwright:v1.58.2-noble
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY src ./src
+
+EXPOSE 4412
+
+ENV HOST=0.0.0.0
+ENV PORT=4412
+CMD ["node", "src/zekoRelayerServer.js"]

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { getMbaMissionRegistryConfig } from './mba/missionRegistryAnchor.js';
+import { MBA_MISSION_REGISTRY_ADDRESS } from './mba/registryConfig.js';
 
 const DEFAULT_MAGIC_CITY_MISSION_PROOF_NETWORK_ID = 'zeko:testnet';
 function resolveMissionProofNetworkId() {
@@ -73,7 +73,7 @@ function makeTimeoutSignal(timeoutMs) {
 export function getAnchorConfig() {
   const mbaRelayerMode = usesMbaMissionRegistryRelayer();
   const mbaRelayerConfigured = hasExternalMbaMissionRegistryRelayer();
-  const mbaRegistry = getMbaMissionRegistryConfig();
+  const mbaRegistryAddress = ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || MBA_MISSION_REGISTRY_ADDRESS;
   return {
     mode: ZEKO_SUBMIT_MODE,
     networkId: ZEKO_NETWORK_ID,
@@ -89,15 +89,78 @@ export function getAnchorConfig() {
     externalRelayerConfigured: mbaRelayerMode ? mbaRelayerConfigured : Boolean(ZEKO_EXPLICIT_RELAYER_URL),
     inProcessRelayerConfigured: hasInProcessMissionAuthRelayer(),
     mbaMissionRegistry: {
-      ...mbaRegistry,
-      registryAddress: ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || mbaRegistry.registryAddress,
+      mode: 'mba_mission_registry',
+      registryAddress: mbaRegistryAddress || null,
       externalRelayerConfigured: mbaRelayerConfigured,
-      configured: mbaRegistry.configured && mbaRelayerConfigured
+      // The web process never decides MBA readiness from private keys. When
+      // this gate is eventually enabled, the external relayer's authenticated
+      // health/capabilities response must establish operational readiness.
+      readiness: mbaRelayerMode
+        ? (mbaRelayerConfigured ? 'external_relayer_configured' : 'external_relayer_not_configured')
+        : 'not_active',
+      configured: Boolean(mbaRegistryAddress && mbaRelayerConfigured)
     },
     submitterConfigured: mbaRelayerMode
       ? mbaRelayerConfigured
       : Boolean(ZEKO_RELAYER_URL || hasInProcessMissionAuthRelayer())
   };
+}
+
+function mbaRelayerHealthUrl() {
+  if (!ZEKO_MBA_RELAYER_URL) return null;
+  try {
+    const url = new URL(ZEKO_MBA_RELAYER_URL);
+    url.pathname = '/health';
+    url.search = '';
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export async function getMbaRelayerReadiness() {
+  const config = getAnchorConfig();
+  const expectedRegistryAddress = config.mbaMissionRegistry?.registryAddress || null;
+  const healthUrl = mbaRelayerHealthUrl();
+  if (!usesMbaMissionRegistryRelayer()) {
+    return { ready: false, status: 'not_active', healthUrl: null };
+  }
+  if (!healthUrl || !expectedRegistryAddress) {
+    return { ready: false, status: 'not_configured', healthUrl: null };
+  }
+  const { controller, timeout } = makeTimeoutSignal(2_000);
+  try {
+    const response = await fetch(healthUrl, { signal: controller.signal });
+    const health = await response.json();
+    const capabilities = Array.isArray(health?.mba?.capabilities) ? health.mba.capabilities : [];
+    const ready = Boolean(
+      response.ok
+      && health?.status === 'ok'
+      && health?.service === 'magic-city-mba-relayer'
+      && health?.mode === 'mba_mission_registry'
+      && health?.mba?.ready === true
+      && health?.mba?.registryAddress === expectedRegistryAddress
+      && capabilities.includes('mba_mission_registry')
+      && capabilities.includes('registry_state_sync')
+    );
+    return {
+      ready,
+      status: ready ? 'ready' : 'not_ready',
+      healthUrl,
+      capabilities,
+      chain: health?.mba?.chain || null,
+      mirror: health?.mba?.mirror || null
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      status: 'unreachable',
+      healthUrl,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function zekoExplorerTxUrl(txHash) {
@@ -369,6 +432,10 @@ export async function submitAnchorPayload(anchorPayload) {
       throw err;
     }
 
+    const mbaRegistry = ZEKO_RELAYER_MODE === 'mba_mission_registry'
+      ? (parsed?.result?.mode === 'mba_mission_registry' ? parsed.result : null)
+      : null;
+
     return {
       mode: 'relay',
       status: parsed?.status || 'submitted',
@@ -382,6 +449,10 @@ export async function submitAnchorPayload(anchorPayload) {
         response: parsed
       },
       txHash: parsed?.txHash ?? null,
+      registryAddress: mbaRegistry?.registryAddress ?? null,
+      previousRegistryRoot: mbaRegistry?.previousRegistryRoot ?? null,
+      registryRoot: mbaRegistry?.registryRoot ?? null,
+      registrySequence: mbaRegistry?.sequence ?? null,
       networkId: ZEKO_NETWORK_ID
     };
   }

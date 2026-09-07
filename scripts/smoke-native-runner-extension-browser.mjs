@@ -941,6 +941,7 @@ async function main() {
     };
     console.log('native-runner browser smoke launching Chrome');
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    context.setDefaultTimeout(20_000);
     await waitFor(() => context.serviceWorkers()[0], 15_000);
     console.log('native-runner browser smoke service worker ready');
     let worker = context.serviceWorkers()[0];
@@ -1319,13 +1320,24 @@ async function main() {
     }
     console.log('native-runner browser smoke running full checkout matrix');
     const commandPage = async (page, message) => {
-      const tab = await worker.evaluate(async (url) => {
-        const tabs = await chrome.tabs.query({});
-        return tabs.find((candidate) => candidate.url === url) || null;
-      }, page.url());
+      const activeWorker = context.serviceWorkers()[0] || worker;
+      const tab = await Promise.race([
+        activeWorker.evaluate(async (url) => {
+          const tabs = await chrome.tabs.query({});
+          return tabs.find((candidate) => candidate.url === url) || null;
+        }, page.url()),
+        new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 15_000))
+      ]);
+      if (tab?.timeout) fail(`browser_extension_service_worker_tab_lookup_timeout:${page.url()}`);
       if (!tab?.id) fail(`browser_extension_policy_test_tab_missing:${page.url()}`);
-      const response = await worker.evaluate(async ({ tabId, payload }) => {
-        await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+      const response = await Promise.race([
+        activeWorker.evaluate(async ({ tabId, payload }) => {
+        const timeoutResult = { completed: false, reason: 'browser_content_script_injection_timeout' };
+        const injected = await Promise.race([
+          chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] }).then(() => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 15_000))
+        ]);
+        if (!injected) return timeoutResult;
         return Promise.race([
           chrome.tabs.sendMessage(tabId, payload),
           new Promise((resolve) => setTimeout(() => resolve({
@@ -1333,8 +1345,13 @@ async function main() {
             reason: 'browser_content_script_timeout'
           }), 15_000))
         ]);
-      }, { tabId: tab.id, payload: message });
-      if (response?.reason === 'browser_content_script_timeout') {
+        }, { tabId: tab.id, payload: message }),
+        new Promise((resolve) => setTimeout(() => resolve({
+          completed: false,
+          reason: 'browser_service_worker_evaluation_timeout'
+        }), 20_000))
+      ]);
+      if (/^browser_content_script_(?:injection_)?timeout$/.test(String(response?.reason || ''))) {
         fail(`browser_extension_content_script_timeout:${page.url()}`);
       }
       return response;

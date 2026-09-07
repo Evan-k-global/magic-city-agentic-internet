@@ -225,8 +225,8 @@ import {
 import { toUnits, fromUnits, CREDIT_SCALE } from './units.js';
 import { buildSeededAgents, executeProvider, executeProviderStream, getConfiguredProviders, rankAmazonCandidatesWithProvider } from './providers.js';
 import { buildAnchorPayload, compileArtifactProofProgram, generateArtifactProof, verifyArtifactProof } from './zekoProof.js';
-import { getAnchorConfig, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
-import { canonicalValueToFieldDecimal } from './mba/missionRegistryAnchor.js';
+import { getAnchorConfig, getMbaRelayerReadiness, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
+import { canonicalValueToFieldDecimal } from './mba/canonicalField.js';
 import { inferCapabilityFromPrompt, isMagicInternetPurchaseRequest, looksLikeCodeAuditRequest, buildActionPlanAsync, finalizeActionRun } from './actionRuntime.js';
 import { CONNECTOR_SPECS, getConnector, getConnectorHandoffData } from './connectors.js';
 import { rankExecutionAgentsForSession } from './executionAgents.js';
@@ -2787,6 +2787,21 @@ function beginFinalSubmitChainAuthorization(sessionId) {
         });
         return fallback;
       }
+      if (networkStatus.mbaRelayer?.ready !== true) {
+        const fallback = localFinalSubmitChainBypass(
+          prepared,
+          'zeko_mba_relayer_unavailable',
+          'The Zeko MBA relayer is not ready. Magic City will continue with the signed local one-order authorization.'
+        );
+        setFinalSubmitChainAuthorization(sessionId, fallback, {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          label: 'Zeko MBA relayer unavailable',
+          detail: fallback.detail,
+          state: 'final_submit_chain_bypassed',
+          createdAt: new Date().toISOString()
+        });
+        return fallback;
+      }
       const anchor = await submitAnchorPayload({
         schema: 'magic-city-final-submit-chain-anchor-v1',
         network: prepared.network,
@@ -2869,10 +2884,12 @@ async function getZekoNetworkStatus({ force = false } = {}) {
     });
     const payload = await response.json();
     if (!response.ok || payload?.errors?.length || !payload?.data?.account?.publicKey) throw new Error('zeko_graphql_unavailable');
+    const mbaRelayer = await getMbaRelayerReadiness();
     zekoNetworkStatusCache = {
       network: anchor.networkId,
       available: true,
       finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+      mbaRelayer,
       checkedAt: new Date().toISOString()
     };
   } catch {
@@ -2880,6 +2897,7 @@ async function getZekoNetworkStatus({ force = false } = {}) {
       network: anchor.networkId,
       available: false,
       finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+      mbaRelayer: await getMbaRelayerReadiness(),
       checkedAt: new Date().toISOString(),
       warning: 'Zeko Sepolia is unavailable. Checkout will continue under the signed local authorization.'
     };

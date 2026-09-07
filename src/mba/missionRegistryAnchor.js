@@ -1,10 +1,10 @@
-import crypto from 'node:crypto';
 import {
   getMbaMissionRegistryState,
   upsertMbaMissionRegistryState
-} from '../store.js';
+} from '../mbaRegistryStore.js';
+import { canonicalValueToFieldDecimal } from './canonicalField.js';
+import { MBA_MISSION_REGISTRY_ADDRESS } from './registryConfig.js';
 
-export const MBA_MISSION_REGISTRY_ADDRESS = 'B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe';
 const MBA_MISSION_REGISTRY_BOOTSTRAP = {
   version: 'mba-mission-registry-index-v1',
   sequence: '1',
@@ -18,24 +18,8 @@ const MBA_MISSION_REGISTRY_BOOTSTRAP = {
 let compilePromise = null;
 let anchorTail = Promise.resolve();
 
-function canonicalize(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function canonicalValueToField(value, Field) {
   return Field(canonicalValueToFieldDecimal(value, Field.ORDER));
-}
-
-// Keep the pre-submit authorization commitment deterministic without making
-// the checkout server import o1js just to derive a Field-compatible value.
-export function canonicalValueToFieldDecimal(value, fieldOrder) {
-  const input = typeof value === 'string' ? value : canonicalize(value);
-  const digest = crypto.createHash('sha256').update(input).digest('hex');
-  return (BigInt(`0x${digest}`) % BigInt(fieldOrder)).toString();
 }
 
 function configuredRegistryAddress() {
@@ -65,7 +49,7 @@ export function getMbaMissionRegistryConfig() {
   };
 }
 
-function bootstrapState(registryAddress) {
+export function getMbaMissionRegistryBootstrapState(registryAddress) {
   if (registryAddress !== MBA_MISSION_REGISTRY_ADDRESS) {
     const err = new Error(`mba_mission_registry_bootstrap_missing:${registryAddress}`);
     err.statusCode = 503;
@@ -176,7 +160,7 @@ async function submitAnchor(anchorPayload, payloadHash) {
     throw err;
   }
 
-  const persisted = getMbaMissionRegistryState(registryAddress.toBase58()) || bootstrapState(registryAddress.toBase58());
+  const persisted = (await getMbaMissionRegistryState(registryAddress.toBase58())) || getMbaMissionRegistryBootstrapState(registryAddress.toBase58());
   const registry = new MissionRegistry(registryAddress);
   let map = mapFromState(persisted, Field, MerkleMap);
   let onchain = registryStateSnapshot(registry);
@@ -193,7 +177,7 @@ async function submitAnchor(anchorPayload, payloadHash) {
         pending: null,
         recoveredAt: new Date().toISOString()
       };
-      upsertMbaMissionRegistryState(registryAddress.toBase58(), recovered);
+      await upsertMbaMissionRegistryState(registryAddress.toBase58(), recovered);
       map = mapFromState(recovered, Field, MerkleMap);
       onchain = registryStateSnapshot(registry);
     } else {
@@ -252,7 +236,7 @@ async function submitAnchor(anchorPayload, payloadHash) {
     payloadHash,
     submittedAt: new Date().toISOString()
   };
-  upsertMbaMissionRegistryState(registryAddress.toBase58(), { ...persisted, pending });
+  await upsertMbaMissionRegistryState(registryAddress.toBase58(), { ...persisted, pending });
 
   await waitForRegistryState({
     registry,
@@ -264,7 +248,7 @@ async function submitAnchor(anchorPayload, payloadHash) {
 
   const entries = new Map(persisted.entries ?? []);
   entries.set(pending.registryKey, pending.approvalCommitment);
-  const stored = upsertMbaMissionRegistryState(registryAddress.toBase58(), {
+  const stored = await upsertMbaMissionRegistryState(registryAddress.toBase58(), {
     ...persisted,
     sequence: pending.nextSequence,
     registryRoot: pending.nextRegistryRoot,
