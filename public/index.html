@@ -7202,6 +7202,29 @@
       if (sessionId) executionLocalErrors.delete(sessionId);
     }
 
+    function reconcileExecutionWakeError(session) {
+      if (!session?.id) return false;
+      const error = executionLocalErrors.get(session.id) || null;
+      if (!/^extension_wake_(failed|rejected):/.test(String(error?.code || ''))) return false;
+      const errorAt = Date.parse(error.createdAt || '');
+      if (!Number.isFinite(errorAt)) return false;
+      const progressTimes = [
+        session.claimedAt,
+        session.executionLive?.createdAt,
+        ...(Array.isArray(session.executionTrace)
+          ? session.executionTrace
+            .filter((step) => String(step?.pluginId || '') === RUNNER_EXTENSION_PLUGIN_ID)
+            .map((step) => step?.createdAt)
+          : [])
+      ]
+        .map((value) => Date.parse(value || ''))
+        .filter(Number.isFinite);
+      if (!progressTimes.some((progressAt) => progressAt >= errorAt)) return false;
+      executionPendingSessions.delete(session.id);
+      clearExecutionStatusError(session.id);
+      return true;
+    }
+
     function setExecutionStatusError(session, error) {
       const message = rememberExecutionStatusError(session, error);
       const statusEl = getExecutionSheetScrollElement(session?.id)?.querySelector('#executionStatusText') || $('executionStatusText');
@@ -15052,7 +15075,7 @@
 	      const latestStep = [...(Array.isArray(session.executionTrace) ? session.executionTrace : [])].reverse()[0] || null;
 	      const latestPhase = inferExecutionPhase(latestStep, session.fulfillment);
 	      const latestSummary = latestStep?.label || latestPhase.label;
-	      const runState = describeExecutionRunState(session, statusBadge, latestSummary);
+	      const runState = describeExecutionRunState(session, statusBadge, latestSummary, localExecutionError);
 	      const displayStatusLabel = runState.badgeLabel || statusBadge.label;
 	      const terminalSummary = sessionHasBrowserOrderSubmitted(session) ? 'Amazon confirmed the order.' : latestSummary;
 	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
@@ -15102,6 +15125,7 @@
 	        session.finalSelections = { ...(session.finalSelections || {}), ...(draft.selections || {}) };
 	        session.localPrivateContext = { ...(session.localPrivateContext || {}), ...(draft.localPrivateInputs || {}) };
 	      }
+	      reconcileExecutionWakeError(session);
 	      executionSessionCache.set(session.id, session);
 	      syncExecutionProtocolPollingSession(session);
 	      const terminalBrowserOrder = sessionHasBrowserOrderSubmitted(session);
@@ -15163,10 +15187,16 @@
     function getExecutionStatusModel(session) {
       const statusValue = String(session?.status || 'ready');
       const awaitingConfirmation = isAwaitingExecutionConfirmation(session);
+      reconcileExecutionWakeError(session);
       const locallyPending = session?.id && executionPendingSessions.has(session.id) && !isTerminalExecutionStatus(statusValue);
       const localError = session?.id ? executionLocalErrors.get(session.id) : null;
+      const localWakeError = executionLocalErrorApplies(session, localError)
+        && /^extension_wake_(failed|rejected):/.test(String(localError?.code || ''));
       if (sessionHasBrowserOrderSubmitted(session)) {
         return { statusValue: 'fulfilled', label: 'Order placed', cls: 'completed', phase: 2 };
+      }
+      if (localWakeError) {
+        return { statusValue: 'failed', label: 'Runner needed', cls: 'failed', phase: 1 };
       }
       if (locallyPending) return { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
       if (localError && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusValue)) {

@@ -64,6 +64,7 @@
     "test:browser-final-review-policy": "node scripts/test-browser-final-review-policy.mjs",
     "test:browser-terminal-contract": "node scripts/test-browser-terminal-contract.mjs",
     "test:agent-handoff-ui-contract": "node scripts/test-agent-handoff-ui-contract.mjs",
+    "test:execution-startup-ui-state": "node scripts/test-execution-startup-ui-state.mjs",
     "smoke:agent-handoff-ui-browser": "node scripts/smoke-agent-handoff-ui-browser.mjs",
     "check:native-runner-production": "node scripts/check-native-runner-production-readiness.mjs",
     "smoke:native-runner-production": "node scripts/smoke-native-runner-production.mjs",
