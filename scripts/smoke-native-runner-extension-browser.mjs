@@ -763,6 +763,8 @@ async function main() {
     let blockRunnerStatusForFinalDispatch = false;
     let blockedFinalRunnerStatusCalls = 0;
     let delayLeaseExpiryCheckpoint = false;
+    let deferPrimaryClaimResponse = false;
+    let releasePrimaryClaimResponse = null;
     // The full browser matrix intentionally runs longer than the initial
     // ten-minute test capability. Keep the fixture's active capabilities
     // fresh; expiry itself is covered by the focused mocked-clock regression.
@@ -807,6 +809,9 @@ async function main() {
         claimedSessionIds.push(claimedSessionId);
         if (claimedSessionId === session?.id) {
           session = { ...session, status: 'claimed', claimedByPluginId: body.pluginId };
+          if (deferPrimaryClaimResponse) {
+            await new Promise((resolve) => { releasePrimaryClaimResponse = resolve; });
+          }
           return json(res, 200, { claimed: true, session });
         }
         if (claimedSessionId === distractorSession?.id) {
@@ -1023,6 +1028,48 @@ async function main() {
       console.log('native-runner cart flyout smoke passed');
       return;
     }
+    if (smokeMode === 'claim-startup') {
+      checkpoints.length = 0;
+      deferPrimaryClaimResponse = true;
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const claimPromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        chrome.runtime.sendMessage(targetExtensionId, {
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId
+        }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
+      }), { extensionId, sessionId: session.id });
+      await waitFor(() => claimedSessionIds.includes(session.id), 5_000);
+      const claimingRun = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['activeSessionId', 'activeRun'], resolve);
+      }));
+      if (claimingRun.activeSessionId !== session.id || claimingRun.activeRun?.phase !== 'claiming') {
+        fail(`browser_extension_claim_marker_not_durable:${JSON.stringify(claimingRun)}`);
+      }
+      deferPrimaryClaimResponse = false;
+      releasePrimaryClaimResponse?.();
+      await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-site'
+        && checkpoint.planActionStatus === 'waiting'
+        && checkpoint.label === 'Opening browser'), 5_000);
+      const startupCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-site'
+        && checkpoint.planActionStatus === 'waiting'
+        && checkpoint.label === 'Opening browser');
+      if (!startupCheckpoint || session.extensionMissionPlanState?.nextActionIndex !== 0) {
+        fail(`browser_extension_claim_startup_checkpoint_not_nonadvancing:${JSON.stringify({ startupCheckpoint, planState: session.extensionMissionPlanState })}`);
+      }
+      const wakeResult = await claimPromise;
+      if (wakeResult.error || !wakeResult.response?.ok) {
+        fail(`browser_extension_claim_startup_wake_failed:${JSON.stringify(wakeResult)}`);
+      }
+      recordPurchaseScenario('Claim persistence survives the server-accepted startup gap before browser work', {
+        phase: claimingRun.activeRun.phase,
+        checkpoint: startupCheckpoint.planActionStatus
+      });
+      await wakePage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner claim startup recovery smoke passed');
+      return;
+    }
     if (smokeMode === 'recovery') {
       const runRecoveryScenario = async ({ id, startPath, action, selectedCandidate = null, checkoutProfile = null, assertCheckpoint }) => {
         checkpoints.length = 0;
@@ -1090,7 +1137,8 @@ async function main() {
         await cdp.send('ServiceWorker.enable');
         await cdp.send('ServiceWorker.stopAllWorkers');
         await waitFor(() => Boolean(fulfillment), 12_000);
-        const checkpoint = checkpoints.find((entry) => entry.planActionId === action.id);
+        const checkpoint = checkpoints.find((entry) => entry.planActionId === action.id
+          && entry.planActionStatus === 'completed');
         assertCheckpoint(checkpoint, fulfillment);
         await page.close();
       };
@@ -1653,6 +1701,17 @@ async function main() {
     if (claimedSessionIds[0] !== session.id) {
       fail(`browser_extension_claimed_wrong_queued_session:${JSON.stringify(claimedSessionIds)}`);
     }
+    await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-site'
+      && checkpoint.planActionStatus === 'waiting'
+      && checkpoint.label === 'Opening browser'), 5_000);
+    const startupCheckpointIndex = checkpoints.findIndex((checkpoint) => checkpoint.planActionId === 'open-site'
+      && checkpoint.planActionStatus === 'waiting'
+      && checkpoint.label === 'Opening browser');
+    const completedOpenSiteIndex = checkpoints.findIndex((checkpoint) => checkpoint.planActionId === 'open-site'
+      && checkpoint.planActionStatus === 'completed');
+    if (startupCheckpointIndex < 0 || (completedOpenSiteIndex >= 0 && completedOpenSiteIndex < startupCheckpointIndex)) {
+      fail(`browser_extension_claim_startup_checkpoint_missing_or_advanced:${JSON.stringify(checkpoints)}`);
+    }
     try {
       await waitFor(() => Boolean(fulfillment), 40_000);
     } catch (error) {
@@ -1693,7 +1752,8 @@ async function main() {
     recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
       sessionId: session.id,
       queuedSessions: 2,
-      completionMs: Math.round(externalWake.elapsedMs)
+      completionMs: Math.round(externalWake.elapsedMs),
+      startupCheckpoint: 'open-site waiting'
     });
 
     popup = await context.newPage();
@@ -1855,7 +1915,8 @@ async function main() {
     } catch {
       fail(`browser_extension_cart_recovery_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
     }
-    const recoveredCartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'prepare-cart');
+    const recoveredCartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'prepare-cart'
+      && checkpoint.planActionStatus === 'completed');
     if (recoveredCartCheckpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
       || !Array.isArray(recoveredCartCheckpoint?.verifiedMilestones)
       || !recoveredCartCheckpoint.verifiedMilestones.includes('cart_confirmed')) {
@@ -1946,7 +2007,8 @@ async function main() {
     } catch {
       fail(`browser_extension_final_recovery_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
     }
-    const recoveredFinalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    const recoveredFinalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order'
+      && checkpoint.planActionStatus === 'completed');
     if (recoveredFinalCheckpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
       || recoveredFinalCheckpoint?.browser?.finalSubmitRequested !== true
       || recoveredFinalCheckpoint?.browser?.orderSubmitted !== true

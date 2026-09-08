@@ -73,8 +73,16 @@ if (!/function normalizeActiveRunCandidate/.test(packagedLegacyBackground)
   || !/selectedCandidate:\s*progress\.selectedCandidate/.test(packagedLegacyBackground)) {
   fail('interrupted cart actions must retain a compact selected-product identity for replay protection');
 }
-if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,320}if \(!resumingPersistedRun\) \{[\s\S]{0,120}phase: 'claimed'/.test(packagedLegacyBackground)) {
-  fail('a resumed run must inspect its durable active-run marker before writing phase claimed');
+if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,340}phase: 'claiming'[\s\S]{0,320}phase: 'claimed'/.test(packagedLegacyBackground)) {
+  fail('the runner must persist recovery before its remote claim and retain it after claiming');
+}
+const startupCheckpointStart = packagedLegacyBackground.indexOf('async function checkpointRunnerStartup(');
+const startupCheckpointSection = startupCheckpointStart >= 0
+  ? packagedLegacyBackground.slice(startupCheckpointStart, startupCheckpointStart + 1_200)
+  : '';
+if (!startupCheckpointSection.includes("planActionStatus: 'waiting'")
+  || !packagedLegacyBackground.includes('session = await checkpointRunnerStartup(session, plan, nextAction);')) {
+  fail('the runner must report a non-advancing startup checkpoint before browser work');
 }
 if (!/const isCartMutation = action\.type === 'click_intent' && action\.intent === 'add_to_cart';[\s\S]{0,500}cartStateVerifiesCandidateSelection\(report, action\)/.test(packagedLegacyBackground)) {
   fail('a recovered cart mutation must verify the selected product before skipping a retry');

@@ -1557,6 +1557,22 @@ async function missionCheckpoint(session, { label, detail, state, missionAction,
   return data.session || session;
 }
 
+async function checkpointRunnerStartup(session, plan, nextAction) {
+  // This is deliberately non-advancing. It closes the MV3 gap between a
+  // successful server-side claim and the first browser operation, while the
+  // signed open-site action remains the next action to execute.
+  return missionCheckpoint(session, {
+    label: 'Opening browser',
+    detail: 'Magic City Runner claimed this mission and is preparing Chrome.',
+    state: 'running',
+    missionAction: nextAction.missionAction,
+    targetUrl: plan.startUrl,
+    plan,
+    planAction: nextAction,
+    planActionStatus: 'waiting'
+  });
+}
+
 function verifiedCheckoutHandoff(report = {}) {
   const stage = String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase();
   const milestones = new Set(Array.isArray(report.verifiedMilestones) ? report.verifiedMilestones : []);
@@ -2988,6 +3004,12 @@ async function runSession(rawSession) {
     // recorded, so overwriting this marker would make the action replayable.
     const persistedActiveRun = await getActiveRun();
     const resumingPersistedRun = Boolean(persistedActiveRun?.sessionId === rawSession.id);
+    if (!resumingPersistedRun) {
+      // Persist before the remote claim. If MV3 is suspended after the server
+      // accepts the claim, the gateway can recover this exact signed session.
+      await saveActiveRun({ sessionId: rawSession.id, phase: 'claiming' });
+    }
+    scheduleRunnerResume(8_000);
     session = await claimSession(rawSession);
     if (!resumingPersistedRun) {
       await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
@@ -3029,6 +3051,9 @@ async function runSession(rawSession) {
     const persistedMilestones = Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : [];
     const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
     if (!nextAction) return { sessionId: session.id, status: 'plan_completed' };
+    if (String(session.status || '').toLowerCase() !== 'executing') {
+      session = await checkpointRunnerStartup(session, plan, nextAction);
+    }
     if (!await hasPermissionForUrl(startUrl)) {
       const domain = domainForUrl(startUrl);
       session = await missionCheckpoint(session, {
