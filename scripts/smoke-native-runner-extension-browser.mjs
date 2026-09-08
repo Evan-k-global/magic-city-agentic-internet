@@ -1054,7 +1054,11 @@ async function main() {
       const startupCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-site'
         && checkpoint.planActionStatus === 'waiting'
         && checkpoint.label === 'Opening browser');
-      if (!startupCheckpoint || session.extensionMissionPlanState?.nextActionIndex !== 0) {
+      if (!startupCheckpoint
+        || startupCheckpoint.runnerTiming?.phase !== 'startup'
+        || !startupCheckpoint.runnerTiming?.workerStartedAt
+        || !startupCheckpoint.runnerTiming?.checkpointRequestedAt
+        || session.extensionMissionPlanState?.nextActionIndex !== 0) {
         fail(`browser_extension_claim_startup_checkpoint_not_nonadvancing:${JSON.stringify({ startupCheckpoint, planState: session.extensionMissionPlanState })}`);
       }
       const wakeResult = await claimPromise;
@@ -1068,6 +1072,88 @@ async function main() {
       await wakePage.close();
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner claim startup recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'completion-recovery') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      const completedSessionId = 'browser-smoke-completion-recovery-session';
+      const completedPlan = rehashExtensionPlan({
+        ...plan,
+        planId: 'mplan_completion_recovery'
+      });
+      const completedMilestones = [
+        'candidate_selected',
+        'cart_confirmed',
+        'checkout_open',
+        'address_confirmed',
+        'card_confirmed',
+        'delivery_confirmed',
+        'checkout_profile_verified',
+        'final_review_ready',
+        'final_submit_requested',
+        'order_submitted'
+      ];
+      session = {
+        ...session,
+        id: completedSessionId,
+        status: 'executing',
+        claimedByPluginId: 'magic-city-runner-extension',
+        fulfillment: null,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          capabilityId: 'browser-smoke-completion-recovery-capability',
+          subject: { sessionId: completedSessionId }
+        },
+        extensionMissionPlan: completedPlan,
+        extensionMissionPlanState: {
+          planHash: completedPlan.planHash,
+          nextActionIndex: completedPlan.actions.length,
+          completedActionIds: completedPlan.actions.map((action) => action.id),
+          verifiedMilestones: completedMilestones
+        }
+      };
+      await seedSessionCheckoutProfile(completedSessionId, defaultCheckoutProfile, completedPlan.planHash);
+      await worker.evaluate(async ({ sessionId: activeSessionId, planHash, nextActionIndex }) => {
+        await chrome.storage.local.set({
+          activeSessionId,
+          activeRun: {
+            sessionId: activeSessionId,
+            planHash,
+            phase: 'running',
+            nextActionIndex
+          }
+        });
+      }, {
+        sessionId: completedSessionId,
+        planHash: completedPlan.planHash,
+        nextActionIndex: completedPlan.actions.length
+      });
+      const completionResult = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+      }), completedSessionId);
+      if (!completionResult?.ok) {
+        fail(`browser_extension_completion_recovery_wake_failed:${JSON.stringify(completionResult)}`);
+      }
+      await waitFor(() => Boolean(fulfillment), 10_000);
+      if (fulfillment?.status !== 'fulfilled'
+        || fulfillment?.result?.browserExecution?.stopState !== 'order_submitted'
+        || fulfillment?.result?.browserExecution?.orderSubmitted !== true
+        || checkpoints.length !== 0) {
+        fail(`browser_extension_completion_recovery_not_terminal:${JSON.stringify({ fulfillment, checkpoints })}`);
+      }
+      const completionStorage = await worker.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['activeSessionId', 'activeRun'], resolve);
+      }));
+      if (completionStorage.activeSessionId || completionStorage.activeRun) {
+        fail(`browser_extension_completion_recovery_active_run_not_cleared:${JSON.stringify(completionStorage)}`);
+      }
+      recordPurchaseScenario('Completed plan reconciles a durable merchant confirmation without replaying browser work', {
+        stopState: fulfillment.result.browserExecution.stopState,
+        checkpoints: checkpoints.length
+      });
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner completed plan recovery smoke passed');
       return;
     }
     if (smokeMode === 'recovery') {

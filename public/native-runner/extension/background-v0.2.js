@@ -24,7 +24,7 @@ const MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 120_000;
 // Keep exactly one recovery wake for an already approved mission. Chrome can
 // suspend an MV3 worker between two valid checkpoints; this lets it resume the
 // signed next action without turning the runner into a background crawler.
-const RUNNER_CONTINUATION_DELAY_MS = 30_000;
+const RUNNER_CONTINUATION_DELAY_MS = 5_000;
 const PAYMENT_WAIT_RESUME_DELAY_MS = 5_000;
 const PAYMENT_WAIT_HEARTBEAT_MS = 60_000;
 const PAYMENT_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
@@ -35,6 +35,7 @@ const BROWSER_ACTION_TIMEOUT_MS = 45_000;
 const LOCAL_CHECKOUT_PROFILE_STORAGE_KEY = 'magicCityLocalCheckoutProfiles';
 const SAFE_PLAN_ACTION_TYPES = new Set(['navigate', 'inspect', 'search', 'select_candidate', 'click_intent', 'fill_checkout_profile', 'final_submit', 'pause']);
 const inFlightSessionIds = new Set();
+const RUNNER_WORKER_STARTED_AT = new Date().toISOString();
 
 function normalizeBaseUrl(value = '') {
   return String(value || DEFAULT_BASE_URL).trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
@@ -1526,8 +1527,9 @@ async function recoverAmazonCheckoutPrelude(tabId, plan = {}, outcome = {}) {
   };
 }
 
-async function missionCheckpoint(session, { label, detail, state, missionAction, targetUrl, browser = null, plan = null, planAction = null, planActionStatus = 'completed' }) {
+async function missionCheckpoint(session, { label, detail, state, missionAction, targetUrl, browser = null, plan = null, planAction = null, planActionStatus = 'completed', runnerTiming = null }) {
   const config = await getConfig();
+  const checkpointRequestedAt = new Date().toISOString();
   const proofOfPossession = await buildProofOfPossession(session, { action: missionAction, targetUrl });
   const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/checkpoint`, {
     method: 'POST',
@@ -1540,6 +1542,11 @@ async function missionCheckpoint(session, { label, detail, state, missionAction,
       missionAction: normalizeMissionAction(missionAction),
       targetUrl,
       ...(browser ? { browser } : {}),
+      runnerTiming: {
+        workerStartedAt: RUNNER_WORKER_STARTED_AT,
+        checkpointRequestedAt,
+        ...(runnerTiming && typeof runnerTiming === 'object' ? runnerTiming : {})
+      },
       ...(plan ? { planHash: plan.planHash } : {}),
       ...(planAction ? {
         planActionId: planAction.id,
@@ -1569,7 +1576,8 @@ async function checkpointRunnerStartup(session, plan, nextAction) {
     targetUrl: plan.startUrl,
     plan,
     planAction: nextAction,
-    planActionStatus: 'waiting'
+    planActionStatus: 'waiting',
+    runnerTiming: { phase: 'startup' }
   });
 }
 
@@ -2286,6 +2294,35 @@ async function reportAndStop(session, plan, report, note = '') {
   if (!preserveCheckoutContext) await clearLocalCheckoutProfile(session.id);
   await saveConfig({ lastExecution: { sessionId: session.id, status: report.stopState, at: new Date().toISOString() }, lastError: '' });
   return { sessionId: session.id, status: report.stopState };
+}
+
+async function reconcileCompletedPlan(session, plan, planState, checkoutProfile) {
+  const verifiedMilestones = Array.isArray(planState?.verifiedMilestones)
+    ? planState.verifiedMilestones
+    : [];
+  const tab = await activeMissionTab(session.id);
+  const browser = tab
+    ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
+    : null;
+  const orderSubmitted = verifiedMilestones.includes('order_submitted') || hasConfirmedMerchantOrder(browser);
+  return reportAndStop(session, plan, {
+    ...(browser || {}),
+    verifiedMilestones,
+    productOpened: verifiedMilestones.includes('candidate_selected'),
+    addToCartClicked: verifiedMilestones.includes('cart_confirmed'),
+    checkoutOpened: verifiedMilestones.includes('checkout_open'),
+    finalSubmitRequested: orderSubmitted || verifiedMilestones.includes('final_submit_requested'),
+    orderSubmitted,
+    ...(orderSubmitted ? {
+      merchantOrderConfirmation: {
+        confirmed: true,
+        observedAt: new Date().toISOString(),
+        reason: 'recovered_completed_plan'
+      }
+    } : {})
+  }, orderSubmitted
+    ? 'Recovered a completed signed plan from verified merchant confirmation. The order was not clicked again.'
+    : 'Recovered a completed signed plan without replaying browser actions.');
 }
 
 function mergeUnique(left = [], right = []) {
@@ -3050,7 +3087,7 @@ async function runSession(rawSession) {
     const completedActionIds = new Set(Array.isArray(planState.completedActionIds) ? planState.completedActionIds : []);
     const persistedMilestones = Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : [];
     const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
-    if (!nextAction) return { sessionId: session.id, status: 'plan_completed' };
+    if (!nextAction) return reconcileCompletedPlan(session, plan, planState, checkoutProfile);
     if (String(session.status || '').toLowerCase() !== 'executing') {
       session = await checkpointRunnerStartup(session, plan, nextAction);
     }
@@ -3574,7 +3611,16 @@ async function runSession(rawSession) {
         browser: report,
         plan,
         planAction: action,
-        planActionStatus: actionStatus
+        planActionStatus: actionStatus,
+        runnerTiming: {
+          actionId: action.id,
+          actionStartedAt: new Date(currentActionStartedAt).toISOString(),
+          actionCompletedAt: new Date().toISOString(),
+          actionDurationMs,
+          resumedFromActiveRun: resumingPersistedRun,
+          resumedPhase: resumingPersistedRun ? (persistedActiveRun?.phase || null) : null,
+          recoveredAction: Boolean(recoveringInterruptedAction || outcome.recoveredFromInterruption)
+        }
       });
       // The authenticated checkpoint immediately before the signed
       // final-submit action renews a short, one-action local lease. This

@@ -6099,7 +6099,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.28';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.29';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -14015,6 +14015,35 @@
     const executionCollapsedSessions = new Set();
     const executionDraftCache = new Map();
 
+    async function refreshZekoNetworkStatus() {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 2_000);
+      try {
+        const response = await fetch('/network/zeko/status', {
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        if (!response.ok) throw new Error(`status_${response.status}`);
+        zekoNetworkStatus = {
+          ...await response.json(),
+          statusCheck: 'fresh'
+        };
+      } catch {
+        zekoNetworkStatus = {
+          ...(zekoNetworkStatus || {}),
+          available: zekoNetworkStatus?.available ?? null,
+          statusCheck: 'failed',
+          checkedAt: new Date().toISOString()
+        };
+      } finally {
+        window.clearTimeout(timeout);
+      }
+      if (activeExecutionSessionId && executionSessionCache.has(activeExecutionSessionId)) {
+        renderExecutionDock();
+      }
+      return zekoNetworkStatus;
+    }
+
     function getActiveExecutionSessionIds() {
       return executionSessionOrder.filter((sessionId) => {
         const session = executionSessionCache.get(sessionId);
@@ -15383,12 +15412,15 @@
       const txHash = verification?.txHash || '';
       const chainAuthorization = session.finalSubmitChainAuthorization || null;
       const chainAuthorizationReady = chainAuthorization?.status === 'anchored';
+      const chainStatusCheckFailed = !chainAuthorization && zekoNetworkStatus?.statusCheck === 'failed';
       const chainAuthorizationBypassed = (chainAuthorization?.status === 'unavailable' && chainAuthorization?.bypassAllowed === true)
-        || (!chainAuthorization && zekoNetworkStatus?.available === false);
+        || (!chainAuthorization && !chainStatusCheckFailed && zekoNetworkStatus?.available === false);
       const chainAuthorizationLabel = chainAuthorizationReady
         ? 'Zeko authorization ready'
         : chainAuthorizationBypassed
           ? 'Zeko Sepolia unavailable - continuing'
+          : chainStatusCheckFailed
+            ? 'Zeko status check failed'
           : chainAuthorization?.status === 'preparing'
             ? 'Preparing Zeko authorization'
             : chainAuthorization?.status === 'failed'
@@ -15416,6 +15448,7 @@
           </div>
           ${!txHash ? `<div class="execution-inline-note">${offchainProof ? `Off-chain proof retained locally.${escapeExecutionValue(offchainTarget)}` : 'Zeko anchor after receipt.'}</div>` : ''}
           ${chainAuthorizationBypassed ? `<div class="execution-inline-note">Zeko Sepolia is unavailable. Checkout continues under the signed one-order authorization.</div>` : ''}
+          ${chainStatusCheckFailed ? `<div class="execution-inline-note">Zeko status could not be refreshed. The next execution-sheet open will check again.</div>` : ''}
         </div>
       `;
     }
@@ -18400,6 +18433,7 @@
 	        ? executionAgents.find((agent) => agent.pluginId === preferredExecutionAgentId || agent.ownerAgentId === preferredExecutionAgentId)
 	        : null) || selectedAgentFallback || executionAgents[0] || null;
 	      executionSessionCache.set(session.id, session);
+	      if (isBrowserSession && focus) void refreshZekoNetworkStatus();
 	      const protocolPollingActive = syncExecutionProtocolPollingSession(session);
 	      if (!executionSessionOrder.includes(session.id)) executionSessionOrder.push(session.id);
 	      if (focus || !activeExecutionSessionId || !executionSessionCache.has(activeExecutionSessionId)) {
@@ -21226,18 +21260,7 @@
       if (unlocked) writeVaultDraftToInputs(JSON.parse(unlocked));
     } catch {}
     syncRequesterFields();
-    fetch('/network/zeko/status', { cache: 'no-store' })
-      .then((response) => response.ok ? response.json() : null)
-      .then((status) => {
-        zekoNetworkStatus = status;
-        if (status?.available === false && activeExecutionSessionId) {
-          return renderExecutionSheet(activeExecutionSessionId, { focus: false });
-        }
-        return null;
-      })
-      .catch(() => {
-        zekoNetworkStatus = { available: false };
-      });
+    void refreshZekoNetworkStatus();
 	    bootstrapSessionIfNeeded(false)
       .then(() => {
         if ($('settingsWalletSection')?.open) return ensureWalletSectionData(true);

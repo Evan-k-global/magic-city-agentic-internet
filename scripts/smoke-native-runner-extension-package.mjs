@@ -90,6 +90,14 @@ if (!/const isCartMutation = action\.type === 'click_intent' && action\.intent =
 if (!/finalSubmitRequested: action\.type === 'final_submit' && Boolean\(recoveredState\?\.orderSubmitted/.test(packagedLegacyBackground)) {
   fail('a recovered merchant order confirmation must retain final-submit evidence');
 }
+if (!/async function reconcileCompletedPlan\(/.test(packagedLegacyBackground)
+  || !/if \(!nextAction\) return reconcileCompletedPlan\(session, plan, planState, checkoutProfile\);/.test(packagedLegacyBackground)
+  || !/Recovered a completed signed plan from verified merchant confirmation/.test(packagedLegacyBackground)) {
+  fail('an exhausted signed plan must reconcile durable merchant confirmation without replaying a browser action');
+}
+if (!/runnerTiming:\s*\{[\s\S]{0,300}workerStartedAt:[\s\S]{0,300}checkpointRequestedAt\b/.test(packagedLegacyBackground)) {
+  fail('runner checkpoints must include worker and checkpoint timing for recovery diagnostics');
+}
 const packagedExecutorPath = path.join(unpackedDir, 'executor.js');
 if (!fs.existsSync(packagedExecutorPath)) fail('package is missing executor.js');
 const packagedExecutor = fs.readFileSync(packagedExecutorPath, 'utf8');

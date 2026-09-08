@@ -696,7 +696,7 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.28'
+  '0.4.29'
 ).trim();
 const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
   1_000,
@@ -19632,6 +19632,9 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: 'checkpoint_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
       const browser = body.browser ? sanitizeMetadata(body.browser) : null;
+      const runnerTiming = body.runnerTiming && typeof body.runnerTiming === 'object'
+        ? sanitizeMetadata(body.runnerTiming)
+        : null;
       const missionAction = String(body.missionAction || body.action || '').trim()
         || (browser?.url || browser?.currentUrl ? 'read_public_page' : 'inspect');
       const extensionPlan = isChromeExtensionDeclarativeRunnerRequest(req)
@@ -19678,6 +19681,7 @@ const server = http.createServer(async (req, res) => {
         detail: checkpointDetail,
         state: checkpointState,
         browser,
+        runnerTiming,
         extensionPlan: extensionPlan?.binding || null,
         createdAt: checkpointCreatedAt
       });
@@ -19695,6 +19699,7 @@ const server = http.createServer(async (req, res) => {
         executionLive: browser
           ? {
               ...browser,
+              ...(runnerTiming ? { runnerTiming } : {}),
               ...checkpointLive
             }
           : checkpointState === 'permission_required'
