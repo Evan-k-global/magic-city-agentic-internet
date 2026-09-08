@@ -85,6 +85,16 @@ assert.doesNotMatch(
   /requestNativeRunnerMissionWake\(sessionId = '', attempt = 0\)|wake\.pending && attempt < 2/,
   'one browser run must never create duplicate page-to-extension wake requests'
 );
+assert.match(
+  html,
+  /waiting for Magic City Runner to claim this mission/,
+  'a dispatched browser mission must identify its pending claim state instead of presenting a generic queue'
+);
+assert.match(
+  html,
+  /extension_wake_rejected:[\s\S]*Runner did not start/,
+  'a nested extension wake or claim rejection must surface before the server watchdog expires the queued mission'
+);
 assert.match(html, /data-execution-continue-checkout/, 'checkout mismatches must offer an in-place saved-detail repair action');
 assert.match(html, /resumeCheckoutReconcile:\s*true/, 'checkout repair must create a narrow reconciliation continuation');
 assert.match(html, /function canPlaceReviewedOrderFromSession/, 'verified checkout reviews must expose a Magic City final-order approval path');

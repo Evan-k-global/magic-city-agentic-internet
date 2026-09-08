@@ -3046,11 +3046,19 @@ async function runSession(rawSession) {
       // accepts the claim, the gateway can recover this exact signed session.
       await saveActiveRun({ sessionId: rawSession.id, phase: 'claiming' });
     }
+    await saveConfig({
+      lastError: '',
+      lastExecution: { sessionId: rawSession.id, status: 'claiming', at: new Date().toISOString() }
+    });
     scheduleRunnerResume(8_000);
     session = await claimSession(rawSession);
     if (!resumingPersistedRun) {
       await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
     }
+    await saveConfig({
+      lastError: '',
+      lastExecution: { sessionId: session.id, status: 'claimed', at: new Date().toISOString() }
+    });
     // One bounded recovery opportunity protects an already-authorized run
     // from MV3 service-worker suspension without turning alarms into a
     // background mission discovery loop.
@@ -3820,11 +3828,12 @@ async function runSession(rawSession) {
       });
       return { sessionId: session.id, status: 'retrying_browser_step', retrying: true };
     }
+    const startupFailure = !plan && !currentAction;
     await saveConfig({
       lastError: message,
       lastExecution: {
         sessionId: session.id,
-        status: 'step_needs_review',
+        status: startupFailure ? 'claim_failed' : 'step_needs_review',
         actionId: currentAction?.id || null,
         durationMs: actionDurationMs,
         ...(Number.isFinite(error?.finalSubmitLeaseAgeMs) ? { finalSubmitLeaseAgeMs: error.finalSubmitLeaseAgeMs } : {}),
@@ -3904,16 +3913,69 @@ async function resumeActiveRun() {
 }
 
 async function pollAndExecute(requestedSessionId = '') {
-  const config = await getConfig();
-  if (!config.deviceToken) return { paired: false, executed: [] };
-  await registerExecutor(config);
-  const poll = await pollSessions();
-  const executed = [];
   const normalizedSessionId = String(requestedSessionId || '').trim();
+  const recordWake = async (status, message = '') => {
+    if (!normalizedSessionId) return;
+    await saveConfig({
+      lastError: message,
+      lastExecution: {
+        sessionId: normalizedSessionId,
+        status,
+        ...(message ? { message } : {}),
+        at: new Date().toISOString()
+      }
+    });
+  };
+  const config = await getConfig();
+  if (!config.deviceToken) {
+    const error = 'runner_not_paired';
+    await recordWake('wake_failed', error);
+    return {
+      paired: false,
+      requestedSessionId: normalizedSessionId || null,
+      requestedSessionFound: false,
+      executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status: 'wake_failed', error }] : []
+    };
+  }
+  await recordWake('wake_received');
+  let poll;
+  try {
+    await registerExecutor(config);
+    poll = await pollSessions();
+  } catch (error) {
+    const message = error?.message || String(error);
+    await recordWake('wake_failed', message);
+    return {
+      paired: true,
+      sessions: [],
+      actionableCount: 0,
+      requestedSessionId: normalizedSessionId || null,
+      requestedSessionFound: false,
+      executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status: 'wake_failed', error: message }] : []
+    };
+  }
+  const executed = [];
   const runnableSessions = poll.sessions.filter(isRunnableSession);
   const selectedSessions = normalizedSessionId
     ? runnableSessions.filter((session) => String(session?.id || '') === normalizedSessionId)
     : runnableSessions.slice(0, 1);
+  const requestedSession = normalizedSessionId
+    ? poll.sessions.find((session) => String(session?.id || '') === normalizedSessionId) || null
+    : null;
+  if (normalizedSessionId && !selectedSessions.length) {
+    const requestedStatus = String(requestedSession?.status || 'not_returned').toLowerCase();
+    const error = requestedSession
+      ? `requested_session_not_runnable:${requestedStatus}`
+      : 'requested_session_not_returned';
+    await recordWake('wake_rejected', error);
+    return {
+      ...poll,
+      requestedSessionId: normalizedSessionId,
+      requestedSessionFound: false,
+      requestedSessionStatus: requestedSession?.status || null,
+      executed: [{ sessionId: normalizedSessionId, status: 'wake_rejected', error }]
+    };
+  }
   // Keep the browser surface single-threaded. A second mission can reuse the
   // same tab after the first one reaches a boundary, but cannot compete for it.
   for (const session of selectedSessions.slice(0, 1)) {
@@ -3926,8 +3988,11 @@ async function pollAndExecute(requestedSessionId = '') {
         await saveConfig({ lastError: 'Magic City connection was interrupted. Retrying automatically.', lastExecution: { sessionId: session.id, status: 'retrying_control_plane', message, at: new Date().toISOString() } });
         executed.push({ sessionId: session.id, status: 'retrying_control_plane', retrying: true });
       } else {
-        await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'failed', message, at: new Date().toISOString() } });
-        executed.push({ sessionId: session.id, status: 'failed', error: message });
+        const status = /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
+          ? 'claim_failed'
+          : 'failed';
+        await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status, message, at: new Date().toISOString() } });
+        executed.push({ sessionId: session.id, status, error: message });
       }
     }
   }

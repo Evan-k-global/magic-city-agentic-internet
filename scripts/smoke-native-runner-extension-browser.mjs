@@ -765,6 +765,7 @@ async function main() {
     let delayLeaseExpiryCheckpoint = false;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
+    let rejectPrimaryClaimError = '';
     // The full browser matrix intentionally runs longer than the initial
     // ten-minute test capability. Keep the fixture's active capabilities
     // fresh; expiry itself is covered by the focused mocked-clock regression.
@@ -808,6 +809,7 @@ async function main() {
         const claimedSessionId = decodeURIComponent(matched?.[1] || '');
         claimedSessionIds.push(claimedSessionId);
         if (claimedSessionId === session?.id) {
+          if (rejectPrimaryClaimError) return json(res, 409, { error: rejectPrimaryClaimError });
           session = { ...session, status: 'claimed', claimedByPluginId: body.pluginId };
           if (deferPrimaryClaimResponse) {
             await new Promise((resolve) => { releasePrimaryClaimResponse = resolve; });
@@ -1072,6 +1074,38 @@ async function main() {
       await wakePage.close();
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner claim startup recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'claim-rejection') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      rejectPrimaryClaimError = 'extension_run_dispatch_required';
+      const wakeResult = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+      }), session.id);
+      if (!wakeResult?.ok
+        || wakeResult.result?.requestedSessionFound !== true
+        || wakeResult.result?.executed?.[0]?.status !== 'claim_failed'
+        || wakeResult.result?.executed?.[0]?.error !== rejectPrimaryClaimError) {
+        fail(`browser_extension_claim_rejection_not_reported:${JSON.stringify(wakeResult)}`);
+      }
+      const runnerState = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'activeRun'], resolve);
+      }));
+      if (runnerState.lastError !== rejectPrimaryClaimError
+        || runnerState.lastExecution?.status !== 'claim_failed'
+        || runnerState.activeSessionId
+        || runnerState.activeRun
+        || checkpoints.length !== 0
+        || session.status !== 'queued') {
+        fail(`browser_extension_claim_rejection_state_not_durable:${JSON.stringify({ runnerState, checkpoints, session })}`);
+      }
+      recordPurchaseScenario('Claim rejection is reported immediately without opening a browser action', {
+        status: runnerState.lastExecution.status,
+        error: runnerState.lastError
+      });
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner claim rejection smoke passed');
       return;
     }
     if (smokeMode === 'completion-recovery') {

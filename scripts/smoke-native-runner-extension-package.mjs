@@ -73,8 +73,14 @@ if (!/function normalizeActiveRunCandidate/.test(packagedLegacyBackground)
   || !/selectedCandidate:\s*progress\.selectedCandidate/.test(packagedLegacyBackground)) {
   fail('interrupted cart actions must retain a compact selected-product identity for replay protection');
 }
-if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,340}phase: 'claiming'[\s\S]{0,320}phase: 'claimed'/.test(packagedLegacyBackground)) {
+if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,600}phase: 'claiming'[\s\S]{0,1400}phase: 'claimed'/.test(packagedLegacyBackground)) {
   fail('the runner must persist recovery before its remote claim and retain it after claiming');
+}
+if (!/recordWake\('wake_received'\)/.test(packagedLegacyBackground)
+  || !/recordWake\('wake_rejected'/.test(packagedLegacyBackground)
+  || !/requested_session_not_runnable/.test(packagedLegacyBackground)
+  || !/'claim_failed'/.test(packagedLegacyBackground)) {
+  fail('the runner must persist and return an exact-session wake or claim failure instead of silently leaving it queued');
 }
 const startupCheckpointStart = packagedLegacyBackground.indexOf('async function checkpointRunnerStartup(');
 const startupCheckpointSection = startupCheckpointStart >= 0
