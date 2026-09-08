@@ -5,7 +5,9 @@ import pg from 'pg';
 import { buildPostgresPoolOptions } from './postgresConfig.js';
 
 const { Pool } = pg;
-const DATA_PATH = path.resolve(process.cwd(), 'data', 'zeko-submitter-state.json');
+const DATA_PATH = process.env.MAGIC_CITY_ZEKO_SUBMITTER_STATE_PATH
+  ? path.resolve(process.env.MAGIC_CITY_ZEKO_SUBMITTER_STATE_PATH)
+  : path.resolve(process.cwd(), 'data', 'zeko-submitter-state.json');
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const REQUIRE_PRODUCTION_PERSISTENCE = String(process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE || '').toLowerCase() === 'true';
 const SCHEMA_MANAGED_EXTERNALLY = String(process.env.MAGIC_CITY_RELAYER_SCHEMA_MANAGED || '').toLowerCase() === 'true';

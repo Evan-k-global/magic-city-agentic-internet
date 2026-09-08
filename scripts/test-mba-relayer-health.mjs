@@ -9,6 +9,10 @@ import { fileURLToPath } from 'node:url';
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const registryAddress = 'B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe';
 const bootstrapRoot = '28831116683740239225579803815979923155620183932789174387615564682385525427460';
+const localSubmitterStatePath = path.join(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-mba-relayer-idempotency-')),
+  'state.json'
+);
 
 const localLock = spawnSync(process.execPath, ['--input-type=module', '--eval', [
   "import { withMbaMissionRegistryMutationLock } from './src/mbaRegistryStore.js';",
@@ -28,7 +32,8 @@ const localLock = spawnSync(process.execPath, ['--input-type=module', '--eval', 
   env: {
     ...process.env,
     DATABASE_URL: '',
-    MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE: 'false'
+    MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE: 'false',
+    MAGIC_CITY_ZEKO_SUBMITTER_STATE_PATH: localSubmitterStatePath
   },
   encoding: 'utf8'
 });

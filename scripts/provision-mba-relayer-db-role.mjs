@@ -46,10 +46,10 @@ try {
 
   const existingRole = await client.query('select 1 from pg_roles where rolname = $1', [username]);
   if (!existingRole.rowCount) {
-    const roleLiteral = await client.query("select format('create role %I login password %L', $1, $2) as sql", [username, password]);
+    const roleLiteral = await client.query("select format('create role %I login password %L', $1::text, $2::text) as sql", [username, password]);
     await client.query(roleLiteral.rows[0].sql);
   }
-  const passwordLiteral = await client.query("select format('alter role %I login password %L', $1, $2) as sql", [username, password]);
+  const passwordLiteral = await client.query("select format('alter role %I login password %L', $1::text, $2::text) as sql", [username, password]);
   await client.query(passwordLiteral.rows[0].sql);
 
   const role = quoteIdentifier(username);

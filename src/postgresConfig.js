@@ -19,7 +19,10 @@ function isPrivateDatabaseHost(hostname = '') {
   return hostname === 'localhost'
     || hostname === '127.0.0.1'
     || hostname === '::1'
-    || hostname.endsWith('.internal');
+    || hostname.endsWith('.internal')
+    // Fly Managed Postgres supplies a private PgBouncer endpoint on this
+    // domain. Its connection is confined to Fly's private network.
+    || hostname.endsWith('.flympg.net');
 }
 
 export function buildPostgresPoolOptions({ connectionString = '', requirePersistence = false } = {}) {
