@@ -6039,8 +6039,7 @@
               <div class="helper-panel" id="helperAllAgentsPanel" role="tabpanel" aria-labelledby="helperAllTab">
                 <div class="helper-platform-section" id="helperPlatformAgentsSection" data-santaclawz-feature hidden>
                   <div class="helper-group-heading">
-                    <div class="helper-group-title">SantaClawz Agents</div>
-                    <a class="helper-add-agent-link" href="https://www.santaclawz.ai/" target="_blank" rel="noopener noreferrer">Add agent</a>
+                    <div class="helper-group-title">SantaClawz</div>
                   </div>
                   <div class="helper-platform-scroll">
                     <div class="helper-list" id="helperPlatformAgentsList"></div>
@@ -6083,6 +6082,18 @@
     const SANTACLAWZ_PAYMENT_PREFERENCE_KEY = 'magic_city_santaclawz_payment_preference_v1';
     const SANTACLAWZ_PRODUCT_MODE = String(window.__MAGIC_CITY_SANTACLAWZ_MODE__ || 'disabled').trim().toLowerCase();
     const SANTACLAWZ_LIVE = SANTACLAWZ_PRODUCT_MODE === 'live';
+    const SANTACLAWZ_APPROVED_AGENT_IDS = new Set(
+      (Array.isArray(window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__)
+        ? window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__
+        : [])
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    function isApprovedSantaClawzClientAgent(agent = {}) {
+      const pluginId = String(agent.pluginId || agent.agentId || '').trim().toLowerCase();
+      return Boolean(pluginId && SANTACLAWZ_APPROVED_AGENT_IDS.has(pluginId));
+    }
 
     function applySantaClawzProductMode() {
       if (SANTACLAWZ_LIVE) return;
@@ -12430,7 +12441,7 @@
     function normalizeAgentHubRowForHelper(row = {}) {
       if (!SANTACLAWZ_LIVE) return null;
       const pluginId = String(row.agentId || row.pluginId || '').trim();
-	      if (!pluginId || isHiddenAgentCompletionAgent({ pluginId })) return null;
+	      if (!pluginId || !isApprovedSantaClawzClientAgent({ pluginId }) || isHiddenAgentCompletionAgent({ pluginId })) return null;
 	      const isSantaClawz = pluginId.startsWith('santaclawz:')
 	        || /santaclawz/i.test(String(row.owner || row.metadata?.source || row.metadata?.providerId || ''));
 	      if (!isSantaClawz || /agent_job_pack|hosted_agent_job_pack/i.test(pluginId)) return null;
@@ -12559,7 +12570,7 @@
 	      const normalized = String(id || '').trim().toLowerCase();
 	      return helperPlatformAgents.find((agent) => getAgentCompletionId(agent) === normalized)
 	        || getHelperPlatformAgentsFromHub().find((agent) => getAgentCompletionId(agent) === normalized)
-	        || loadSavedAgents().find((agent) => getAgentCompletionId(agent) === normalized)
+	        || loadSavedAgents().find((agent) => getAgentCompletionId(agent) === normalized && isApprovedSantaClawzClientAgent(agent))
 	        || null;
 	    }
 
@@ -12622,7 +12633,7 @@
 	    function renderHelperSavedAgents() {
 	      const el = $('helperSavedAgentsList');
 	      if (!el) return;
-	      const saved = loadSavedAgents();
+	      const saved = loadSavedAgents().filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
 	      if (!saved.length) {
 	        el.innerHTML = '<div class="helper-saved-empty">No saved agents yet. Browse all agents and click ☆ to keep favorites here.</div>';
 	        return;
@@ -12644,6 +12655,7 @@
 	    async function launchSavedAgentFromHelper(id = '') {
 	      const agent = loadSavedAgents().find((entry) => getAgentCompletionId(entry) === String(id || '')) || null;
 	      if (!agent) return;
+	      if (isSantaClawzRecommendationAgent(agent) && !isApprovedSantaClawzClientAgent(agent)) return;
 	      const helperKey = getHelperKeyForAgent(agent);
 	      if (helperKey && buildHelperLaunchSpec(helperKey)) {
 	        await launchHelper(helperKey);
@@ -12673,7 +12685,7 @@
 
 	    async function launchPlatformAgentFromHelper(id = '') {
 	      const agent = getHelperPlatformAgentById(id);
-	      if (!agent) return;
+	      if (!agent || !isApprovedSantaClawzClientAgent(agent)) return;
 	      closeHelperPopup();
 	      try {
 	        const capability = getAgentCompletionCapability(agent) || 'agent-execution';
@@ -12702,7 +12714,7 @@
 	      syncHelperFavoriteButtons();
 	      renderHelperPlatformAgents();
 	      if (!el) return;
-	      const saved = loadSavedAgents();
+	      const saved = loadSavedAgents().filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
 	      if (!saved.length) {
 	        el.innerHTML = '<div class="muted">No saved agents yet. Open agent completion and click ☆ on agents you want to keep handy.</div>';
 	        return;
@@ -12738,8 +12750,9 @@
 		      const agents = Array.isArray(agentFollowUp.agents) ? agentFollowUp.agents : [];
 		      const incoming = (agents.length ? agents : agentFollowUp.agent ? [agentFollowUp.agent] : [])
 		        .filter(Boolean)
-		        .filter((agent) => !isHiddenAgentCompletionAgent(agent));
-	      const saved = loadSavedAgents();
+		        .filter((agent) => !isHiddenAgentCompletionAgent(agent))
+		        .filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
+	      const saved = loadSavedAgents().filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
 	      const merged = [];
 	      const seen = new Set();
 	      for (const agent of [...saved, ...incoming]) {
@@ -12925,7 +12938,7 @@
       if (!target?.el || !agentFollowUp || typeof agentFollowUp !== 'object') return null;
 	      target.el.querySelector('.agent-completion-card')?.remove();
 	      const santaClawzAgents = (Array.isArray(agentFollowUp.agents) ? agentFollowUp.agents : agentFollowUp.agent ? [agentFollowUp.agent] : [])
-	        .filter((agent) => isSantaClawzRecommendationAgent(agent) && !isHiddenAgentCompletionAgent(agent));
+	        .filter((agent) => isSantaClawzRecommendationAgent(agent) && isApprovedSantaClawzClientAgent(agent) && !isHiddenAgentCompletionAgent(agent));
 	      if (!santaClawzAgents.length) return null;
 	      const normalizedAgentFollowUp = {
 	        ...agentFollowUp,
@@ -12960,7 +12973,6 @@
 	            <span class="agent-completion-copy">${completionCopyHtml}</span>
 	            <span class="agent-completion-inline-links">
 	              ${matchCount > 1 ? `<button class="agent-completion-utility" type="button" data-agent-completion-toggle aria-expanded="false">${escapeHtml(browseMatchesLabel)}</button><span class="agent-completion-utility-divider" aria-hidden="true"></span>` : ''}
-	              <a class="agent-completion-utility-link" href="${escapeHtml(SANTACLAWZ_PROTOCOL_URL)}" target="_blank" rel="noopener noreferrer">Add your agent</a>
 	            </span>
 	          </div>
 	          <div class="agent-completion-primary-actions">
@@ -18237,7 +18249,7 @@
       const paymentState = directPayment?.paymentState || {};
       const proofNetworkBits = [
         `Magic City proof ${directPayment?.magicCityOrchestrationProofNetwork || handoff?.magicCityOrchestrationProofNetwork || 'zeko:zeko-mainnet'}`,
-        `SantaClawz proof ${directPayment?.santaclawzProofNetwork || handoff?.santaclawzProofNetwork || 'zeko:testnet'}`
+        `SantaClawz proof ${directPayment?.santaclawzProofNetwork || handoff?.santaclawzProofNetwork || 'network pending'}`
       ].join(' · ');
 	      const routeLabel = creditBacked
 	        ? (directPayment?.paymentPayloadDigestSha256 ? 'SantaClawz credit-backed x402' : 'SantaClawz credit-backed execution')
@@ -19940,22 +19952,9 @@
 			    async function submitIntentFromChat() {
 			      const prompt = $('chatPrompt').value.trim();
 			      if (!prompt) return;
-		      const addAgentIntent = isAddAgentIntent(prompt);
 
-		      prepareVisibleContextForUserPrompt();
-		      addMessage('user', prompt);
-		      if (addAgentIntent) {
-		        $('chatPrompt').value = '';
-		        $('chatPrompt').style.height = '24px';
-		        const addAgentTarget = addAssistantResult(
-		          'Register your agent with SantaClawz, then Magic City can surface it for matching work.',
-		          '',
-		          false
-		        );
-		        attachAddAgentCallToAction(addAgentTarget);
-		        saveChatHistory();
-		        return;
-		      }
+			      prepareVisibleContextForUserPrompt();
+			      addMessage('user', prompt);
 	      // Refresh identity in the background. A slow auth probe must not block
 	      // intent routing or make the chat submit action look unresponsive.
 	      void bootstrapSessionIfNeeded().catch(() => null);
@@ -20089,9 +20088,7 @@
 	            } else {
 	              attachAgentCompletionCard(pending, data.agentFollowUp, completionContext);
 	            }
-	            if (addAgentIntent) attachAddAgentCallToAction(pending);
-
-		            detailsText = buildResponseDetails({
+				            detailsText = buildResponseDetails({
               assistant: data.assistant,
               selectedAgent: data.selectedAgent,
               privacy: data.privacy,
@@ -20141,19 +20138,17 @@
             const details = existing.querySelector('div');
             if (details) details.textContent = detailsText;
           },
-	          error: async (data) => {
-	            stopAssistantPendingState(pending);
-	            pending.el.remove();
-	            const errorTarget = addAssistantResult(`Error: ${data.error || 'provider_execution_failed'}`);
-	            if (addAgentIntent) attachAddAgentCallToAction(errorTarget);
-	          }
-	        });
-	      } catch (e) {
-	        stopAssistantPendingState(pending);
-	        pending.el.remove();
-	        const errorTarget = addAssistantResult(`Error: ${e.message}`);
-	        if (addAgentIntent) attachAddAgentCallToAction(errorTarget);
-	      }
+		          error: async (data) => {
+		            stopAssistantPendingState(pending);
+		            pending.el.remove();
+		            addAssistantResult(`Error: ${data.error || 'provider_execution_failed'}`);
+		          }
+		        });
+		      } catch (e) {
+		        stopAssistantPendingState(pending);
+		        pending.el.remove();
+		        addAssistantResult(`Error: ${e.message}`);
+		      }
     }
 
     $('sendBtn').addEventListener('click', () => void submitIntentFromChat());

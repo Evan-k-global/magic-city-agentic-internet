@@ -244,6 +244,17 @@ import {
   refreshSantaClawzPreflightSnapshots,
   startSantaClawzAgentCacheRefresher
 } from './santaclawzAgentProvider.js';
+import {
+  SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID,
+  externalSantaClawzAgentId as normalizeExternalSantaClawzAgentId,
+  getSantaClawzApprovedExternalAgentIds,
+  isApprovedSantaClawzAgentId,
+  isSantaClawzAuditOfferMessage,
+  validateSantaClawzHireInputContract,
+  validateSantaClawzPaymentRequirement,
+  validateSantaClawzRuntimeContract
+} from './santaclawzIntegrationPolicy.js';
+import { validateSantaClawzCompletedReturn } from './santaclawzReturnPolicy.js';
 import { buildExecutionTaskPackage, buildExecutionResult, describeCompletionState } from './executionRuntime.js';
 import {
   BROWSER_EXTENSION_PLAN_PROTOCOL,
@@ -344,6 +355,8 @@ const MAGIC_CITY_SANTACLAWZ_MODE = ['disabled', 'read_only', 'live'].includes(St
   ? String(process.env.MAGIC_CITY_SANTACLAWZ_MODE || 'disabled').trim().toLowerCase()
   : 'disabled';
 const MAGIC_CITY_SANTACLAWZ_LIVE = MAGIC_CITY_SANTACLAWZ_MODE === 'live';
+const MAGIC_CITY_SANTACLAWZ_ENROLLMENT_ENABLED = MAGIC_CITY_SANTACLAWZ_LIVE
+  && String(process.env.MAGIC_CITY_SANTACLAWZ_ENROLLMENT_ENABLED || 'false').trim().toLowerCase() === 'true';
 const SANTACLAWZ_SAFE_START_DELAY_MS = Math.max(1000, Number(process.env.SANTACLAWZ_SAFE_START_DELAY_MS ?? 15000));
 const AUTO_START_SANTACLAWZ_CACHE_REFRESHER = MAGIC_CITY_SANTACLAWZ_LIVE && (
   process.env.AUTO_START_SANTACLAWZ_CACHE_REFRESHER === 'true'
@@ -386,7 +399,7 @@ const ZEKO_PROOF_WORKER_TIMEOUT_MS = Math.max(
   5_000,
   Number(process.env.ZEKO_PROOF_WORKER_TIMEOUT_MS || 10 * 60 * 1000) || 10 * 60 * 1000
 );
-const SANTACLAWZ_PROOF_NETWORK = String(process.env.SANTACLAWZ_PROOF_NETWORK || 'zeko:testnet').trim();
+const SANTACLAWZ_PROOF_NETWORK = String(process.env.SANTACLAWZ_PROOF_NETWORK || 'zeko:sepolia').trim();
 const FREE_DAILY_INTENT_LIMIT = Number(process.env.FREE_DAILY_INTENT_LIMIT ?? 0);
 const FREE_MAX_PROMPT_CHARS = Number(process.env.FREE_MAX_PROMPT_CHARS ?? 4000);
 const ROUTING_BATCH_WINDOW_MS = Number(process.env.ROUTING_BATCH_WINDOW_MS ?? 15000);
@@ -5409,8 +5422,7 @@ function streamStaticFile(req, res, filePath) {
 function isSantaClawzHelperBootstrapAgent(agent = {}) {
   if (!MAGIC_CITY_SANTACLAWZ_LIVE) return false;
   const agentId = String(agent.agentId || agent.pluginId || '').trim();
-  if (!agentId) return false;
-  if (/agent_job_pack|hosted_agent_job_pack/i.test(agentId)) return false;
+  if (!isApprovedSantaClawzAgentId(agentId)) return false;
   const santaClawzOwned = agentId.startsWith('santaclawz:')
     || /santaclawz/i.test(String(agent.owner || agent.metadata?.source || agent.metadata?.providerId || ''));
   if (!santaClawzOwned) return false;
@@ -5455,7 +5467,7 @@ function formatAgentHubBootstrapAgent(agent = {}) {
 async function buildIndexHtmlWithAgentHubBootstrap(filePath) {
   const html = fs.readFileSync(filePath, 'utf8');
   const scripts = [
-    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};</script>`
+    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__=${escapeScriptJson(JSON.stringify(getSantaClawzApprovedExternalAgentIds().map((agentId) => `santaclawz:${agentId}`)))};</script>`
   ];
   try {
     if (!MAGIC_CITY_SANTACLAWZ_LIVE) return html.includes('</head>')
@@ -9759,6 +9771,12 @@ function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary =
   )) {
     assertSantaClawzLiveIntegration();
   }
+  if (
+    (agentId.startsWith('santaclawz:') || String(selectedAgentSnapshot?.metadata?.source || '').toLowerCase() === 'santaclawz')
+    && !isApprovedSantaClawzAgentId(agentId || selectedAgentSnapshot?.agentId || '')
+  ) {
+    throw createHttpError('santaclawz_agent_not_approved', 403);
+  }
   const agentName = String(selectedAgentSnapshot?.metadata?.label || selectedAgentSnapshot?.agentName || agentId || 'Selected agent').trim();
   const fields = inferAgentExecutionFields({ prompt: effectivePrompt, selectedAgent: selectedAgentSnapshot });
   const inputRequirements = fields.inputRequirements || selectedAgentInputRequirements(selectedAgentSnapshot);
@@ -10409,6 +10427,7 @@ function rankedExecutionAgentsForQuery(executionAgents = [], { query = '', kind 
 async function pickPreferredExecutionAgent(session, requestedAgentId = '') {
   const requested = String(requestedAgentId || session?.preferredExecutionAgentId || '').trim();
   if (!MAGIC_CITY_SANTACLAWZ_LIVE && requested.startsWith('santaclawz:')) return null;
+  if (requested.startsWith('santaclawz:') && !isApprovedSantaClawzAgentId(requested)) return null;
   if (requested.startsWith('santaclawz:')) {
     const exactSantaClawzAgent = await getSantaClawzExecutionAgentByMagicId(requested, {
       includeEndpoint: true,
@@ -10846,7 +10865,13 @@ function filterAndSortAgentHubViews(agentViews, { query = '', laneFilter = '' } 
 }
 
 async function listAgentHubViews({ query = '', laneFilter = '' } = {}) {
-  const localAgentViews = listAgents().map(buildAgentHubView);
+  const localAgentViews = listAgents()
+    .map(buildAgentHubView)
+    .filter((agent) => {
+      const isSantaClawz = String(agent?.agentId || '').startsWith('santaclawz:')
+        || String(agent?.metadata?.source || '').toLowerCase() === 'santaclawz';
+      return !isSantaClawz || isApprovedSantaClawzAgentId(agent?.agentId || '');
+    });
   const santaClawzResult = MAGIC_CITY_SANTACLAWZ_LIVE
     ? await listSantaClawzAgentRows({ query, laneFilter, limit: 120 })
     : { agents: [], source: getSantaClawzSourceStatus({ productMode: MAGIC_CITY_SANTACLAWZ_MODE, operatorDisabled: true }) };
@@ -12691,7 +12716,9 @@ async function forwardSantaClawzAgentSavedSignal({ agentId, savedByType = 'human
   const normalizedAgentId = String(agentId || '').trim();
   if (!normalizedAgentId.toLowerCase().startsWith('santaclawz:')) return null;
   const externalAgentId = externalSantaClawzAgentId(normalizedAgentId);
-  if (!externalAgentId) return null;
+  if (!isApprovedSantaClawzAgentId(externalAgentId)) {
+    return { skipped: true, reason: 'santaclawz_agent_not_approved' };
+  }
   try {
     const result = await requestSantaClawzJson(
       `/api/integrations/${encodeURIComponent(MAGIC_CITY_SAVED_AGENT_PLATFORM_ID)}/agents/${encodeURIComponent(externalAgentId)}/saved`,
@@ -13062,105 +13089,34 @@ async function buildCodeAuditChatIntake(intentInput = {}) {
 
 async function buildSantaClawzAgentFollowUp(intentInput = {}) {
   if (!MAGIC_CITY_SANTACLAWZ_LIVE) return null;
-  const matchText = collectAgentMatchText(intentInput);
-  const directMatchText = [
-    intentInput.metadata?.prompt,
-    intentInput.prompt
-  ].filter(Boolean).join(' ') || matchText;
-  const codeAuditIntake = await buildCodeAuditChatIntake(intentInput);
-  const codeAuditRequest = Boolean(codeAuditIntake) || isCodeAuditAgentChatRequest(directMatchText);
-  const magicInternetRequest = isMagicInternetPurchaseRequest(matchText);
-  const kind = codeAuditRequest ? 'developer' : executionKindForCapability(intentInput.capability);
+  const currentUserMessage = String(intentInput.metadata?.prompt || intentInput.prompt || '');
+  if (!isSantaClawzAuditOfferMessage(currentUserMessage)) return null;
+  if (isMagicInternetPurchaseRequest(currentUserMessage)) return null;
   const source = getSantaClawzSourceStatus();
-  const basePayload = {
-    prompt: 'Hire an agent for deeper insight and task execution.',
-    addAgentUrl: SANTACLAWZ_AGENT_ACTIVATE_URL,
-    source,
-    ...(codeAuditIntake ? { chatIntake: codeAuditIntake } : {})
-  };
-  const queryTokens = tokenizeAgentMatchText(matchText);
-  const directQueryTokens = tokenizeAgentMatchText(directMatchText);
-  if (magicInternetRequest) {
-    return {
-      ...basePayload,
-      available: false,
-      agents: [],
-      reason: 'handled_by_magic_internet_agent'
-    };
-  }
-  const generalResult = await listExecutionAgentsForSession(
-    { handoffData: { kind: null } },
-    { includeEndpoint: false }
+  const executionAgent = await getSantaClawzExecutionAgentByMagicId(
+    `santaclawz:${SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID}`,
+    { includeEndpoint: false, force: true }
   );
-  const generalRankedAgents = rankSantaClawzFollowUpEntries(generalResult.executionAgents, {
-    queryTokens: directQueryTokens,
-    matchText: directMatchText
-  });
-  if (generalRankedAgents.length > 0) {
-    const agents = generalRankedAgents
-      .slice(0, 5)
-      .map((entry) => formatSantaClawzFollowUpAgent(entry.agent, { queryMatchScore: entry.queryMatchScore }));
+  const agent = executionAgent ? formatSantaClawzFollowUpAgent(executionAgent, { queryMatchScore: 100 }) : null;
+  if (!agent) {
     return {
-      ...basePayload,
-      available: true,
-      kind: kind || null,
-      exploreUrl: generalResult.sources?.santaclawz?.exploreUrl || source.exploreUrl,
-      agent: agents[0] || null,
-      agents,
-      source: generalResult.sources?.santaclawz || source,
-      reason: 'query_matched_santaclawz_directory'
-    };
-  }
-  if (!kind) {
-    return {
-      ...basePayload,
+      prompt: 'Code Audit Agent is temporarily unavailable.',
       available: false,
-      exploreUrl: generalResult.sources?.santaclawz?.exploreUrl || source.exploreUrl,
+      kind: 'developer',
       agent: null,
       agents: [],
-      source: generalResult.sources?.santaclawz || source,
-      reason: 'no_workflow_lane_or_strong_agent_match'
-    };
-  }
-  const result = await listSantaClawzExecutionAgentsForSession(
-    { handoffData: { kind } },
-    { includeEndpoint: false, limit: 50 }
-  );
-  const rankedAgents = rankSantaClawzFollowUpEntries(result.executionAgents, {
-    queryTokens,
-    matchText,
-    codeAuditOnly: codeAuditRequest
-  });
-  const agents = rankedAgents
-    .slice(0, 5)
-    .map((entry) => formatSantaClawzFollowUpAgent(entry.agent, { queryMatchScore: entry.queryMatchScore }));
-  const agent = agents[0] || null;
-  if (!agent) {
-    const unavailableCodeAuditIntake = codeAuditRequest && codeAuditIntake?.repositoryAccess?.status === 'public'
-      ? {
-          ...codeAuditIntake,
-          message: `Verified public GitHub repository for Code Audit Agent: ${codeAuditIntake.githubUrl}\n\nThe dedicated Code Audit Agent is temporarily unavailable. Magic City will not substitute another paid agent or reserve credits; Hire will return when the dedicated runtime passes its delivery checks.`
-        }
-      : codeAuditIntake;
-    return {
-      ...basePayload,
-      ...(unavailableCodeAuditIntake ? { chatIntake: unavailableCodeAuditIntake } : {}),
-      available: false,
-      kind,
-      exploreUrl: result.source?.exploreUrl || getSantaClawzSourceStatus().exploreUrl,
-      agents: [],
-      source: result.source,
-      reason: codeAuditRequest ? 'dedicated_code_audit_agent_unavailable' : 'no_live_hireable_agent'
+      source,
+      reason: 'dedicated_code_audit_agent_unavailable'
     };
   }
   return {
-    ...basePayload,
+    prompt: 'Hire Code Audit Agent for this task.',
     available: true,
-    kind,
-    prompt: 'Hire an agent for deeper insight and task execution.',
+    kind: 'developer',
     agent,
-    agents,
-    source: result.source
+    agents: [agent],
+    source,
+    reason: 'literal_audit_keyword'
   };
 }
 
@@ -13261,8 +13217,18 @@ function randomNonceHex(bytes = 32) {
 }
 
 function externalSantaClawzAgentId(agentId = '') {
-  const normalized = String(agentId || '').trim();
-  return normalized.startsWith('santaclawz:') ? normalized.slice('santaclawz:'.length) : normalized;
+  return normalizeExternalSantaClawzAgentId(agentId);
+}
+
+function assertApprovedSantaClawzAgent(agentId = '') {
+  const externalId = externalSantaClawzAgentId(agentId);
+  if (!isApprovedSantaClawzAgentId(externalId)) {
+    throw createHttpError('santaclawz_agent_not_approved', 403, {
+      agentId: externalId || null,
+      approvedAgentIds: getSantaClawzApprovedExternalAgentIds()
+    });
+  }
+  return externalId;
 }
 
 function findSantaClawzX402PaymentRequirement(payload) {
@@ -13612,6 +13578,36 @@ function assertDirectX402PayloadMatchesLinkedWallet({ authUser, paymentPayload }
   }
 }
 
+function sameEvmAddress(left = '', right = '') {
+  const normalizedLeft = normalizeEvmAddress(left);
+  const normalizedRight = normalizeEvmAddress(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function assertDirectX402PayloadMatchesPreparedContract({ directPayment, paymentPayload }) {
+  const requirementValidation = validateSantaClawzPaymentRequirement(
+    directPayment?.paymentRequirement,
+    { ok: true, expected: directPayment?.runtimeContract?.expected }
+  );
+  if (!requirementValidation.ok) {
+    throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+  }
+  const expected = requirementValidation.summary;
+  const sellerAuthorization = paymentPayload?.authorization?.typedData?.message || paymentPayload?.payload?.authorization || {};
+  const feeAuthorization = paymentPayload?.feeAuthorization?.typedData?.message || paymentPayload?.payload?.feeAuthorization?.authorization || {};
+  if (
+    String(paymentPayload.requestId || '') !== String(directPayment.paymentRequirement?.requestId || '')
+    || String(paymentPayload.amount || '') !== expected.grossAtomic
+    || !sameEvmAddress(paymentPayload.payTo, expected.sellerPayTo)
+    || !sameEvmAddress(sellerAuthorization.to, expected.sellerPayTo)
+    || String(sellerAuthorization.value || '') !== expected.sellerAtomic
+    || !sameEvmAddress(feeAuthorization.to, expected.protocolFeePayTo)
+    || String(feeAuthorization.value || '') !== expected.protocolFeeAtomic
+  ) {
+    throw createHttpError('santaclawz_signed_payment_contract_mismatch', 409);
+  }
+}
+
 function buildSantaClawzTaskPromptForSession(session) {
   const taskPackage = session?.taskPackage || buildExecutionTaskPackage(session);
   const compact = {
@@ -13640,6 +13636,43 @@ function buildSantaClawzRequesterContact(authUser, req) {
   if (authUser?.email) return `magic-city:${authUser.email}`;
   const ip = String(req.socket?.remoteAddress || 'anonymous').replace(/[^a-zA-Z0-9:._-]/g, '').slice(0, 80);
   return `magic-city:${ip || 'anonymous'}`;
+}
+
+function buildSantaClawzJobPrivacyForSession(session = {}) {
+  const requested = String(
+    session?.finalSelections?.jobPrivacy
+    || session?.selections?.jobPrivacy
+    || session?.intent?.privacyMode
+    || session?.privacy?.mode
+    || 'private'
+  ).trim().toLowerCase();
+  const visibility = requested === 'plain' ? 'public' : requested;
+  if (!['public', 'private'].includes(visibility)) {
+    throw createHttpError('santaclawz_privacy_mode_unsupported', 409, {
+      requestedPrivacyMode: visibility || null
+    });
+  }
+  return {
+    visibility
+  };
+}
+
+function buildSantaClawzHireBody({ taskPrompt, requesterContact, jobContext, jobPrivacy }) {
+  return sanitizeMetadata({
+    taskPrompt,
+    requesterContact,
+    jobContext,
+    jobPrivacy
+  });
+}
+
+function requireImmutableSantaClawzHireBody(directPayment = {}) {
+  const hireBody = directPayment?.hireBody;
+  const expectedDigest = String(directPayment?.hireBodyDigestSha256 || '').trim();
+  if (!hireBody || typeof hireBody !== 'object' || !expectedDigest || jsonDigestSha256(hireBody) !== expectedDigest) {
+    throw createHttpError('santaclawz_immutable_hire_body_missing', 409);
+  }
+  return hireBody;
 }
 
 function normalizePublicJobUrl(value = '') {
@@ -13901,7 +13934,7 @@ function getSantaClawzConciergeApiKey() {
 function isSantaClawzConciergeEnabled() {
   if (!MAGIC_CITY_SANTACLAWZ_LIVE) return false;
   const value = process.env.SANTACLAWZ_CONCIERGE_ENABLED;
-  if (value == null || value === '') return true;
+  if (value == null || value === '') return false;
   return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
 }
 
@@ -13920,12 +13953,20 @@ function isSantaClawzConciergeConfigured() {
 function buildSantaClawzEndpointUrl(endpoint, source = getSantaClawzSourceStatus()) {
   const raw = String(endpoint || '').trim();
   if (!raw) throw createHttpError('santaclawz_endpoint_required', 500);
+  const apiOrigin = new URL(source.apiBase).origin;
+  let resolved;
   try {
-    return new URL(raw).toString();
+    resolved = new URL(raw);
   } catch {
     const pathname = raw.startsWith('/') ? raw : `/${raw}`;
-    return new URL(pathname, `${source.apiBase}/`).toString();
+    resolved = new URL(pathname, `${source.apiBase}/`);
   }
+  if (!['https:', 'http:'].includes(resolved.protocol) || resolved.origin !== apiOrigin) {
+    throw createHttpError('santaclawz_endpoint_origin_not_approved', 502, {
+      host: resolved.host || null
+    });
+  }
+  return resolved.toString();
 }
 
 async function requestSantaClawzEndpointJson(endpoint, {
@@ -13934,7 +13975,7 @@ async function requestSantaClawzEndpointJson(endpoint, {
   timeoutMs = 10000,
   acceptedStatuses = [],
   headers = {},
-  includeApiKey = true,
+  includeApiKey = false,
   userAgent = 'magic-city-direct-x402/1.0'
 } = {}) {
   const source = getSantaClawzSourceStatus();
@@ -13952,6 +13993,7 @@ async function requestSantaClawzEndpointJson(endpoint, {
     }));
     const response = await fetch(url, {
       method,
+      redirect: 'error',
       signal: controller.signal,
       headers: {
         accept: 'application/json',
@@ -14011,6 +14053,7 @@ async function requestSantaClawzConciergeJson(pathname, options = {}) {
   if (!apiKey) throw createHttpError('santaclawz_concierge_not_configured', 503);
   return requestSantaClawzEndpointJson(pathname, {
     ...options,
+    includeApiKey: false,
     timeoutMs: options.timeoutMs || 30000,
     headers: {
       ...(options.headers || {}),
@@ -14018,6 +14061,35 @@ async function requestSantaClawzConciergeJson(pathname, options = {}) {
     },
     userAgent: 'magic-city-concierge/1.0'
   });
+}
+
+async function fetchSantaClawzRuntimeContract(agentId) {
+  const externalId = assertApprovedSantaClawzAgent(agentId);
+  const [readyResponse, planResponse] = await Promise.all([
+    requestSantaClawzJson(`/api/agents/${encodeURIComponent(externalId)}/ready`, {
+      timeoutMs: 8000,
+      includeApiKey: false
+    }),
+    requestSantaClawzJson(`/api/agents/${encodeURIComponent(externalId)}/x402-plan`, {
+      timeoutMs: 8000,
+      includeApiKey: false
+    })
+  ]);
+  const validation = validateSantaClawzRuntimeContract({
+    agentId: externalId,
+    ready: readyResponse.payload,
+    x402Plan: planResponse.payload
+  });
+  if (!validation.ok) {
+    throw createHttpError(validation.reason || 'santaclawz_runtime_contract_invalid', 409, {
+      detail: validation.detail || validation.reason || 'The approved SantaClawz runtime contract is not currently safe to use.'
+    });
+  }
+  return {
+    ...validation,
+    readyDigestSha256: jsonDigestSha256(readyResponse.payload),
+    planDigestSha256: jsonDigestSha256(planResponse.payload)
+  };
 }
 
 function redactSantaClawzConciergePayload(payload) {
@@ -14224,16 +14296,22 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
   if (isSantaClawzConciergeConfigured()) {
     return prepareSantaClawzConciergeX402ForSession({ req, authUser, session, requestedAgentId, payerWalletAddress });
   }
-  const agentId = externalSantaClawzAgentId(
+  const agentId = assertApprovedSantaClawzAgent(
     requestedAgentId ||
     session?.externalExecutionHandoff?.agentId ||
     session?.preferredExecutionAgentId ||
     ''
   );
-  if (!agentId) throw createHttpError('santaclawz_agent_required', 409);
+  const runtimeContract = await fetchSantaClawzRuntimeContract(agentId);
   const taskPrompt = buildSantaClawzTaskPromptForSession(session);
   const requesterContact = buildSantaClawzRequesterContact(authUser, req);
   const jobContext = await assertSantaClawzJobContextReadyForSession(session, agentId);
+  const jobPrivacy = buildSantaClawzJobPrivacyForSession(session);
+  const hireBody = buildSantaClawzHireBody({ taskPrompt, requesterContact, jobContext, jobPrivacy });
+  const inputValidation = validateSantaClawzHireInputContract(hireBody, runtimeContract);
+  if (!inputValidation.ok) {
+    throw createHttpError(inputValidation.reason || 'santaclawz_hire_input_invalid', 409);
+  }
   const missionBoundAuth = session?.missionBoundAuth?.audience === 'magic_city_santaclawz_hire_orchestrator'
     ? session.missionBoundAuth
     : buildMissionCapability({
@@ -14252,16 +14330,19 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
       });
   const preflight = await requestSantaClawzJson(`/api/agents/${encodeURIComponent(agentId)}/hire`, {
     method: 'POST',
-    body: {
-      taskPrompt,
-      requesterContact,
-      jobContext
-    },
+    body: hireBody,
     acceptedStatuses: [400, 402, 409]
   });
   const paymentRequirement = findSantaClawzX402PaymentRequirement(preflight.payload);
-  const baseAccept = paymentRequirement ? findBaseFeeSplitAccept(paymentRequirement) : null;
-  if (!paymentRequirement || !baseAccept) {
+  const requirementValidation = paymentRequirement
+    ? validateSantaClawzPaymentRequirement(paymentRequirement, runtimeContract)
+    : null;
+  if (paymentRequirement && !requirementValidation?.ok) {
+    throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409, {
+      detail: requirementValidation.detail || 'The live x402 requirement no longer matches the approved Base USDC contract.'
+    });
+  }
+  if (!paymentRequirement) {
     const quoteRequired =
       preflight.payload?.requestType === 'quote_intake' ||
       preflight.payload?.pricingMode === 'quote-required' ||
@@ -14272,7 +14353,17 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
       agentId,
       taskPrompt,
       jobContext,
+      jobPrivacy,
       requesterContact,
+      hireBody,
+      hireBodyDigestSha256: jsonDigestSha256(hireBody),
+      runtimeContract: sanitizeMetadata({
+        checkedAt: runtimeContract.checkedAt,
+        staleAt: runtimeContract.staleAt,
+        readyDigestSha256: runtimeContract.readyDigestSha256,
+        planDigestSha256: runtimeContract.planDigestSha256,
+        expected: runtimeContract.expected
+      }),
       preparedAt: new Date().toISOString(),
       source: preflight.source,
       preflightStatus: preflight.status,
@@ -14300,7 +14391,17 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
     agentId,
     taskPrompt,
     jobContext,
+    jobPrivacy,
     requesterContact,
+    hireBody,
+    hireBodyDigestSha256: jsonDigestSha256(hireBody),
+    runtimeContract: sanitizeMetadata({
+      checkedAt: runtimeContract.checkedAt,
+      staleAt: runtimeContract.staleAt,
+      readyDigestSha256: runtimeContract.readyDigestSha256,
+      planDigestSha256: runtimeContract.planDigestSha256,
+      expected: runtimeContract.expected
+    }),
     paymentRequirement,
     paymentRequirementDigestSha256: jsonDigestSha256(paymentRequirement),
     paymentRequirementSummary: describeSantaClawzPaymentRequirement(paymentRequirement),
@@ -14387,6 +14488,7 @@ function collectSantaClawzDeliveryArtifactsFromValue(value, artifacts = [], seen
   const deliveryKeys = [
     'artifacts',
     'resultArtifacts',
+    'result_artifacts',
     'deliverables',
     'outputs',
     'files',
@@ -14394,11 +14496,19 @@ function collectSantaClawzDeliveryArtifactsFromValue(value, artifacts = [], seen
     'links',
     'delivery',
     'resultPackage',
+    'result_package',
     'result',
     'output',
     'agentOutput',
+    'agent_output',
     'executionState',
-    'paymentState'
+    'execution_state',
+    'paymentState',
+    'payment_state',
+    'protocolReturn',
+    'protocol_return',
+    'verified_output',
+    'buyer_visible_outputs'
   ];
   for (const key of deliveryKeys) {
     if (value[key] != null) collectSantaClawzDeliveryArtifactsFromValue(value[key], artifacts, seen, depth + 1);
@@ -14414,7 +14524,11 @@ function extractSantaClawzDelivery(payload = {}) {
     payload?.verifiedOutput?.buyerVisibleOutputs,
     payload?.protocolReturn?.verifiedOutput?.buyerVisibleOutputs,
     payload?.paidExecution?.protocolReturn?.verifiedOutput?.buyerVisibleOutputs,
-    payload?.executionState?.delivery?.protocolVerifiedOutput?.buyerVisibleOutputs
+    payload?.executionState?.delivery?.protocolVerifiedOutput?.buyerVisibleOutputs,
+    payload?.verified_output?.buyer_visible_outputs,
+    payload?.protocol_return?.verified_output?.buyer_visible_outputs,
+    payload?.paid_execution?.protocol_return?.verified_output?.buyer_visible_outputs,
+    payload?.execution_state?.protocol_return?.verified_output?.buyer_visible_outputs
   ].find((entry) => Array.isArray(entry)) || [];
   const inlineOutputs = buyerVisibleOutputs
     .map((entry) => {
@@ -14596,6 +14710,12 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
 
   setImmediate(async () => {
     try {
+      const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
+      const runtimeContract = await fetchSantaClawzRuntimeContract(approvedAgentId);
+      const requirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, runtimeContract);
+      if (!requirementValidation.ok) {
+        throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+      }
       const paymentPayload = await buildServerSignedSantaClawzX402PaymentPayload({
         paymentRequirement,
         sessionId: paymentRequirement.sessionId || directPayment.paymentRequirementSummary?.sessionId || session.id,
@@ -14611,9 +14731,7 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
       const submit = await requestSantaClawzEndpointJson(hireEndpoint, {
         method: 'POST',
         body: {
-          taskPrompt: directPayment.taskPrompt,
-          requesterContact: directPayment.requesterContact,
-          jobContext: directPayment.jobContext || buildSantaClawzJobContextForSession(session),
+          ...requireImmutableSantaClawzHireBody(directPayment),
           paymentPayload
         },
         timeoutMs: 90_000,
@@ -14662,7 +14780,7 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
   return true;
 }
 
-function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
+function summarizeSantaClawzPaidExecution(responseOk, payload = {}, { expectedRequestId = '' } = {}) {
   const operational = [
     payload?.operationalStatus,
     payload?.hireRequest?.operationalStatus,
@@ -14696,12 +14814,17 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
   ].find((entry) => entry && typeof entry === 'object') || {};
   const agentStatus = payload?.agentStatus && typeof payload.agentStatus === 'object' ? payload.agentStatus : {};
   const retryResume = [payload?.retryResume, payload?.paymentState?.retryResume].find((entry) => entry && typeof entry === 'object') || {};
-  const returnRejection = [
+  const upstreamReturnRejection = [
     payload?.returnRejection,
     lifecycle?.returnRejection,
     payload?.executionState?.returnRejection,
     payload?.executionState?.lifecycle?.returnRejection
   ].find((entry) => entry && typeof entry === 'object') || null;
+  const returnValidation = validateSantaClawzCompletedReturn(payload, { expectedRequestId });
+  const malformedCurrentReturn = returnValidation.reason !== 'santaclawz_return_missing' && !returnValidation.ok;
+  const returnRejection = upstreamReturnRejection || (malformedCurrentReturn
+    ? { code: returnValidation.reason, message: 'SantaClawz returned a result package that did not satisfy the current verified return contract.' }
+    : null);
   const agentExecutionStatus = operational.agentExecutionStatus || payload.agentExecutionStatus || payload.executionState?.status || payload.status || (delivery.artifacts.length ? 'completed' : 'not_confirmed');
   const returnRejected = Boolean(returnRejection)
     || [paymentStatus, relayDeliveryStatus, agentExecutionStatus, payload?.paymentState?.paymentStatus]
@@ -14730,13 +14853,15 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     'partially_settled'
   ].includes(String(paymentStatus));
   const paymentAccepted = paymentAuthorized && !terminalFailure;
+  const protocolState = String(protocolLifecycle.protocolState || payload.protocolState || payload.executionState?.protocolState || '').toUpperCase();
+  const paymentFinality = String(protocolLifecycle.paymentFinality || payload.paymentFinality || payload.executionState?.paymentFinality || '').toLowerCase();
   const settlementSettled = [
     'settled',
     'already_settled',
-    'seller_settled',
-    'protocol_fee_settled',
-    'partially_settled'
-  ].includes(String(settlementStatus)) || ['settled', 'paid', 'already_settled', 'execution_completed'].includes(String(paymentStatus));
+    'fully_settled'
+  ].includes(String(settlementStatus).toLowerCase())
+    || paymentFinality === 'settled'
+    || protocolState === 'DELIVERED_SETTLED';
   const relayDelivered = [
     'forwarded',
     'recorded',
@@ -14758,6 +14883,7 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     && !terminalFailure
     && paymentAccepted
     && settlementSettled
+    && returnValidation.ok
     && (relayDelivered || deliveryAvailable || lifecycleCompleted)
     && (agentCompleted || deliveryAvailable || lifecycleCompleted);
   const protocolAllowsFreshPayment = protocolLifecycle?.buyerAnswer?.canCreateFreshPayment === true
@@ -14801,12 +14927,21 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     settlementStatus,
     relayDeliveryStatus,
     agentExecutionStatus,
-    protocolState: protocolLifecycle.protocolState || payload.protocolState || payload.executionState?.protocolState || null,
-    paymentFinality: protocolLifecycle.paymentFinality || payload.paymentFinality || payload.executionState?.paymentFinality || null,
+    protocolState: protocolState || null,
+    paymentFinality: paymentFinality || null,
     terminal,
     terminalFailure,
     returnRejected,
     returnRejection,
+    returnValidation: returnValidation.ok
+      ? {
+          ok: true,
+          schemaVersion: 'santaclawz-return/1.0',
+          requestId: returnValidation.requestId,
+          packageHash: returnValidation.packageHash,
+          deliverableCount: returnValidation.deliverables.length
+        }
+      : { ok: false, reason: returnValidation.reason },
     incidentId,
     failureReason,
     protocolAllowsFreshPayment,
@@ -15044,7 +15179,9 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
       sessionForStatus.id,
       extractSantaClawzDelivery(combinedStatusPayload)
     );
-    const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload);
+    const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload, {
+      expectedRequestId: sessionForStatus.santaclawzDirectPayment?.submittedRequestId || ''
+    });
     const runtimeHealth = recordSantaClawzRuntimeOutcome(sessionForStatus, summary);
     if (runtimeHealth?.status === 'quarantined') {
       summary.runtimeIncidentObserved = true;
@@ -16528,7 +16665,7 @@ const server = http.createServer(async (req, res) => {
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
       await sweepConnectorSessionExecutionWatchdog({ sessionId });
       let latestSession = getConnectorSession(sessionId) ?? session;
-      if (MAGIC_CITY_SANTACLAWZ_LIVE && latestSession.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
+      if (MAGIC_CITY_SANTACLAWZ_MODE !== 'disabled' && latestSession.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
         const refreshed = await refreshSantaClawzPaidSessionStatus(latestSession);
         latestSession = refreshed.session || latestSession;
       }
@@ -16600,14 +16737,6 @@ const server = http.createServer(async (req, res) => {
         || session.externalExecutionHandoff?.custody === 'magic_city_credit_backed'
         || session.paymentOrchestration?.x402Facilitation === 'magic_city_credit_backed';
       if (!creditBacked) return sendJson(res, 409, { error: 'credit_backed_santaclawz_not_enabled_for_session', session });
-      if (!getSantaClawzApiKey()) {
-        return sendJson(res, 503, {
-          error: 'santaclawz_api_key_not_configured',
-          message: 'Credits are reserved, but Magic City staging is missing a SantaClawz hire API key, so it cannot submit this paid SantaClawz hire.',
-          requiredSecret: 'SANTACLAWZ_API_KEY',
-          session
-        });
-      }
       if (session.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
         const refreshed = await refreshSantaClawzPaidSessionStatus(session, { force: true });
         return sendJson(res, 200, {
@@ -16699,6 +16828,13 @@ const server = http.createServer(async (req, res) => {
           directPayment
         });
       }
+      const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
+      requireImmutableSantaClawzHireBody(directPayment);
+      const currentRuntimeContract = await fetchSantaClawzRuntimeContract(approvedAgentId);
+      const currentRequirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, currentRuntimeContract);
+      if (!currentRequirementValidation.ok) {
+        throw createHttpError(currentRequirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+      }
       const summaryForCap = describeSantaClawzPaymentRequirement(paymentRequirement);
       const requirementUsdCents = usdcRequirementToCents(summaryForCap);
       const reservedCredits = Number(sessionForSubmit.creditReservation?.requiredCredits || sessionForSubmit.paymentOrchestration?.requiredCredits || 0);
@@ -16774,9 +16910,7 @@ const server = http.createServer(async (req, res) => {
         submit = await requestSantaClawzEndpointJson(hireEndpoint, {
           method: 'POST',
           body: {
-            taskPrompt: directPayment.taskPrompt,
-            requesterContact: directPayment.requesterContact || buildSantaClawzRequesterContact(auth.authUser, req),
-            jobContext: directPayment.jobContext || buildSantaClawzJobContextForSession(sessionForSubmit),
+            ...requireImmutableSantaClawzHireBody(directPayment),
             paymentPayload
           },
           timeoutMs: 20000,
@@ -16821,7 +16955,9 @@ const server = http.createServer(async (req, res) => {
         sessionForSubmit.id,
         extractSantaClawzDelivery(combinedSubmitPayload)
       );
-      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload);
+      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || ''
+      });
       const runtimeHealth = recordSantaClawzRuntimeOutcome({
         ...sessionForSubmit,
         santaclawzDirectPayment: directPayment
@@ -17069,6 +17205,13 @@ const server = http.createServer(async (req, res) => {
       if (!directPayment?.taskPrompt || !directPayment?.agentId) {
         return sendJson(res, 409, { error: 'santaclawz_payment_not_prepared', session: getConnectorSession(sessionId) || session });
       }
+      assertApprovedSantaClawzAgent(directPayment.agentId);
+      const currentRuntimeContract = await fetchSantaClawzRuntimeContract(directPayment.agentId);
+      const currentRequirementValidation = validateSantaClawzPaymentRequirement(directPayment.paymentRequirement, currentRuntimeContract);
+      if (!currentRequirementValidation.ok) {
+        throw createHttpError(currentRequirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+      }
+      assertDirectX402PayloadMatchesPreparedContract({ directPayment, paymentPayload });
 
       let sessionForDirectSubmit = enforceMissionToolBoundary({
         req,
@@ -17114,9 +17257,7 @@ const server = http.createServer(async (req, res) => {
         submit = await requestSantaClawzEndpointJson(hireEndpoint, {
           method: 'POST',
           body: {
-            taskPrompt: directPayment.taskPrompt,
-            requesterContact: directPayment.requesterContact || buildSantaClawzRequesterContact(auth.authUser, req),
-            jobContext: directPayment.jobContext || buildSantaClawzJobContextForSession(sessionForDirectSubmit),
+            ...requireImmutableSantaClawzHireBody(directPayment),
             paymentPayload
           },
           timeoutMs: 20000,
@@ -17160,7 +17301,9 @@ const server = http.createServer(async (req, res) => {
         sessionForDirectSubmit.id,
         extractSantaClawzDelivery(combinedSubmitPayload)
       );
-      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload);
+      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || ''
+      });
       const runtimeHealth = recordSantaClawzRuntimeOutcome({
         ...sessionForDirectSubmit,
         santaclawzDirectPayment: directPayment
@@ -17315,7 +17458,7 @@ const server = http.createServer(async (req, res) => {
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
       const digest = String(session.santaclawzDirectPayment?.paymentPayloadDigestSha256 || '').trim();
       if (!digest) return sendJson(res, 409, { error: 'x402_payment_not_submitted', session });
-      if (!MAGIC_CITY_SANTACLAWZ_LIVE) {
+      if (MAGIC_CITY_SANTACLAWZ_MODE === 'disabled') {
         return sendJson(res, 200, {
           ok: false,
           upstreamStatus: null,
@@ -18610,7 +18753,6 @@ const server = http.createServer(async (req, res) => {
         && !preferredExecutionAgent
         && isSantaClawzConciergeConfigured();
       const directSantaClawzX402Payment = completionMode === 'agent_checkout' && (paidSantaClawzExecutionAgent || santaClawzConciergeAvailable);
-      const santaClawzApiKeyConfigured = Boolean(getSantaClawzApiKey());
       const santaclawzPaymentPreference = String(
         body.santaclawzPaymentPreference ||
         selections.santaclawzPaymentPreference ||
@@ -18621,6 +18763,11 @@ const server = http.createServer(async (req, res) => {
       const magicCityBuiltInDirectWalletPayment = magicCityBuiltInExecutionAgent
         && normalizeMagicCityBuiltInFundingMode(selections.paymentFundingMode || paymentOrchestration?.fundingMode || session.selections?.paymentFundingMode || '') === 'direct_base_usdc_x402';
       if (directSantaClawzX402Payment) {
+        const approvedAgentId = assertApprovedSantaClawzAgent(selectedExecutionAgentIdForRun || preferredExecutionAgent?.pluginId || '');
+        if (santaClawzConciergeAvailable) {
+          throw createHttpError('santaclawz_concierge_disabled', 409);
+        }
+        await fetchSantaClawzRuntimeContract(approvedAgentId);
         await assertSantaClawzJobContextReadyForSession({
           ...sessionWithPrivateInputs,
           selections,
@@ -18654,27 +18801,9 @@ const server = http.createServer(async (req, res) => {
         effectiveExecutionAgentId: effectiveExecutionAgentId || null,
         selectedExecutionAgentId: selectedExecutionAgentIdForRun || preferredExecutionAgent?.pluginId || null,
         santaClawzPaid: directSantaClawzX402Payment,
-        santaClawzApiKeyConfigured,
         paymentRail: executionPaymentPreview?.paymentRail || executionPaymentPreview?.fundingMode || null,
         requiredCredits: executionPaymentPreview?.requiredCredits || 0
       }));
-      if (directSantaClawzX402Payment && !santaClawzApiKeyConfigured) {
-        console.warn('[agent-verification] santaclawz paid execution blocked: api key missing', JSON.stringify({
-          sessionId,
-          selectedExecutionAgentId: selectedExecutionAgentIdForRun || preferredExecutionAgent?.pluginId || null
-        }));
-        const latestSession = getConnectorSession(sessionId) || session;
-        return sendJson(res, 503, {
-          error: 'santaclawz_api_key_not_configured',
-          message: 'Magic City can see this SantaClawz agent, but staging is missing a SantaClawz hire API key, so it cannot submit the paid hire yet.',
-          requiredSecret: 'SANTACLAWZ_API_KEY',
-          paymentOrchestration: executionPaymentPreview,
-          session: {
-            ...latestSession,
-            paymentOrchestration: executionPaymentPreview || latestSession.paymentOrchestration || null
-          }
-        });
-      }
       let extensionDispatchDeviceId = null;
       let missionPlanPreview = null;
       let extensionPlanForRun = null;
@@ -20787,6 +20916,9 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req, 16 * 1024);
       const agentId = decodeURIComponent(urlPath.split('/')[3] || '');
       if (!agentId) return sendJson(res, 400, { error: 'agent_id_required' });
+      if (req.method === 'POST' && agentId.toLowerCase().startsWith('santaclawz:') && !isApprovedSantaClawzAgentId(agentId)) {
+        return sendJson(res, 403, { error: 'santaclawz_agent_not_approved' });
+      }
       const savedByType = body.savedByType === 'agent' || body.savedByType === 'app' ? body.savedByType : 'human';
       const savedByHash = buildSavedAgentActorHash(req, auth, body);
       const metadata = sanitizeMetadata({
@@ -20832,6 +20964,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && /^\/agent-hub\/agents\/[^/]+$/.test(urlPath)) {
       ensureSeededAgentsReady();
       const agentId = decodeURIComponent(urlPath.split('/')[3] || '');
+      if (agentId.toLowerCase().startsWith('santaclawz:') && !isApprovedSantaClawzAgentId(agentId)) return notFound(res);
       const agent = getAgent(agentId) || (MAGIC_CITY_SANTACLAWZ_LIVE ? await getSantaClawzAgentRowByMagicId(agentId) : null);
       if (!agent) return notFound(res);
       const view = buildAgentHubView(agent);
@@ -20849,6 +20982,9 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/agent-hub/enrollment-ticket') {
       assertSantaClawzLiveIntegration();
+      if (!MAGIC_CITY_SANTACLAWZ_ENROLLMENT_ENABLED) {
+        return sendJson(res, 409, { error: 'santaclawz_enrollment_not_available' });
+      }
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
       const body = await readBody(req);

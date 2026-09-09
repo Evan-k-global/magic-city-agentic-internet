@@ -131,8 +131,8 @@ assert.equal(isSantaClawzHireReadyForMagicCity(publishedButOffline), false);
 assert.equal(isSantaClawzVisibleForMagicCityMarketplace(publishedButOffline), false);
 
 assert.equal(isSantaClawzAvailableForMagicCity(onlineQuoteAgent), true);
-assert.equal(isSantaClawzHireReadyForMagicCity(onlineQuoteAgent), true);
-assert.equal(isSantaClawzVisibleForMagicCityMarketplace(onlineQuoteAgent), true);
+assert.equal(isSantaClawzHireReadyForMagicCity(onlineQuoteAgent), false);
+assert.equal(isSantaClawzVisibleForMagicCityMarketplace(onlineQuoteAgent), false);
 
 assert.equal(isSantaClawzHireReadyForMagicCity(onboardingPlaceholder), false);
 assert.equal(isSantaClawzVisibleForMagicCityMarketplace(onboardingPlaceholder), false);
