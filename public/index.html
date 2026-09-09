@@ -6099,7 +6099,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.30';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.31';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -10671,7 +10671,9 @@
 	      if (!extensionIds.length) return { ok: false, reason: 'extension_id_missing' };
 	      let lastFailure = null;
 	      for (const extensionId of extensionIds) {
-	        const result = await new Promise((resolve) => {
+	        const result = message?.type === 'RUN_PENDING_SESSIONS' && window.chrome.runtime.connect
+	          ? await sendNativeRunnerExtensionPortMessage(extensionId, message)
+	          : await new Promise((resolve) => {
 	          try {
 	            window.chrome.runtime.sendMessage(
 	              extensionId,
@@ -10699,9 +10701,50 @@
 	          }
 	          return result;
 	        }
+	        // Once an active-run port has delivered the mission request, never
+	        // send that same irreversible workflow wake to another candidate ID.
+	        if (result.dispatched) return result;
 	        lastFailure = result;
 	      }
 	      return lastFailure || { ok: false, reason: 'extension_not_reachable' };
+	    }
+
+	    function sendNativeRunnerExtensionPortMessage(extensionId, message = {}) {
+	      return new Promise((resolve) => {
+	        let port = null;
+	        let settled = false;
+	        let dispatched = false;
+	        const finish = (result) => {
+	          if (settled) return;
+	          settled = true;
+	          resolve({ ...result, extensionId, dispatched });
+	        };
+	        try {
+	          port = window.chrome.runtime.connect(extensionId, { name: 'magic-city-active-run-v1' });
+	          port.onMessage.addListener((payload) => {
+	            if (payload?.type === 'RUNNER_PROGRESS') {
+	              const sessionId = String(message.sessionId || payload.activeRun?.sessionId || '');
+	              const statusEl = getExecutionSheetScrollElement(sessionId)?.querySelector('#executionStatusText') || $('executionStatusText');
+	              const actionLabel = String(payload.activeRun?.actionId || payload.activeRun?.phase || 'starting').replace(/-/g, ' ');
+	              if (statusEl && sessionId) statusEl.textContent = `Session ${sessionId} · Runner active · ${actionLabel}`;
+	              return;
+	            }
+	            if (payload?.type === 'RUNNER_RESULT') {
+	              finish(payload.ok
+	                ? { ok: true, result: payload.result || null }
+	                : { ok: false, reason: payload.error || 'extension_run_failed' });
+	            }
+	          });
+	          port.onDisconnect.addListener(() => {
+	            const error = window.chrome.runtime.lastError;
+	            if (!settled) finish({ ok: false, reason: error?.message || 'extension_run_channel_closed' });
+	          });
+	          port.postMessage(message);
+	          dispatched = true;
+	        } catch (error) {
+	          finish({ ok: false, reason: error?.message || String(error) });
+	        }
+	      });
 	    }
 
     async function requestNativeRunnerMissionWake(sessionId = '') {

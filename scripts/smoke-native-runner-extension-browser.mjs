@@ -567,8 +567,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/checkout' || pathname === '/checkout/p/p-106-7044535-6467434/spc') {
-    const selectedCardLast4 = String(checkoutFixture.selectedCardLast4 || '0109');
-    const selectedCardBrand = selectedCardLast4 === '1817' ? 'Mastercard' : 'Visa';
+    const confirmedPendingOrder = searchParams.get('confirmed') === '1';
+    const selectedCardLast4 = confirmedPendingOrder ? '6383' : String(checkoutFixture.selectedCardLast4 || '0109');
+    const selectedCardBrand = ['1817', '6383'].includes(selectedCardLast4) ? 'Mastercard' : 'Visa';
     const addressPrimeModal = checkoutFixture.showAddressPrimeModal
       ? [
           '<div id="prime-address-modal" role="dialog" aria-modal="true">',
@@ -588,7 +589,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     const matchingAddressChoice = checkoutFixture.matchingAddressAvailable
       ? `<label><input type="radio" name="address" data-summary="${matchingAddressSummary}"${checkoutFixture.matchingAddressChecked ? ' checked' : ''} /> ${matchingAddressText}</label>`
       : '';
-    const selectedFreeDelivery = checkoutFixture.selectedFreeDelivery === true;
+    const selectedFreeDelivery = confirmedPendingOrder || checkoutFixture.selectedFreeDelivery === true;
     const freeDeliveryOptions = checkoutFixture.freeDeliveryAvailable === false
       ? ''
       : [
@@ -604,7 +605,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       `<p>Subtotal (${checkoutFixture.itemCount} ${checkoutFixture.itemCount === 1 ? 'item' : 'items'}): ${checkoutFixture.merchandiseSubtotal || checkoutFixture.total}</p>`,
       '<div class="checkout-card"><div class="checkout-card-copy">',
       '<h2>Delivering to Test User</h2>',
-      '<p id="delivery-summary">99 Wrong Road, New York, NY 10001</p>',
+      `<p id="delivery-summary">${confirmedPendingOrder ? '1 Magic City Way, San Francisco, CA 94107' : '99 Wrong Road, New York, NY 10001'}</p>`,
       '<p>Add delivery instructions</p></div>',
       '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); (window.__checkoutEvents ||= []).push(\'open-address\'); document.querySelector(\'#address-options\').hidden=false">Change</a></div>',
       '<div id="address-options" hidden>',
@@ -628,7 +629,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<div id="payment-options" hidden>',
       `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '0109' ? 'checked' : ''} /> Visa ending in 0109</label>`,
       `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '1817' ? 'checked' : ''} /> Mastercard ending 1817</label>`,
-      '<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" /> Visa ending in 6383</label>',
+      `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '6383' ? 'checked' : ''} /> Mastercard ending in 6383</label>`,
       '<a href="#" onclick="event.preventDefault(); document.querySelector(\'#add-card-form\').hidden=false">Add a credit or debit card</a>',
       '<button id="use-payment-method" onclick="(window.__checkoutEvents ||= []).push(\'confirm-payment\'); const selected=document.querySelector(\'input[name=payment]:checked\'); const text=selected?.closest(\'label\')?.innerText || \'\'; if(selected && /(?:visa|mastercard|amex|discover)/i.test(text)){document.querySelector(\'#payment-summary\').textContent=`Paying with ${text.replace(/ ending in /i, \' \')}`; document.querySelector(\'#payment-options\').hidden=true}">Use this payment method</button></div>',
       '<div id="add-card-form" hidden><h2>Add a credit or debit card</h2><input id="card-number-input" aria-label="Card number" autocomplete="cc-number" /><input aria-label="Name on card" autocomplete="cc-name" /><button onclick="const number=document.querySelector(\'#card-number-input\').value.replace(/\\D/g,\'\'); const last4=number.slice(-4); document.querySelector(\'#payment-summary\').textContent=`Paying with Mastercard ${last4}`; document.querySelector(\'#add-card-form\').hidden=true; document.querySelector(\'#payment-options\').hidden=true">Add your card</button></div></div>',
@@ -640,10 +641,11 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<label><input type="radio" name="delivery" /> Fast delivery $3.99</label>',
       freeDeliveryOptions,
       '<label><input type="radio" name="delivery" /> Try Prime FREE one-day trial</label></div></div>',
-      '<input aria-label="Billing street address" value="1 Wrong Billing Way" />',
-      '<input aria-label="Billing ZIP code" value="99999" />',
-      '<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="document.querySelector(\'#order-result\').textContent=\'Order placed\'; return false" /></div>',
-      '<p id="order-result"></p>',
+      `<input aria-label="Billing street address" value="${confirmedPendingOrder ? '99 Billing Plaza' : '1 Wrong Billing Way'}" />`,
+      `<input aria-label="Billing ZIP code" value="${confirmedPendingOrder ? '10001' : '99999'}" />`,
+      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/pending-order'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
+      `<p id="order-result">${confirmedPendingOrder ? 'Order placed' : ''}</p>`,
+      confirmedPendingOrder ? '<script>document.querySelector(\'[aria-label="Street address"]\').value="1 Magic City Way"; document.querySelector(\'[aria-label="City"]\').value="San Francisco"; document.querySelector(\'[aria-label="State"]\').value="CA"; document.querySelector(\'[aria-label="ZIP code"]\').value="94107"; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true; document.querySelector(\'#payment-options\').hidden=true;</script>' : '',
       '</main>'
     ].join('');
   }
@@ -705,7 +707,17 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       // realistic shape so the runner must preserve the wrapper validation
       // when dispatching the native click.
       '<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" /></div>',
-      '<script>document.addEventListener(\'click\', (event) => { if (event.target?.id !== \'submitOrderButtonId\') return; sessionStorage.setItem(\'magic-city-native-final-click\', \'1\'); document.body.dataset.orderSubmitted=\'1\'; event.preventDefault(); }, true)</script>',
+      `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'submitOrderButtonId') return; sessionStorage.setItem('magic-city-native-final-click', '1'); ${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/pending-order'" : "document.body.dataset.orderSubmitted='1'; event.preventDefault()"}; }, true)</script>`,
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/checkout/pending-order') {
+    return [
+      '<main><h1>This is a pending order</h1>',
+      '<p>Test Gadget</p><p>Quantity: 1</p><p>Order total: $3.50</p>',
+      '<p>Do you want to order these items again?</p>',
+      '<div id="amazon-pending-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="confirmPendingOrderButtonId" type="submit" /></div>',
+      '<script>document.addEventListener(\'click\', (event) => { if (event.target?.id !== \'confirmPendingOrderButtonId\') return; const count=Number(sessionStorage.getItem(\'magic-city-pending-final-clicks\')||0)+1; sessionStorage.setItem(\'magic-city-pending-final-clicks\',String(count)); location.href=\'/checkout?confirmed=1\'; }, true)</script>',
       '</main>'
     ].join('');
   }
@@ -1788,6 +1800,7 @@ async function main() {
     });
     await paymentConfirmContinuationPage.close();
 
+    checkoutFixture = { ...checkoutFixture, pendingOrderContinuation: true };
     await popup.close();
     const externalWakePage = await context.newPage();
     await externalWakePage.goto(`${baseUrl}/external-wake`);
@@ -1796,16 +1809,21 @@ async function main() {
     await cdp.send('ServiceWorker.stopAllWorkers');
     const externalWakePromise = externalWakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
       const startedAt = performance.now();
-      chrome.runtime.sendMessage(targetExtensionId, {
-        type: 'RUN_PENDING_SESSIONS',
-        sessionId
-      }, (response) => {
-        resolve({
-          response,
-          error: chrome.runtime.lastError?.message || '',
-          elapsedMs: performance.now() - startedAt
-        });
+      const progress = [];
+      const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+      port.onMessage.addListener((payload) => {
+        if (payload?.type === 'RUNNER_PROGRESS') {
+          progress.push(payload);
+          return;
+        }
+        if (payload?.type === 'RUNNER_RESULT') {
+          resolve({ response: { ok: payload.ok, result: payload.result, error: payload.error }, progress, elapsedMs: performance.now() - startedAt });
+        }
       });
+      port.onDisconnect.addListener(() => {
+        if (chrome.runtime.lastError) resolve({ response: null, error: chrome.runtime.lastError.message, progress, elapsedMs: performance.now() - startedAt });
+      });
+      port.postMessage({ type: 'RUN_PENDING_SESSIONS', sessionId });
     }), { extensionId, sessionId: session.id });
     const initialWakeState = await Promise.race([
       externalWakePromise,
@@ -1869,12 +1887,26 @@ async function main() {
     if (externalWake.response.result.requestedSessionId !== session.id) {
       fail(`browser_extension_external_wake_wrong_session:${JSON.stringify(externalWake)}`);
     }
+    if (externalWake.elapsedMs >= 30_000 || !externalWake.progress?.length) {
+      fail(`browser_extension_active_run_port_did_not_bypass_alarm_pacing:${JSON.stringify({ elapsedMs: externalWake.elapsedMs, progress: externalWake.progress || [] })}`);
+    }
     recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
       sessionId: session.id,
       queuedSessions: 2,
       completionMs: Math.round(externalWake.elapsedMs),
       startupCheckpoint: 'open-site waiting'
     });
+    const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
+    const pendingFinalClicks = primaryStorePage
+      ? await primaryStorePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0))
+      : 0;
+    if (pendingFinalClicks !== 1
+      || !checkpoints.some((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
+        && checkpoint.planActionStatus === 'completed')) {
+      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ pendingFinalClicks, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus })) })}`);
+    }
+    recordPurchaseScenario('Matching Amazon pending order is continued exactly once', { pendingFinalClicks });
+    checkoutFixture = { ...checkoutFixture, pendingOrderContinuation: false };
 
     popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -3158,7 +3190,7 @@ async function main() {
     await mismatchPage.locator('input[aria-label="Name on card"]').fill('Test User');
     await mismatchPage.getByRole('button', { name: 'Add your card' }).click();
     try {
-      await waitFor(() => Boolean(fulfillment), 30_000);
+      await waitFor(() => Boolean(fulfillment), 55_000);
     } catch {
       const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'pendingPaymentWaits', 'activeRun'], resolve)));
       fail(`browser_extension_mismatch_resume_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}:pending=${JSON.stringify(runnerState.pendingPaymentWaits || {})}`);

@@ -36,6 +36,7 @@ const LOCAL_CHECKOUT_PROFILE_STORAGE_KEY = 'magicCityLocalCheckoutProfiles';
 const SAFE_PLAN_ACTION_TYPES = new Set(['navigate', 'inspect', 'search', 'select_candidate', 'click_intent', 'fill_checkout_profile', 'final_submit', 'pause']);
 const inFlightSessionIds = new Set();
 const RUNNER_WORKER_STARTED_AT = new Date().toISOString();
+const RUNNER_WORKER_ID = globalThis.crypto?.randomUUID?.() || `worker-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 function normalizeBaseUrl(value = '') {
   return String(value || DEFAULT_BASE_URL).trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
@@ -358,6 +359,13 @@ async function validatePlanForSession(session = {}) {
       || Number(action.maxPrice) <= 0
       || action.missionAction !== 'final_submit'
     )) throw new Error('mission_plan_final_submit_invalid');
+    if (action.pendingOrderContinuation === true && (
+      action.type !== 'final_submit'
+      || action.priorFinalSubmitActionId !== 'submit-final-order'
+      || action.chainAuthorizationActionId !== 'submit-final-order'
+      || !Number.isInteger(Number(action.expectedItemCount))
+      || Number(action.expectedItemCount) < 1
+    )) throw new Error('mission_plan_pending_order_continuation_invalid');
     if (action.awaitMerchantOrderConfirmation === true && (
       action.type !== 'inspect'
       || action.expectedMilestone !== 'order_submitted'
@@ -575,6 +583,19 @@ function normalizeActiveRun(entry = null) {
     merchantConfirmationDeadlineAt: String(entry?.merchantConfirmationDeadlineAt || '').trim() || null,
     merchantConfirmationAttempts: Math.max(0, Number(entry?.merchantConfirmationAttempts || 0) || 0),
     finalSubmitAuthorityLease: normalizeFinalSubmitAuthorityLease(entry?.finalSubmitAuthorityLease),
+    workerId: String(entry?.workerId || '').trim() || null,
+    workerStartedAt: String(entry?.workerStartedAt || '').trim() || null,
+    lastAwaitedOperation: entry?.lastAwaitedOperation && typeof entry.lastAwaitedOperation === 'object'
+      ? {
+          kind: String(entry.lastAwaitedOperation.kind || '').slice(0, 64),
+          target: String(entry.lastAwaitedOperation.target || '').slice(0, 240),
+          status: String(entry.lastAwaitedOperation.status || '').slice(0, 32),
+          workerId: String(entry.lastAwaitedOperation.workerId || '').slice(0, 96),
+          startedAt: String(entry.lastAwaitedOperation.startedAt || '').slice(0, 48),
+          updatedAt: String(entry.lastAwaitedOperation.updatedAt || '').slice(0, 48),
+          error: String(entry.lastAwaitedOperation.error || '').slice(0, 240) || null
+        }
+      : null,
     startedAt: String(entry?.startedAt || '').trim() || new Date().toISOString(),
     updatedAt: String(entry?.updatedAt || '').trim() || new Date().toISOString()
   };
@@ -595,11 +616,34 @@ async function saveActiveRun(patch = {}) {
     ...(current?.sessionId === sessionId ? current : {}),
     ...patch,
     sessionId,
+    workerId: RUNNER_WORKER_ID,
+    workerStartedAt: RUNNER_WORKER_STARTED_AT,
     startedAt: patch.startedAt || (current?.sessionId === sessionId ? current.startedAt : now),
     updatedAt: now
   });
   await saveConfig({ activeSessionId: sessionId, activeRun });
   return activeRun;
+}
+
+async function recordAwaitedOperation(kind, target, status, { startedAt = '', error = '' } = {}) {
+  const activeRun = await getActiveRun();
+  if (!activeRun?.sessionId) return null;
+  if (kind === 'control_plane_request'
+    && !String(target || '').includes(`/connectors/sessions/${encodeURIComponent(activeRun.sessionId)}`)) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  return saveActiveRun({
+    lastAwaitedOperation: {
+      kind,
+      target,
+      status,
+      workerId: RUNNER_WORKER_ID,
+      startedAt: startedAt || now,
+      updatedAt: now,
+      error
+    }
+  });
 }
 
 async function clearActiveRun(sessionId = '') {
@@ -764,6 +808,9 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
+  let text = '';
+  const operationStartedAt = new Date().toISOString();
+  await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'started', { startedAt: operationStartedAt }).catch(() => null);
   try {
     response = await fetch(`${normalizeBaseUrl(config.baseUrl)}${path}`, {
       method,
@@ -778,7 +825,15 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
       },
       body: body ? JSON.stringify(body) : undefined
     });
+    // Keep the deadline active through the response body. Headers alone do
+    // not complete a control-plane request and a stalled body must not strand
+    // an active browser mission indefinitely.
+    text = await response.text();
   } catch (error) {
+    await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'failed', {
+      startedAt: operationStartedAt,
+      error: error?.message || String(error)
+    }).catch(() => null);
     if (error?.name === 'AbortError') {
       const timeoutError = new Error(`runner_api_timeout:${path}`);
       timeoutError.retryable = true;
@@ -789,7 +844,7 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
   } finally {
     clearTimeout(timer);
   }
-  const text = await response.text();
+  await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'completed', { startedAt: operationStartedAt }).catch(() => null);
   let data = {};
   try {
     data = text ? JSON.parse(text) : {};
@@ -832,10 +887,11 @@ async function retryTransientControlPlane(task) {
 }
 
 function scheduleRunnerResume(delayMs = RUNNER_CONTINUATION_DELAY_MS) {
-  // This is intentionally a single active-mission alarm. The gateway resumes
-  // only the persisted user-authorized run; it never discovers new work.
+  // Installed MV3 extensions clamp short alarms to roughly 30 seconds. This
+  // alarm is crash recovery only; the live external port owns normal forward
+  // progress for a user-started mission.
   void chrome.alarms.create(RESUME_ALARM, {
-    when: Date.now() + Math.max(1_000, Number(delayMs) || RUNNER_CONTINUATION_DELAY_MS)
+    when: Date.now() + Math.max(30_000, Number(delayMs) || RUNNER_CONTINUATION_DELAY_MS)
   }).catch(() => {});
 }
 
@@ -1037,13 +1093,18 @@ function isRetryableNavigationError(error = null) {
 }
 
 async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeoutLabel = 'browser_navigation_timeout' } = {}) {
+  const operationStartedAt = new Date().toISOString();
+  await recordAwaitedOperation('navigation', targetUrl, 'started', { startedAt: operationStartedAt }).catch(() => null);
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const before = await chrome.tabs.get(tabId);
     const beforeUrl = String(before?.url || '');
     // Reusing a mission tab is normal. Opening the already-approved target is
     // an idempotent success, not a navigation failure.
-    if (navigationTargetMatches(beforeUrl, targetUrl)) return before;
+    if (navigationTargetMatches(beforeUrl, targetUrl)) {
+      await recordAwaitedOperation('navigation', targetUrl, 'completed', { startedAt: operationStartedAt }).catch(() => null);
+      return before;
+    }
 
     const navigation = waitForTabNavigation(tabId, beforeUrl, timeoutMs);
     try {
@@ -1056,12 +1117,14 @@ async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeout
       current = await chrome.tabs.get(tabId).catch(() => current || updatedTab);
       const currentUrl = String(current?.url || '');
       if (!currentUrl || currentUrl === 'about:blank') throw new Error('browser_navigation_unconfirmed');
+      await recordAwaitedOperation('navigation', targetUrl, 'completed', { startedAt: operationStartedAt }).catch(() => null);
       return current;
     } catch (error) {
       lastError = error;
       navigation.cancel?.();
       const observed = await chrome.tabs.get(tabId).catch(() => null);
       if (observed?.url && observed.url !== 'about:blank' && navigationTargetMatches(observed.url, targetUrl)) {
+        await recordAwaitedOperation('navigation', targetUrl, 'completed', { startedAt: operationStartedAt }).catch(() => null);
         return observed;
       }
       if (attempt === 0 && isRetryableNavigationError(error)) {
@@ -1071,6 +1134,10 @@ async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeout
       break;
     }
   }
+  await recordAwaitedOperation('navigation', targetUrl, 'failed', {
+    startedAt: operationStartedAt,
+    error: lastError?.message || timeoutLabel || 'browser_navigation_timeout'
+  }).catch(() => null);
   throw new Error(lastError?.message || timeoutLabel || 'browser_navigation_timeout');
 }
 
@@ -1122,6 +1189,9 @@ async function tabCommand(tabId, command, {
   responseTimeoutMs = TAB_COMMAND_TIMEOUT_MS,
   deadlineMs = 0
 } = {}) {
+  const operationTarget = `${String(command?.type || 'unknown')}:tab-${Number(tabId || 0)}`;
+  const operationStartedAt = new Date().toISOString();
+  await recordAwaitedOperation('tab_message', operationTarget, 'started', { startedAt: operationStartedAt }).catch(() => null);
   const remainingBeforeInjectionMs = remainingDeadlineMs(deadlineMs);
   if (remainingBeforeInjectionMs != null && remainingBeforeInjectionMs < 1) {
     throw new Error('browser_command_deadline_exceeded');
@@ -1144,11 +1214,21 @@ async function tabCommand(tabId, command, {
   const boundedResponseTimeoutMs = remainingBeforeResponseMs == null
     ? responseTimeoutMs
     : Math.max(1, Math.min(responseTimeoutMs, remainingBeforeResponseMs));
-  return withTimeout(
-    () => chrome.tabs.sendMessage(tabId, command),
-    boundedResponseTimeoutMs,
-    'browser_content_script_timeout'
-  );
+  try {
+    const result = await withTimeout(
+      () => chrome.tabs.sendMessage(tabId, command),
+      boundedResponseTimeoutMs,
+      'browser_content_script_timeout'
+    );
+    await recordAwaitedOperation('tab_message', operationTarget, 'completed', { startedAt: operationStartedAt }).catch(() => null);
+    return result;
+  } catch (error) {
+    await recordAwaitedOperation('tab_message', operationTarget, 'failed', {
+      startedAt: operationStartedAt,
+      error: error?.message || String(error)
+    }).catch(() => null);
+    throw error;
+  }
 }
 
 async function amazonSearchCardAddToCart(tabId, action = {}) {
@@ -1618,7 +1698,7 @@ async function assertFinalSubmitChainAuthorization(session, plan, action) {
         body: {
           pluginId: RUNNER_EXTENSION_PLUGIN_ID,
           planHash: plan.planHash,
-          actionId: action.id
+          actionId: action.chainAuthorizationActionId || action.id
         },
         timeoutMs: 10_000
       });
@@ -2590,6 +2670,14 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     ...action,
     receiptScope: `${String(plan?.planHash || '').slice(0, 96)}:${String(action?.id || '').slice(0, 96)}`
   };
+  if (action.pendingOrderContinuation === true) {
+    const priorReceiptScope = `${String(plan?.planHash || '').slice(0, 96)}:${String(action.priorFinalSubmitActionId || '').slice(0, 96)}`;
+    action = {
+      ...action,
+      priorFinalSubmitDispatched: Boolean(await finalOrderDispatchReceiptFor(tabId, priorReceiptScope)),
+      boundCandidate: normalizeActiveRunCandidate((await getActiveRun())?.selectedCandidate)
+    };
+  }
   if (plan.targetDomain === 'amazon.com' && action.type !== 'navigate') {
     const currentTab = await chrome.tabs.get(tabId).catch(() => null);
     if (currentTab?.url && !isAmazonRetailShoppingUrl(currentTab.url)) {
@@ -2682,7 +2770,10 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     const deadlineAt = Date.parse(String(action.merchantConfirmationDeadlineAt || ''));
     const remainingMs = Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : null;
     const outcome = await waitForMerchantOrderConfirmation(tabId, checkoutProfile, assertActive, {
-      timeoutMs: remainingMs == null ? 14_000 : Math.min(14_000, remainingMs)
+      // The active website-to-extension port keeps normal execution alive.
+      // Observe the whole signed confirmation window here; alarms are only a
+      // fallback if Chrome actually terminates the worker.
+      timeoutMs: remainingMs == null ? MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS : remainingMs
     });
     return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
   }
@@ -3362,7 +3453,12 @@ async function runSession(rawSession) {
             }
         : await withTimeout(
             () => executePlanAction(tab.id, executionAction, plan, checkoutProfile, assertActive),
-            BROWSER_ACTION_TIMEOUT_MS,
+            action.awaitMerchantOrderConfirmation === true
+              ? Math.min(
+                  MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS + 5_000,
+                  Math.max(BROWSER_ACTION_TIMEOUT_MS, Number(action.merchantConfirmationTimeoutMs || 0) + 5_000)
+                )
+              : BROWSER_ACTION_TIMEOUT_MS,
             `browser_step_timeout:${action.id}`
           );
       if (resumesInterruptedAction && outcome?.completed && !outcome.recoveredFromInterruption) {
@@ -3643,6 +3739,7 @@ async function runSession(rawSession) {
       // persisted dispatch receipt proves a click; a recovered merchant
       // confirmation proves the same action completed without replaying it.
       const finalSubmitReceiptRecorded = action.type !== 'final_submit'
+        || (action.pendingOrderContinuation === true && outcome.skipped === true)
         || (report.runnerStep.finalSubmitReceipt?.kind === 'final_order'
           && report.runnerStep.finalSubmitReceipt?.phase === 'click_dispatched')
         || outcome.orderSubmitted === true;
@@ -3655,7 +3752,9 @@ async function runSession(rawSession) {
         actionIndex: finalSubmitReceiptRecorded ? null : index,
         nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
         selectedCandidate: progress.selectedCandidate,
-        finalSubmitAuthorityLease: finalSubmitReceiptRecorded ? null : finalSubmitAuthorityLease
+        finalSubmitAuthorityLease: actionStatus === 'completed' && nextAction?.type === 'final_submit'
+          ? finalSubmitAuthorityLease
+          : finalSubmitReceiptRecorded ? null : finalSubmitAuthorityLease
       });
       if (action.awaitMerchantOrderConfirmation === true && report.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
         const confirmationDeadlineMs = Date.parse(String(executionAction.merchantConfirmationDeadlineAt || ''));

@@ -7,8 +7,9 @@ import * as legacyController from './background-v0.2.js';
 const POLL_ALARM = 'magic-city-runner-poll';
 const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
-const ACTIVE_MISSION_CONTINUATION_DELAY_MS = 5_000;
-const LEAN_RUNTIME_MODE = 'v0.4.30-wake-diagnostics';
+const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
+const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
+const LEAN_RUNTIME_MODE = 'v0.4.31-active-run-port';
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
   'https://magic-city-staging.fly.dev'
@@ -52,7 +53,7 @@ async function dispatchAlarm(alarm = null) {
     // resumes the already-signed next plan step instead of losing the run.
     if (result?.status === 'already_running') {
       await chrome.alarms.create(RESUME_ALARM, {
-        when: Date.now() + ACTIVE_MISSION_CONTINUATION_DELAY_MS
+        when: Date.now() + ACTIVE_MISSION_RECOVERY_DELAY_MS
       });
     }
     return result;
@@ -123,4 +124,57 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
   return true;
+});
+
+chrome.runtime.onConnectExternal.addListener((port) => {
+  let origin = '';
+  try {
+    origin = new URL(port.sender?.url || port.sender?.origin || '').origin;
+  } catch {
+    origin = '';
+  }
+  if (!ALLOWED_EXTERNAL_ORIGINS.has(origin) || port.name !== 'magic-city-active-run-v1') {
+    port.disconnect();
+    return;
+  }
+
+  let started = false;
+  let progressTimer = null;
+  const postProgress = async () => {
+    try {
+      const { activeRun = null, lastExecution = null } = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
+      port.postMessage({
+        type: 'RUNNER_PROGRESS',
+        activeRun: activeRun ? {
+          sessionId: activeRun.sessionId || '',
+          phase: activeRun.phase || '',
+          actionId: activeRun.actionId || '',
+          workerId: activeRun.workerId || '',
+          lastAwaitedOperation: activeRun.lastAwaitedOperation || null
+        } : null,
+        lastExecution: lastExecution || null,
+        at: new Date().toISOString()
+      });
+    } catch {
+      // A progress pulse is advisory; the durable checkpoints remain primary.
+    }
+  };
+
+  port.onDisconnect.addListener(() => {
+    if (progressTimer) clearInterval(progressTimer);
+  });
+  port.onMessage.addListener((message) => {
+    if (started) return;
+    started = true;
+    void postProgress();
+    progressTimer = setInterval(() => { void postProgress(); }, ACTIVE_MISSION_PROGRESS_INTERVAL_MS);
+    dispatch(message, { origin })
+      .then((result) => port.postMessage({ type: 'RUNNER_RESULT', ok: true, result }))
+      .catch((error) => port.postMessage({ type: 'RUNNER_RESULT', ok: false, error: error?.message || String(error) }))
+      .finally(() => {
+        if (progressTimer) clearInterval(progressTimer);
+        progressTimer = null;
+        try { port.disconnect(); } catch {}
+      });
+  });
 });

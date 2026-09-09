@@ -138,9 +138,15 @@ const checkoutNavigationSection = checkoutNavigationIndex >= 0
 if (!checkoutNavigationSection || /runCheckoutProfileReconcile/.test(checkoutNavigationSection)) {
   fail('open-checkout must remain a navigation primitive, without hidden profile reconciliation');
 }
-if (!/ACTIVE_MISSION_CONTINUATION_DELAY_MS/.test(packagedBackground)
+if (!/ACTIVE_MISSION_RECOVERY_DELAY_MS\s*=\s*30_000/.test(packagedBackground)
   || !/result\?\.status === 'already_running'/.test(packagedBackground)) {
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
+}
+if (!/onConnectExternal/.test(packagedBackground)
+  || !/magic-city-active-run-v1/.test(packagedBackground)
+  || !/RUNNER_PROGRESS/.test(packagedBackground)
+  || !/RUNNER_RESULT/.test(packagedBackground)) {
+  fail('normal mission execution must use a live progress channel instead of alarm-paced continuation');
 }
 if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.test(packagedBackground)
   || !/return dispatch\(message, \{ origin \}\);/.test(packagedBackground)

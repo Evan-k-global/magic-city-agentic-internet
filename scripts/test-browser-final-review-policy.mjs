@@ -32,9 +32,10 @@ assert.equal(automaticPlan.primeRequired, true);
 assert.ok(automaticPlan.actions.every((action) => action.fulfillmentPolicy === 'amazon_free_shipping_preferred'));
 assert.ok(automaticPlan.actions.every((action) => action.primeRequired === true));
 assert.equal(automaticPlan.requireMerchantOrderConfirmation, true);
-assert.equal(automaticPlan.actions.at(-3)?.type, 'final_submit');
-assert.equal(automaticPlan.actions.at(-3)?.autoSubmitAfterVerifiedCheckout, true);
-assert.equal(automaticPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
+assert.equal(automaticPlan.actions.find((action) => action.id === 'submit-final-order')?.type, 'final_submit');
+assert.equal(automaticPlan.actions.find((action) => action.id === 'submit-final-order')?.autoSubmitAfterVerifiedCheckout, true);
+assert.equal(automaticPlan.actions.find((action) => action.id === 'submit-final-order')?.saveMerchantCheckoutDefault, true);
+assert.equal(automaticPlan.actions.find((action) => action.id === 'confirm-pending-order')?.pendingOrderContinuation, true);
 assert.equal(automaticPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 assert.equal(automaticPlan.actions.at(-2)?.expectedMilestone, 'order_submitted');
 assert.equal(automaticPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
@@ -45,8 +46,9 @@ assert.equal(validateBrowserExtensionPlan(defaultAmazonPlan).valid, true);
 assert.equal(defaultAmazonPlan.limits.stopBeforeFinalSubmit, false);
 assert.equal(defaultAmazonPlan.saveMerchantCheckoutDefault, true);
 assert.equal(defaultAmazonPlan.requireMerchantOrderConfirmation, true);
-assert.equal(defaultAmazonPlan.actions.at(-3)?.type, 'final_submit');
-assert.equal(defaultAmazonPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.actions.find((action) => action.id === 'submit-final-order')?.type, 'final_submit');
+assert.equal(defaultAmazonPlan.actions.find((action) => action.id === 'submit-final-order')?.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.actions.find((action) => action.id === 'confirm-pending-order')?.pendingOrderContinuation, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
 
@@ -105,7 +107,7 @@ assert.equal(approvedResumePlan.resumeFinalSubmit, true);
 assert.equal(approvedResumePlan.limits.stopBeforeFinalSubmit, false);
 assert.deepEqual(
   approvedResumePlan.actions.map((action) => action.type),
-  ['inspect', 'fill_checkout_profile', 'inspect', 'final_submit', 'inspect', 'pause']
+  ['inspect', 'fill_checkout_profile', 'inspect', 'final_submit', 'final_submit', 'inspect', 'pause']
 );
 assert.equal(approvedResumePlan.actions.some((action) => action.type === 'navigate'), false);
 assert.equal(approvedResumePlan.actions.find((action) => action.type === 'final_submit')?.maxPrice, 4);
@@ -159,7 +161,7 @@ assert.equal(automaticCheckoutReconcilePlan.resumeCheckoutAutoSubmit, true);
 assert.equal(automaticCheckoutReconcilePlan.limits.stopBeforeFinalSubmit, false);
 assert.deepEqual(
   automaticCheckoutReconcilePlan.actions.map((action) => action.type),
-  ['navigate', 'fill_checkout_profile', 'click_intent', 'fill_checkout_profile', 'inspect', 'final_submit', 'inspect', 'pause']
+  ['navigate', 'fill_checkout_profile', 'click_intent', 'fill_checkout_profile', 'inspect', 'final_submit', 'final_submit', 'inspect', 'pause']
 );
 assert.equal(automaticCheckoutReconcilePlan.actions[0].preserveExistingCheckout, true);
 assert.equal(automaticCheckoutReconcilePlan.actions.find((action) => action.type === 'final_submit')?.maxPrice, 4);

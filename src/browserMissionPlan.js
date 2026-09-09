@@ -507,17 +507,31 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     maxPrice,
     expectedMilestone: 'final_submit_requested'
   });
+  const pendingOrderContinuationAction = () => buildAction('confirm-pending-order', 'final_submit', 'final_submit', {
+    autoSubmitAfterVerifiedCheckout: true,
+    pendingOrderContinuation: true,
+    priorFinalSubmitActionId: 'submit-final-order',
+    chainAuthorizationActionId: 'submit-final-order',
+    expectedItemCount: itemizedBasket ? plannedItems.length : 1,
+    maxPrice
+  });
   const confirmMerchantOrderAction = () => buildAction('confirm-merchant-order', 'inspect', 'read_public_page', {
     awaitMerchantOrderConfirmation: true,
     merchantConfirmationTimeoutMs: MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS,
     expectedMilestone: 'order_submitted'
   });
+  const automaticSubmitActions = () => [
+    finalSubmitAction(),
+    ...((fastAmazonCatalogPlan || fulfillmentPolicy === 'amazon_free_shipping_preferred') && !itemizedBasket
+      ? [pendingOrderContinuationAction()]
+      : []),
+    confirmMerchantOrderAction()
+  ];
   const reviewSubmitActions = [
     buildAction('inspect-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true }),
     ...(fillLocalCheckoutProfile ? [buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeFinalSubmit: true })] : []),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true, expectedMilestone: 'final_review_ready' }),
-    finalSubmitAction(),
-    confirmMerchantOrderAction(),
+    ...automaticSubmitActions(),
     buildAction('pause-for-user', 'pause', 'handoff', { reason: 'order_submission_requested' })
   ];
   // A checkout can expose its delivery selector first and its card selector only
@@ -534,7 +548,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     buildAction('continue-reviewed-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true, resumeCheckoutReconcile: true }),
     buildAction('reconcile-reviewed-payment', 'fill_checkout_profile', 'fill_safe_fields', { resumeCheckoutReconcile: true }),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeCheckoutReconcile: true, expectedMilestone: 'final_review_ready' }),
-    ...(resumeCheckoutAutoSubmit ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
+    ...(resumeCheckoutAutoSubmit ? automaticSubmitActions() : []),
     buildAction('pause-for-user', 'pause', 'handoff', {
       reason: resumeCheckoutAutoSubmit ? 'order_submission_requested' : 'checkout_profile_reconciled'
     })
@@ -564,7 +578,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? automaticSubmitActions() : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'basket_review_ready' })
         ]
       : [
@@ -595,7 +609,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           // before asking for final-review evidence.
           ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? automaticSubmitActions() : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })
         ])
     : [];
@@ -704,6 +718,15 @@ export function validateBrowserExtensionPlan(plan = null) {
     || action.missionAction !== 'final_submit'
   ))) {
     return { valid: false, reason: 'plan_final_submit_invalid' };
+  }
+  if (actions.some((action) => action.pendingOrderContinuation === true && (
+    action.type !== 'final_submit'
+    || action.priorFinalSubmitActionId !== 'submit-final-order'
+    || action.chainAuthorizationActionId !== 'submit-final-order'
+    || !Number.isInteger(Number(action.expectedItemCount))
+    || Number(action.expectedItemCount) < 1
+  ))) {
+    return { valid: false, reason: 'plan_pending_order_continuation_invalid' };
   }
   const finalSubmitIndex = actions.findIndex((action) => action.type === 'final_submit');
   if (finalSubmitIndex >= 0 && !actions.slice(finalSubmitIndex + 1).some((action) => (

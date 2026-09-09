@@ -112,5 +112,10 @@ assert.match(
   /closest\?\.\('\[data-execution-run-agent="true"\]'\)[\s\S]*startExecutionFromSheet\(\)/,
   'the Runner startup retry must invoke the execution start handler'
 );
+assert.match(
+  html,
+  /runtime\.connect\(extensionId, \{ name: 'magic-city-active-run-v1' \}\)[\s\S]*RUNNER_PROGRESS[\s\S]*RUNNER_RESULT/,
+  'a website-started mission must keep a live progress channel through the extension result'
+);
 
 console.log('execution startup UI state ok');

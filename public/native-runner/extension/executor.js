@@ -3804,7 +3804,97 @@
     return { attempted: true, saved: isChecked(), reason: isChecked() ? 'enabled' : 'not_confirmed' };
   }
 
+  function pendingOrderMatchEvidence(action = {}) {
+    const rawText = pagePlainText(30000);
+    const normalizedText = normalizeMatchText(rawText);
+    const marker = /\bthis is a pending order\b/i.test(rawText);
+    const candidate = action.boundCandidate && typeof action.boundCandidate === 'object'
+      ? action.boundCandidate
+      : null;
+    const stopWords = new Set(['and', 'the', 'with', 'from', 'for', 'your', 'pack', 'count']);
+    const titleTokens = normalizeMatchText(candidate?.title || '')
+      .split(/\s+/)
+      .filter((token) => token.length >= 3 && !stopWords.has(token));
+    const matchedTitleTokens = titleTokens.filter((token) => normalizedText.split(/\s+/).includes(token));
+    const titleMatches = titleTokens.length >= 2
+      && matchedTitleTokens.length >= Math.min(2, titleTokens.length)
+      && matchedTitleTokens.length / titleTokens.length >= 0.5;
+    const candidatePrice = Number(candidate?.price);
+    const priceMatches = Number.isFinite(candidatePrice) && candidatePrice > 0
+      && rawText.includes(`$${candidatePrice.toFixed(2)}`);
+    const expectedItemCount = Number(action.expectedItemCount || 0);
+    const quantityMatches = Number.isInteger(expectedItemCount) && expectedItemCount > 0 && new RegExp(
+      `(?:quantity|qty|subtotal)\\s*(?:\\(|:)?\\s*${expectedItemCount}\\s*(?:items?)?\\)?`,
+      'i'
+    ).test(rawText);
+    return { marker, titleMatches, priceMatches, quantityMatches };
+  }
+
+  async function confirmPendingOrder(action = {}, profile = {}) {
+    const state = pageState(profile);
+    if (state.orderSubmitted) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        orderSubmitted: true,
+        reason: 'Merchant order confirmation is already visible.',
+        state
+      };
+    }
+    const evidence = pendingOrderMatchEvidence(action);
+    if (!evidence.marker) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        pendingOrderContinuationPresent: false,
+        reason: 'No Amazon pending-order continuation is present.',
+        state
+      };
+    }
+    if (action.priorFinalSubmitDispatched !== true) {
+      return { completed: false, reason: 'The pending order is not bound to a recorded first final-order dispatch.', state };
+    }
+    if (!evidence.titleMatches || !evidence.priceMatches || !evidence.quantityMatches) {
+      return {
+        completed: false,
+        reason: 'The pending order did not match the current mission item, quantity, and price.',
+        pendingOrderMatchEvidence: evidence,
+        state
+      };
+    }
+    const controls = finalOrderControls();
+    if (!controls.length) {
+      return { completed: false, reason: 'The matching pending order did not expose a verified continuation control.', state };
+    }
+    const scheduled = scheduleFinalOrderClick(controls[0]);
+    if (!scheduled) {
+      return { completed: false, reason: 'The matching pending-order continuation could not be clicked safely.', state };
+    }
+    const dispatched = await scheduled.dispatchReady;
+    if (!dispatched?.receipt) {
+      return {
+        completed: false,
+        reason: dispatched?.reason || 'The matching pending-order continuation could not be dispatched safely.',
+        state: pageState(profile)
+      };
+    }
+    return {
+      completed: true,
+      navigationRequested: true,
+      finalSubmitRequested: true,
+      finalSubmitReceipt: dispatched.receipt,
+      finalSubmitReceipts: [scheduled.intentReceipt, dispatched.receipt],
+      pendingOrderContinuationPresent: true,
+      pendingOrderMatchEvidence: evidence,
+      label: compactText(controls[0].validatedLabel, 140),
+      state: pageState(profile)
+    };
+  }
+
   async function submitFinalOrder(action = {}, profile = {}) {
+    if (action.pendingOrderContinuation === true) return confirmPendingOrder(action, profile);
     if (action.autoSubmitAfterVerifiedCheckout !== true) {
       return { completed: false, reason: 'This mission did not authorize automatic final order submission.' };
     }
