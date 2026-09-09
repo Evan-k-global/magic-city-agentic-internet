@@ -3876,27 +3876,57 @@
     const identityMatches = Boolean(identityRow);
     const candidatePrice = Number(cartEvidence?.price ?? candidate?.price);
     const identityText = String(identityRow?.innerText || identityRow?.textContent || '');
+    const identityPrices = Array.from(identityText.matchAll(/\$\s*(\d{1,6}(?:\.\d{2})?)/g))
+      .map((match) => Number(match[1]))
+      .filter((amount) => Number.isFinite(amount) && amount > 0);
     const priceMatchesInIdentityRow = Number.isFinite(candidatePrice) && candidatePrice > 0
-      && identityText.includes(`$${candidatePrice.toFixed(2)}`);
+      && identityPrices.some((amount) => Math.abs(amount - candidatePrice) <= 0.005);
+    const merchandiseSubtotalMatch = rawText.match(/\b(?:items?|merchandise subtotal|item subtotal|subtotal\s*\(\s*\d+\s*items?\s*\))\s*:?\s*\$\s*(\d{1,6}(?:\.\d{2})?)/i);
+    const explicitMerchandiseSubtotal = merchandiseSubtotalMatch ? Number(merchandiseSubtotalMatch[1]) : null;
+    const expectedItemCount = Number(action.expectedItemCount || 0);
+    const expectedMerchandiseSubtotal = Number.isFinite(candidatePrice)
+      && candidatePrice > 0
+      && Number.isInteger(expectedItemCount)
+      && expectedItemCount > 0
+      ? candidatePrice * expectedItemCount
+      : null;
+    const merchandisePriceContradiction = Boolean(identityMatches
+      && Number.isFinite(candidatePrice)
+      && candidatePrice > 0
+      && (identityPrices.length > 0 && !priceMatchesInIdentityRow
+        || Number.isFinite(explicitMerchandiseSubtotal)
+          && Number.isFinite(expectedMerchandiseSubtotal)
+          && Math.abs(explicitMerchandiseSubtotal - expectedMerchandiseSubtotal) > 0.005));
     const singleItemOrderTotalMatches = Number(cartEvidence?.quantity) === 1
       && Number.isFinite(candidatePrice)
       && candidatePrice > 0
       && new RegExp(`\\border total\\s*:?\\s*\\$\\s*${candidatePrice.toFixed(2).replace('.', '\\.')}`, 'i').test(rawText);
-    const priceMatches = Boolean(identityMatches && (priceMatchesInIdentityRow || singleItemOrderTotalMatches));
-    const expectedItemCount = Number(action.expectedItemCount || 0);
+    const priceMatches = Boolean(identityMatches
+      && !merchandisePriceContradiction
+      && (priceMatchesInIdentityRow || singleItemOrderTotalMatches));
+    const explicitQuantity = cartRowQuantity(identityRow);
+    const quantityContradiction = Number.isInteger(explicitQuantity)
+      && Number.isInteger(expectedItemCount)
+      && expectedItemCount > 0
+      && explicitQuantity !== expectedItemCount;
     const quantityMatches = Number.isInteger(expectedItemCount)
       && expectedItemCount > 0
       && Number(cartEvidence?.quantity) === expectedItemCount
       && cartEvidence?.sessionId === action.sessionId
-      && cartEvidence?.planHash === action.planHash;
+      && cartEvidence?.planHash === action.planHash
+      && !quantityContradiction;
     return {
       marker,
       identityMatches,
       identitySource: asinRow ? 'asin' : exactTitleRow ? 'exact_title' : 'none',
       priceMatches,
       priceSource: priceMatchesInIdentityRow ? 'identity_row' : singleItemOrderTotalMatches ? 'single_item_order_total' : 'none',
+      merchandisePriceContradiction,
+      explicitMerchandiseSubtotal: Number.isFinite(explicitMerchandiseSubtotal) ? explicitMerchandiseSubtotal : null,
       quantityMatches,
-      quantitySource: quantityMatches ? 'verified_cart' : 'none'
+      quantitySource: quantityMatches ? 'verified_cart' : 'none',
+      quantityContradiction,
+      explicitQuantity: Number.isInteger(explicitQuantity) ? explicitQuantity : null
     };
   }
 

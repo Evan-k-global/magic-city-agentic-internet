@@ -131,6 +131,8 @@ if (!/function activeCartItemEvidence\(\)/.test(packagedExecutor)
   || !/function pendingOrderMatchEvidence\(action/.test(packagedExecutor)
   || !/identitySource:\s*asinRow \? 'asin'/.test(packagedExecutor)
   || !/quantitySource:\s*quantityMatches \? 'verified_cart'/.test(packagedExecutor)
+  || !/quantityContradiction/.test(packagedExecutor)
+  || !/merchandisePriceContradiction/.test(packagedExecutor)
   || !/action\.priorPendingOrderDispatchReceipt/.test(packagedExecutor)) {
   fail('pending-order continuation must require exact product identity and previously verified cart quantity');
 }

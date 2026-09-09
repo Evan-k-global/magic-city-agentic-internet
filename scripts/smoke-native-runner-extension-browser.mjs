@@ -714,6 +714,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
   if (pathname === '/checkout/pending-order') {
     const pendingTitle = searchParams.get('variant') === 'cashew' ? 'Nature Valley Cashew Granola Bars' : 'Test Gadget';
     const pendingAsin = searchParams.get('variant') === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
+    const pendingQuantity = Number(searchParams.get('quantity')) || null;
+    const pendingUnitPrice = Number(searchParams.get('unitPrice')) || 3.5;
+    const pendingOrderTotal = Number(searchParams.get('orderTotal')) || pendingUnitPrice;
     const pendingClick = searchParams.get('stay') === '1'
       ? ''
       : Number(checkoutFixture.pendingOrderConfirmationDelayMs) > 0
@@ -721,8 +724,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
         : "location.href='/checkout?confirmed=1';";
     return [
       '<main><h1>This is a pending order</h1>',
-      `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$3.50</p></section>`,
-      '<p>Order total: $3.50</p>',
+      `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$${pendingUnitPrice.toFixed(2)}</p>${pendingQuantity ? `<p>Quantity: ${pendingQuantity}</p>` : ''}</section>`,
+      `<p>Order total: $${pendingOrderTotal.toFixed(2)}</p>`,
       '<p>Do you want to order these items again?</p>',
       '<div id="amazon-pending-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="confirmPendingOrderButtonId" type="submit" /></div>',
       `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'confirmPendingOrderButtonId') return; const count=Number(sessionStorage.getItem('magic-city-pending-final-clicks')||0)+1; sessionStorage.setItem('magic-city-pending-final-clicks',String(count)); ${pendingClick} }, true)</script>`,
@@ -2038,6 +2041,73 @@ async function main() {
     }
     recordPurchaseScenario('Pending-order continuation rejects a same-price product variant mismatch', { mismatchClickCount });
     await pendingMismatchPage.close();
+
+    const pendingQuantityMismatchPage = await context.newPage();
+    await pendingQuantityMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&quantity=2&unitPrice=2.97&orderTotal=5.94`);
+    const quantityMismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingQuantityMismatchPage.url());
+    const quantityMismatchOutcome = await invokePendingAction(quantityMismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-quantity-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-quantity-mismatch-session',
+      planHash: 'pending-quantity-mismatch-plan',
+      boundCandidate: { asin: 'BROWSER-SMOKE-ASIN', title: 'Test Gadget', price: 2.97 },
+      boundCartEvidence: {
+        sessionId: 'pending-quantity-mismatch-session',
+        planHash: 'pending-quantity-mismatch-plan',
+        asin: 'BROWSER-SMOKE-ASIN',
+        title: 'Test Gadget',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const quantityMismatchClickCount = await pendingQuantityMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (quantityMismatchOutcome?.completed !== false
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.quantityMatches !== false
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.quantityContradiction !== true
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.explicitQuantity !== 2
+      || quantityMismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_quantity_contradiction_not_rejected:${JSON.stringify({ quantityMismatchOutcome, quantityMismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects current quantity 2 over saved quantity 1', {
+      explicitQuantity: 2,
+      orderTotal: '$5.94',
+      clickCount: quantityMismatchClickCount
+    });
+    await pendingQuantityMismatchPage.close();
+
+    const pendingPriceMismatchPage = await context.newPage();
+    await pendingPriceMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&unitPrice=4.25&orderTotal=4.25`);
+    const priceMismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingPriceMismatchPage.url());
+    const priceMismatchOutcome = await invokePendingAction(priceMismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-price-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-price-mismatch-session',
+      planHash: 'pending-price-mismatch-plan',
+      boundCartEvidence: {
+        sessionId: 'pending-price-mismatch-session',
+        planHash: 'pending-price-mismatch-plan',
+        asin: 'BROWSER-SMOKE-ASIN',
+        title: 'Test Gadget',
+        price: 3.5,
+        quantity: 1
+      }
+    });
+    const priceMismatchClickCount = await pendingPriceMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (priceMismatchOutcome?.completed !== false
+      || priceMismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || priceMismatchOutcome?.pendingOrderMatchEvidence?.priceMatches !== false
+      || priceMismatchOutcome?.pendingOrderMatchEvidence?.merchandisePriceContradiction !== true
+      || priceMismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_price_contradiction_not_rejected:${JSON.stringify({ priceMismatchOutcome, priceMismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects an explicit current unit-price contradiction', {
+      expectedUnitPrice: '$3.50',
+      currentUnitPrice: '$4.25',
+      clickCount: priceMismatchClickCount
+    });
+    await pendingPriceMismatchPage.close();
     await pendingDiagnosticPage.close();
     checkoutFixture = {
       ...checkoutFixture,

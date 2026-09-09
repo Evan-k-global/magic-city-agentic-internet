@@ -3636,8 +3636,16 @@ async function runSession(rawSession) {
               identitySource: String(outcome.pendingOrderMatchEvidence.identitySource || '').slice(0, 32),
               priceMatches: Boolean(outcome.pendingOrderMatchEvidence.priceMatches),
               priceSource: String(outcome.pendingOrderMatchEvidence.priceSource || '').slice(0, 32),
+              merchandisePriceContradiction: Boolean(outcome.pendingOrderMatchEvidence.merchandisePriceContradiction),
+              explicitMerchandiseSubtotal: Number.isFinite(Number(outcome.pendingOrderMatchEvidence.explicitMerchandiseSubtotal))
+                ? Number(outcome.pendingOrderMatchEvidence.explicitMerchandiseSubtotal)
+                : null,
               quantityMatches: Boolean(outcome.pendingOrderMatchEvidence.quantityMatches),
-              quantitySource: String(outcome.pendingOrderMatchEvidence.quantitySource || '').slice(0, 32)
+              quantitySource: String(outcome.pendingOrderMatchEvidence.quantitySource || '').slice(0, 32),
+              quantityContradiction: Boolean(outcome.pendingOrderMatchEvidence.quantityContradiction),
+              explicitQuantity: Number.isInteger(Number(outcome.pendingOrderMatchEvidence.explicitQuantity))
+                ? Number(outcome.pendingOrderMatchEvidence.explicitQuantity)
+                : null
             }
           : null,
         merchantCheckoutDefault: outcome.merchantCheckoutDefault && typeof outcome.merchantCheckoutDefault === 'object'
