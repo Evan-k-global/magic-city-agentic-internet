@@ -943,8 +943,10 @@ function normalizeSantaClawzAgent(agent) {
   const online = isSantaClawzAvailableForMagicCity(agent);
   const hireable = isSantaClawzHireReadyForMagicCity(agent);
   const demoOnline = online && !hireable;
-  const privacyModes = modeStrings(agent?.privacyModes);
-  const deliveryLanes = arrayOfStrings(agent?.deliveryLanes);
+  const privacyModes = modeStrings(agent?.privacyModes).filter((mode) => ['public', 'private'].includes(mode));
+  const deliveryLanes = externalAgentId === SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID
+    ? ['platform_scanned']
+    : arrayOfStrings(agent?.deliveryLanes);
   const marketplaceTags = tagStrings(agent?.marketplaceTags);
 
   return {
