@@ -542,15 +542,42 @@ async function saveFinalOrderDispatchReceipt(tabId, receipt) {
   const dispatches = config.finalOrderDispatches && typeof config.finalOrderDispatches === 'object'
     ? { ...config.finalOrderDispatches }
     : {};
-  dispatches[String(normalizedTabId)] = compactReceipt;
+  const tabKey = String(normalizedTabId);
+  const existing = Array.isArray(dispatches[tabKey])
+    ? dispatches[tabKey]
+    : dispatches[tabKey]
+      ? [dispatches[tabKey]]
+      : [];
+  dispatches[tabKey] = [...existing.filter((entry) => entry?.receiptScope !== compactReceipt.receiptScope), compactReceipt].slice(-8);
   await saveConfig({ finalOrderDispatches: dispatches });
   return { saved: true, receipt: compactReceipt };
 }
 
 async function finalOrderDispatchReceiptFor(tabId, receiptScope = '') {
   const config = await getConfig();
-  const receipt = config.finalOrderDispatches?.[String(Number(tabId || 0))] || null;
-  return receipt?.receiptScope === String(receiptScope || '') ? receipt : null;
+  const stored = config.finalOrderDispatches?.[String(Number(tabId || 0))] || null;
+  const receipts = Array.isArray(stored) ? stored : stored ? [stored] : [];
+  return receipts.find((receipt) => receipt?.receiptScope === String(receiptScope || '')) || null;
+}
+
+function normalizeActiveRunCartEvidence(evidence = null) {
+  if (!evidence || typeof evidence !== 'object') return null;
+  const sessionId = String(evidence.sessionId || '').trim();
+  const planHash = String(evidence.planHash || '').trim();
+  const asin = String(evidence.asin || '').trim().slice(0, 32);
+  const title = String(evidence.title || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+  const price = Number(evidence.price);
+  const quantity = Number(evidence.quantity);
+  if (!sessionId || !planHash || (!asin && !title) || !Number.isInteger(quantity) || quantity < 1) return null;
+  return {
+    sessionId,
+    planHash,
+    asin: asin || null,
+    title: title || null,
+    price: Number.isFinite(price) && price > 0 ? price : null,
+    quantity,
+    verifiedAt: String(evidence.verifiedAt || '').slice(0, 48) || null
+  };
 }
 
 function normalizeActiveRunCandidate(candidate = null) {
@@ -566,6 +593,45 @@ function normalizeActiveRunCandidate(candidate = null) {
   };
 }
 
+function normalizedProductIdentityText(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function verifiedCartEvidenceFor(report = {}, candidate = null, session = {}, plan = {}) {
+  if (!candidate || report?.checkoutSummary?.stage !== 'cart') return null;
+  const summary = report.checkoutSummary || {};
+  if (Number(summary.cartItemCount) !== 1) return null;
+  const items = Array.isArray(summary.cartItems) ? summary.cartItems : [];
+  if (items.length !== 1) return null;
+  const item = items[0] || {};
+  const candidateAsin = String(candidate.asin || '').trim();
+  const itemAsin = String(item.asin || '').trim();
+  const candidateTitle = normalizedProductIdentityText(candidate.title || '');
+  const itemTitle = normalizedProductIdentityText(item.title || '');
+  const identityMatches = candidateAsin && itemAsin
+    ? candidateAsin === itemAsin
+    : Boolean(candidateTitle && itemTitle && candidateTitle === itemTitle);
+  if (!identityMatches) return null;
+  const candidatePrice = Number(candidate.price);
+  const itemPrice = Number(item.price);
+  if (Number.isFinite(candidatePrice) && candidatePrice > 0
+    && Number.isFinite(itemPrice) && itemPrice > 0
+    && Math.abs(candidatePrice - itemPrice) > 0.005) return null;
+  const quantity = Number.isInteger(Number(item.quantity)) && Number(item.quantity) > 0
+    ? Number(item.quantity)
+    : Number(summary.cartItemCount);
+  if (quantity !== 1) return null;
+  return normalizeActiveRunCartEvidence({
+    sessionId: session.id,
+    planHash: plan.planHash,
+    asin: candidateAsin || itemAsin,
+    title: candidate.title || item.title,
+    price: Number.isFinite(itemPrice) && itemPrice > 0 ? itemPrice : candidatePrice,
+    quantity,
+    verifiedAt: new Date().toISOString()
+  });
+}
+
 function normalizeActiveRun(entry = null) {
   const sessionId = String(entry?.sessionId || '').trim();
   if (!sessionId) return null;
@@ -578,6 +644,7 @@ function normalizeActiveRun(entry = null) {
     actionIndex: Number.isInteger(Number(entry?.actionIndex)) ? Number(entry.actionIndex) : null,
     nextActionIndex: Number.isInteger(Number(entry?.nextActionIndex)) ? Number(entry.nextActionIndex) : null,
     selectedCandidate: normalizeActiveRunCandidate(entry?.selectedCandidate),
+    cartEvidence: normalizeActiveRunCartEvidence(entry?.cartEvidence),
     waitExpiresAt: String(entry?.waitExpiresAt || '').trim() || null,
     merchantConfirmationStartedAt: String(entry?.merchantConfirmationStartedAt || '').trim() || null,
     merchantConfirmationDeadlineAt: String(entry?.merchantConfirmationDeadlineAt || '').trim() || null,
@@ -2671,11 +2738,24 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     receiptScope: `${String(plan?.planHash || '').slice(0, 96)}:${String(action?.id || '').slice(0, 96)}`
   };
   if (action.pendingOrderContinuation === true) {
+    const beforeContinuation = await chrome.tabs.get(tabId).catch(() => null);
+    if (beforeContinuation?.url
+      && !/\/(?:duplicateOrder|pending-order)(?:[/?#]|$)/i.test(beforeContinuation.url)
+      && !/order-confirmation|thank|order-confirmed/i.test(beforeContinuation.url)) {
+      await waitForTabNavigation(tabId, beforeContinuation.url, 5_000).catch(() => null);
+      await delay(180);
+    }
+    const activeRun = await getActiveRun();
     const priorReceiptScope = `${String(plan?.planHash || '').slice(0, 96)}:${String(action.priorFinalSubmitActionId || '').slice(0, 96)}`;
+    const priorPendingOrderDispatchReceipt = await finalOrderDispatchReceiptFor(tabId, action.receiptScope);
     action = {
       ...action,
+      sessionId: String(activeRun?.sessionId || ''),
+      planHash: String(plan?.planHash || ''),
       priorFinalSubmitDispatched: Boolean(await finalOrderDispatchReceiptFor(tabId, priorReceiptScope)),
-      boundCandidate: normalizeActiveRunCandidate((await getActiveRun())?.selectedCandidate)
+      priorPendingOrderDispatchReceipt,
+      boundCandidate: normalizeActiveRunCandidate(activeRun?.selectedCandidate),
+      boundCartEvidence: normalizeActiveRunCartEvidence(activeRun?.cartEvidence)
     };
   }
   if (plan.targetDomain === 'amazon.com' && action.type !== 'navigate') {
@@ -3244,6 +3324,7 @@ async function runSession(rawSession) {
       safeFieldsFilled: [],
       checkoutSelections: [],
       selectedCandidate: null,
+      cartEvidence: normalizeActiveRunCartEvidence(interruptedRun?.cartEvidence),
       initialCartItemCount: null,
       reusedPreparedCart: false,
       localCheckoutProfileExpected: checkoutProfileExpected,
@@ -3477,6 +3558,8 @@ async function runSession(rawSession) {
         progress.directSearchResultCart = Boolean(outcome.directSearchResultCart);
       }
       let report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+      const observedCartEvidence = verifiedCartEvidenceFor(report, progress.selectedCandidate, session, plan);
+      if (observedCartEvidence) progress.cartEvidence = observedCartEvidence;
       if (action.type === 'final_submit' && Array.isArray(outcome.finalSubmitReceipts)) {
         // The executor returns both pre-navigation receipts in its signed
         // action response. Preserve that explicit pair even if a merchant
@@ -3546,6 +3629,17 @@ async function runSession(rawSession) {
         profileCorrectionMissed: Boolean(outcome.profileCorrectionMissed),
         paymentAutofillRequired: Boolean(outcome.paymentAutofillRequired),
         profileTransitions: Array.isArray(outcome.profileTransitions) ? outcome.profileTransitions : [],
+        pendingOrderMatchEvidence: outcome.pendingOrderMatchEvidence && typeof outcome.pendingOrderMatchEvidence === 'object'
+          ? {
+              marker: Boolean(outcome.pendingOrderMatchEvidence.marker),
+              identityMatches: Boolean(outcome.pendingOrderMatchEvidence.identityMatches),
+              identitySource: String(outcome.pendingOrderMatchEvidence.identitySource || '').slice(0, 32),
+              priceMatches: Boolean(outcome.pendingOrderMatchEvidence.priceMatches),
+              priceSource: String(outcome.pendingOrderMatchEvidence.priceSource || '').slice(0, 32),
+              quantityMatches: Boolean(outcome.pendingOrderMatchEvidence.quantityMatches),
+              quantitySource: String(outcome.pendingOrderMatchEvidence.quantitySource || '').slice(0, 32)
+            }
+          : null,
         merchantCheckoutDefault: outcome.merchantCheckoutDefault && typeof outcome.merchantCheckoutDefault === 'object'
           ? {
               attempted: Boolean(outcome.merchantCheckoutDefault.attempted),
@@ -3752,6 +3846,7 @@ async function runSession(rawSession) {
         actionIndex: finalSubmitReceiptRecorded ? null : index,
         nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
         selectedCandidate: progress.selectedCandidate,
+        cartEvidence: progress.cartEvidence,
         finalSubmitAuthorityLease: actionStatus === 'completed' && nextAction?.type === 'final_submit'
           ? finalSubmitAuthorityLease
           : finalSubmitReceiptRecorded ? null : finalSubmitAuthorityLease
@@ -3782,6 +3877,7 @@ async function runSession(rawSession) {
           actionIndex: index,
           nextActionIndex: index,
           selectedCandidate: progress.selectedCandidate,
+          cartEvidence: progress.cartEvidence,
           merchantConfirmationStartedAt: durableRun?.merchantConfirmationStartedAt || new Date().toISOString(),
           merchantConfirmationDeadlineAt: executionAction.merchantConfirmationDeadlineAt || null,
           merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0)) + 1,

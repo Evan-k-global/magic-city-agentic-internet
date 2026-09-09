@@ -1802,6 +1802,37 @@
     }).filter(Boolean);
   }
 
+  function cartRowQuantity(row) {
+    const directValue = [
+      row?.getAttribute?.('data-quantity'),
+      row?.querySelector?.('select[name*="quantity" i], select[data-a-selector*="quantity" i]')?.value,
+      row?.querySelector?.('input[name*="quantity" i], input[data-a-selector*="quantity" i]')?.value,
+      row?.querySelector?.('[data-a-selector*="quantity" i] .a-dropdown-prompt, [aria-label*="quantity" i]')?.textContent
+    ].map((value) => String(value || '').trim()).find((value) => /^\d+$/.test(value));
+    if (directValue) return Number(directValue);
+    const rowText = compactText(row?.innerText || row?.textContent || '', 1800);
+    const match = rowText.match(/\b(?:quantity|qty)\s*(?::|\(|x)?\s*(\d+)\b/i);
+    return match ? Number(match[1]) : null;
+  }
+
+  function activeCartItemEvidence() {
+    return activeCartFulfillmentRows().slice(0, 4).map((row) => {
+      const link = row.querySelector?.('a[href*="/dp/"], a[href*="/gp/product/"]') || null;
+      const href = String(link?.href || '');
+      const asinFromUrl = href.match(/\/(?:dp|gp\/product)\/([A-Za-z0-9_-]{6,32})(?:[/?#]|$)/i)?.[1] || '';
+      const asin = String(row.getAttribute?.('data-asin') || row.querySelector?.('[data-asin]')?.getAttribute?.('data-asin') || asinFromUrl).trim().slice(0, 32);
+      const rowText = compactText(row.innerText || row.textContent || '', 1800);
+      const title = compactText(link?.textContent || row.querySelector?.('h2, h3, [data-testid*="title" i]')?.textContent || rowText, 180);
+      const price = priceFromText(rowText);
+      return {
+        asin: asin || null,
+        title: title || null,
+        quantity: cartRowQuantity(row),
+        price: Number.isFinite(price) && price > 0 ? price : null
+      };
+    }).filter((item) => item.asin || item.title);
+  }
+
   function findAmazonProceedToCheckoutControl() {
     const selectors = [
       '#sc-buy-box-ptc-button input[name="proceedToRetailCheckout"]',
@@ -1906,6 +1937,7 @@
         cartNonPrimeItems: cartFulfillment.nonPrimeItems,
         totalEvidence,
         cartItemCount: Number.isFinite(cartCount) ? cartCount : null,
+        cartItems: activeCartItemEvidence(),
         itemHints: activeCartItemHints(),
         nextAction: proceed ? 'Opening checkout' : 'Find checkout button',
         optionalOfferVisible: false,
@@ -2115,6 +2147,7 @@
     const cartFulfillment = classification.surface === 'cart'
       ? cartPrimeFulfillmentEvidence(rawPageText)
       : { observed: false, itemCount: 0, allPrimeFreeEligible: null, allPrimeEligible: null, ineligibleItems: [], nonPrimeItems: [] };
+    const cartItems = classification.surface === 'cart' ? activeCartItemEvidence() : [];
     const productDeliveredAmount = totalEvidence.kind === 'product_price'
       && Number.isFinite(totalEvidence.amount)
       && productDelivery.known
@@ -2253,6 +2286,7 @@
       cartNonPrimeItems: cartFulfillment.nonPrimeItems,
       totalEvidence,
       cartItemCount: Number.isFinite(cartItemCount) ? cartItemCount : null,
+      cartItems,
       itemHints,
       nextAction: optionalOfferVisible ? 'Decline optional offer' : paymentNeedsHuman ? 'Payment needs you in Chrome' : nextAction,
       optionalOfferVisible,
@@ -3811,23 +3845,59 @@
     const candidate = action.boundCandidate && typeof action.boundCandidate === 'object'
       ? action.boundCandidate
       : null;
-    const stopWords = new Set(['and', 'the', 'with', 'from', 'for', 'your', 'pack', 'count']);
-    const titleTokens = normalizeMatchText(candidate?.title || '')
-      .split(/\s+/)
-      .filter((token) => token.length >= 3 && !stopWords.has(token));
-    const matchedTitleTokens = titleTokens.filter((token) => normalizedText.split(/\s+/).includes(token));
-    const titleMatches = titleTokens.length >= 2
-      && matchedTitleTokens.length >= Math.min(2, titleTokens.length)
-      && matchedTitleTokens.length / titleTokens.length >= 0.5;
-    const candidatePrice = Number(candidate?.price);
-    const priceMatches = Number.isFinite(candidatePrice) && candidatePrice > 0
-      && rawText.includes(`$${candidatePrice.toFixed(2)}`);
+    const cartEvidence = action.boundCartEvidence && typeof action.boundCartEvidence === 'object'
+      ? action.boundCartEvidence
+      : null;
+    const expectedAsin = String(cartEvidence?.asin || candidate?.asin || '').trim();
+    const expectedTitle = normalizeMatchText(cartEvidence?.title || candidate?.title || '');
+    const productRows = Array.from(document.querySelectorAll([
+      '[data-asin]:not([data-asin=""])',
+      '[data-item-index]',
+      '[data-testid*="item" i]',
+      'article',
+      'li'
+    ].join(','))).filter(visible);
+    const productLinks = Array.from(document.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]')).filter(visible);
+    const rowFor = (element) => element?.closest?.('[data-asin]:not([data-asin=""]), [data-item-index], [data-testid*="item" i], article, li') || element || null;
+    const asinElement = expectedAsin
+      ? Array.from(document.querySelectorAll('[data-asin]:not([data-asin=""])')).find((element) => String(element.getAttribute('data-asin') || '').trim() === expectedAsin)
+      : null;
+    const asinLink = expectedAsin
+      ? productLinks.find((link) => new RegExp(`/(?:dp|gp/product)/${expectedAsin}(?:[/?#]|$)`, 'i').test(String(link.href || '')))
+      : null;
+    const asinRow = rowFor(asinElement || asinLink);
+    const titleElement = expectedTitle
+      ? [...productLinks, ...Array.from(document.querySelectorAll('h1, h2, h3, [data-testid*="title" i]')).filter(visible)]
+          .find((element) => normalizeMatchText(element.innerText || element.textContent || '') === expectedTitle)
+      : null;
+    const exactTitleRow = rowFor(titleElement)
+      || productRows.find((row) => normalizeMatchText(row.innerText || row.textContent || '') === expectedTitle);
+    const identityRow = asinRow || exactTitleRow;
+    const identityMatches = Boolean(identityRow);
+    const candidatePrice = Number(cartEvidence?.price ?? candidate?.price);
+    const identityText = String(identityRow?.innerText || identityRow?.textContent || '');
+    const priceMatchesInIdentityRow = Number.isFinite(candidatePrice) && candidatePrice > 0
+      && identityText.includes(`$${candidatePrice.toFixed(2)}`);
+    const singleItemOrderTotalMatches = Number(cartEvidence?.quantity) === 1
+      && Number.isFinite(candidatePrice)
+      && candidatePrice > 0
+      && new RegExp(`\\border total\\s*:?\\s*\\$\\s*${candidatePrice.toFixed(2).replace('.', '\\.')}`, 'i').test(rawText);
+    const priceMatches = Boolean(identityMatches && (priceMatchesInIdentityRow || singleItemOrderTotalMatches));
     const expectedItemCount = Number(action.expectedItemCount || 0);
-    const quantityMatches = Number.isInteger(expectedItemCount) && expectedItemCount > 0 && new RegExp(
-      `(?:quantity|qty|subtotal)\\s*(?:\\(|:)?\\s*${expectedItemCount}\\s*(?:items?)?\\)?`,
-      'i'
-    ).test(rawText);
-    return { marker, titleMatches, priceMatches, quantityMatches };
+    const quantityMatches = Number.isInteger(expectedItemCount)
+      && expectedItemCount > 0
+      && Number(cartEvidence?.quantity) === expectedItemCount
+      && cartEvidence?.sessionId === action.sessionId
+      && cartEvidence?.planHash === action.planHash;
+    return {
+      marker,
+      identityMatches,
+      identitySource: asinRow ? 'asin' : exactTitleRow ? 'exact_title' : 'none',
+      priceMatches,
+      priceSource: priceMatchesInIdentityRow ? 'identity_row' : singleItemOrderTotalMatches ? 'single_item_order_total' : 'none',
+      quantityMatches,
+      quantitySource: quantityMatches ? 'verified_cart' : 'none'
+    };
   }
 
   async function confirmPendingOrder(action = {}, profile = {}) {
@@ -3839,6 +3909,20 @@
         finalSubmitRequested: true,
         orderSubmitted: true,
         reason: 'Merchant order confirmation is already visible.',
+        state
+      };
+    }
+    const durableDispatch = action.priorPendingOrderDispatchReceipt;
+    if (durableDispatch?.kind === 'final_order'
+      && durableDispatch?.phase === 'click_dispatched'
+      && durableDispatch?.receiptScope === action.receiptScope) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        finalSubmitReceipt: durableDispatch,
+        pendingOrderContinuationPresent: true,
+        reason: 'Pending-order continuation was already dispatched; awaiting merchant confirmation.',
         state
       };
     }
@@ -3856,11 +3940,36 @@
     if (action.priorFinalSubmitDispatched !== true) {
       return { completed: false, reason: 'The pending order is not bound to a recorded first final-order dispatch.', state };
     }
-    if (!evidence.titleMatches || !evidence.priceMatches || !evidence.quantityMatches) {
+    if (!evidence.identityMatches || !evidence.priceMatches || !evidence.quantityMatches) {
       return {
         completed: false,
         reason: 'The pending order did not match the current mission item, quantity, and price.',
         pendingOrderMatchEvidence: evidence,
+        state
+      };
+    }
+    const finalOrderReceipts = finalOrderReceiptsFor(state);
+    const existingDispatch = priorFinalOrderReceipt(action.id, action.receiptScope, finalOrderReceipts, 'click_dispatched');
+    if (existingDispatch) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        finalSubmitReceipt: existingDispatch,
+        pendingOrderContinuationPresent: true,
+        pendingOrderMatchEvidence: evidence,
+        reason: 'Pending-order continuation was already dispatched; awaiting merchant confirmation.',
+        state
+      };
+    }
+    const existingIntent = priorFinalOrderReceipt(action.id, action.receiptScope, finalOrderReceipts, 'final_submit_intent');
+    if (existingIntent) {
+      return {
+        completed: false,
+        noReplay: true,
+        pendingOrderContinuationPresent: true,
+        pendingOrderMatchEvidence: evidence,
+        reason: 'Pending-order continuation was interrupted before the native merchant click. Magic City will not replay it.',
         state
       };
     }

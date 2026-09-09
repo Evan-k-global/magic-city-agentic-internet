@@ -712,12 +712,29 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/checkout/pending-order') {
+    const pendingTitle = searchParams.get('variant') === 'cashew' ? 'Nature Valley Cashew Granola Bars' : 'Test Gadget';
+    const pendingAsin = searchParams.get('variant') === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
+    const pendingClick = searchParams.get('stay') === '1'
+      ? ''
+      : Number(checkoutFixture.pendingOrderConfirmationDelayMs) > 0
+        ? `location.href='/checkout/processing-order?delay=${Number(checkoutFixture.pendingOrderConfirmationDelayMs)}';`
+        : "location.href='/checkout?confirmed=1';";
     return [
       '<main><h1>This is a pending order</h1>',
-      '<p>Test Gadget</p><p>Quantity: 1</p><p>Order total: $3.50</p>',
+      `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$3.50</p></section>`,
+      '<p>Order total: $3.50</p>',
       '<p>Do you want to order these items again?</p>',
       '<div id="amazon-pending-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="confirmPendingOrderButtonId" type="submit" /></div>',
-      '<script>document.addEventListener(\'click\', (event) => { if (event.target?.id !== \'confirmPendingOrderButtonId\') return; const count=Number(sessionStorage.getItem(\'magic-city-pending-final-clicks\')||0)+1; sessionStorage.setItem(\'magic-city-pending-final-clicks\',String(count)); location.href=\'/checkout?confirmed=1\'; }, true)</script>',
+      `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'confirmPendingOrderButtonId') return; const count=Number(sessionStorage.getItem('magic-city-pending-final-clicks')||0)+1; sessionStorage.setItem('magic-city-pending-final-clicks',String(count)); ${pendingClick} }, true)</script>`,
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/checkout/processing-order') {
+    const delayMs = Math.max(1_000, Math.min(90_000, Number(searchParams.get('delay')) || 1_000));
+    return [
+      '<main><h1>Processing order</h1>',
+      '<p>Amazon is confirming this purchase.</p>',
+      `<script>setTimeout(() => { location.href='/checkout?confirmed=1'; }, ${delayMs})</script>`,
       '</main>'
     ].join('');
   }
@@ -867,7 +884,7 @@ async function main() {
         if (delayLeaseExpiryCheckpoint && expected.id === 'inspect-before-final-submit') {
           await new Promise((resolve) => setTimeout(resolve, 1_250));
         }
-        checkpoints.push(body);
+        checkpoints.push({ ...body, testReceivedAtMs: Date.now() });
         const advanced = body.planActionStatus !== 'waiting';
         session = {
           ...session,
@@ -1800,13 +1817,21 @@ async function main() {
     });
     await paymentConfirmContinuationPage.close();
 
-    checkoutFixture = { ...checkoutFixture, pendingOrderContinuation: true };
+    checkoutFixture = {
+      ...checkoutFixture,
+      pendingOrderContinuation: true,
+      // Keep the merchant response deliberately slow. This proves the live
+      // extension connection survives a normal checkout that lasts longer
+      // than one Chrome heartbeat without making browser steps slow.
+      pendingOrderConfirmationDelayMs: 65_000
+    };
     await popup.close();
     const externalWakePage = await context.newPage();
     await externalWakePage.goto(`${baseUrl}/external-wake`);
     const cdp = await context.newCDPSession(externalWakePage);
     await cdp.send('ServiceWorker.enable');
     await cdp.send('ServiceWorker.stopAllWorkers');
+    const externalWakeStartedAtMs = Date.now();
     const externalWakePromise = externalWakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
       const startedAt = performance.now();
       const progress = [];
@@ -1851,7 +1876,7 @@ async function main() {
       fail(`browser_extension_claim_startup_checkpoint_missing_or_advanced:${JSON.stringify(checkpoints)}`);
     }
     try {
-      await waitFor(() => Boolean(fulfillment), 40_000);
+      await waitFor(() => Boolean(fulfillment), 90_000);
     } catch (error) {
       const diagnosticPage = await context.newPage();
       await diagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -1887,26 +1912,138 @@ async function main() {
     if (externalWake.response.result.requestedSessionId !== session.id) {
       fail(`browser_extension_external_wake_wrong_session:${JSON.stringify(externalWake)}`);
     }
-    if (externalWake.elapsedMs >= 30_000 || !externalWake.progress?.length) {
-      fail(`browser_extension_active_run_port_did_not_bypass_alarm_pacing:${JSON.stringify({ elapsedMs: externalWake.elapsedMs, progress: externalWake.progress || [] })}`);
+    const connectedWorkerIds = [...new Set((externalWake.progress || [])
+      .map((entry) => String(entry?.activeRun?.workerId || ''))
+      .filter(Boolean))];
+    const pendingContinuationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
+      && checkpoint.planActionStatus === 'completed');
+    const continuationDispatchMs = Number(pendingContinuationCheckpoint?.testReceivedAtMs || 0) - externalWakeStartedAtMs;
+    if (externalWake.elapsedMs < 60_000
+      || externalWake.elapsedMs >= 90_000
+      || externalWake.progress?.length < 4
+      || connectedWorkerIds.length !== 1
+      || continuationDispatchMs <= 0
+      || continuationDispatchMs >= 30_000) {
+      fail(`browser_extension_active_run_port_lifecycle_failed:${JSON.stringify({
+        elapsedMs: externalWake.elapsedMs,
+        progressCount: externalWake.progress?.length || 0,
+        connectedWorkerIds,
+        continuationDispatchMs
+      })}`);
     }
     recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
       sessionId: session.id,
       queuedSessions: 2,
       completionMs: Math.round(externalWake.elapsedMs),
+      continuationDispatchMs,
+      progressPulses: externalWake.progress.length,
+      workerCount: connectedWorkerIds.length,
       startupCheckpoint: 'open-site waiting'
     });
     const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
     const pendingFinalClicks = primaryStorePage
       ? await primaryStorePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0))
       : 0;
+    const pendingDiagnosticPage = await context.newPage();
+    await pendingDiagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
+    const pendingRunnerState = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
+      chrome.storage.local.get(['activeRun'], resolve);
+    }));
     if (pendingFinalClicks !== 1
       || !checkpoints.some((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
         && checkpoint.planActionStatus === 'completed')) {
-      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ pendingFinalClicks, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus })) })}`);
+      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ pendingFinalClicks, activeRun: pendingRunnerState.activeRun, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus, url: checkpoint.browser?.url, reason: checkpoint.browser?.runnerStep?.reason, evidence: checkpoint.browser?.runnerStep?.pendingOrderMatchEvidence, cartItems: checkpoint.browser?.checkoutSummary?.cartItems })) })}`);
+    }
+    const durableDispatches = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
+      chrome.storage.local.get(['finalOrderDispatches'], resolve);
+    }));
+    const durableTabReceipts = Object.values(durableDispatches.finalOrderDispatches || {}).flatMap((value) => Array.isArray(value) ? value : [value]);
+    const durableScopes = durableTabReceipts.map((receipt) => receipt?.receiptScope).filter(Boolean);
+    if (!durableScopes.includes(`${plan.planHash}:submit-final-order`)
+      || !durableScopes.includes(`${plan.planHash}:confirm-pending-order`)) {
+      fail(`browser_extension_pending_order_dispatch_receipts_not_both_durable:${JSON.stringify(durableDispatches)}`);
     }
     recordPurchaseScenario('Matching Amazon pending order is continued exactly once', { pendingFinalClicks });
-    checkoutFixture = { ...checkoutFixture, pendingOrderContinuation: false };
+
+    const replayPage = await context.newPage();
+    await replayPage.goto(`${baseUrl}/checkout/pending-order?stay=1`);
+    const replayTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), replayPage.url());
+    const replayAction = {
+      id: 'confirm-pending-order',
+      type: 'final_submit',
+      missionAction: 'final_submit',
+      autoSubmitAfterVerifiedCheckout: true,
+      pendingOrderContinuation: true,
+      priorFinalSubmitDispatched: true,
+      receiptScope: 'pending-replay-plan:confirm-pending-order',
+      sessionId: 'pending-replay-session',
+      planHash: 'pending-replay-plan',
+      expectedItemCount: 1,
+      boundCandidate: { asin: 'BROWSER-SMOKE-ASIN', title: 'Test Gadget', price: 3.5 },
+      boundCartEvidence: {
+        sessionId: 'pending-replay-session',
+        planHash: 'pending-replay-plan',
+        asin: 'BROWSER-SMOKE-ASIN',
+        title: 'Test Gadget',
+        price: 3.5,
+        quantity: 1
+      }
+    };
+    const invokePendingAction = async (tabId, action) => pendingDiagnosticPage.evaluate(async ({ targetTabId, pendingAction }) => {
+      await chrome.scripting.executeScript({ target: { tabId: targetTabId }, files: ['executor.js'] });
+      return chrome.tabs.sendMessage(targetTabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action: pendingAction, checkoutProfile: {} });
+    }, { targetTabId: tabId, pendingAction: action });
+    const firstPendingDispatch = await invokePendingAction(replayTab.id, replayAction);
+    await replayPage.waitForTimeout(300);
+    // Simulate content-script reinjection after page-local receipts were lost.
+    // The background's durable action-scoped receipt must still veto replay.
+    await replayPage.evaluate(() => sessionStorage.removeItem('magic_city_browser_action_receipts_v1'));
+    const repeatedPendingDispatch = await invokePendingAction(replayTab.id, {
+      ...replayAction,
+      priorPendingOrderDispatchReceipt: firstPendingDispatch?.finalSubmitReceipt || null
+    });
+    const replayClickCount = await replayPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!firstPendingDispatch?.completed
+      || repeatedPendingDispatch?.skipped !== true
+      || repeatedPendingDispatch?.finalSubmitReceipt?.phase !== 'click_dispatched'
+      || replayClickCount !== 1) {
+      fail(`browser_extension_pending_order_replay_guard_failed:${JSON.stringify({ firstPendingDispatch, repeatedPendingDispatch, replayClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation reuses action-scoped no-replay receipts', { replayClickCount });
+    await replayPage.close();
+
+    const pendingMismatchPage = await context.newPage();
+    await pendingMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&variant=cashew`);
+    const mismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingMismatchPage.url());
+    const mismatchOutcome = await invokePendingAction(mismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-mismatch-session',
+      planHash: 'pending-mismatch-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-ALMOND', title: 'Nature Valley Almond Granola Bars', price: 3.5 },
+      boundCartEvidence: {
+        sessionId: 'pending-mismatch-session',
+        planHash: 'pending-mismatch-plan',
+        asin: 'NATURE-VALLEY-ALMOND',
+        title: 'Nature Valley Almond Granola Bars',
+        price: 3.5,
+        quantity: 1
+      }
+    });
+    const mismatchClickCount = await pendingMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (mismatchOutcome?.completed !== false
+      || mismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== false
+      || mismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_variant_mismatch_not_rejected:${JSON.stringify({ mismatchOutcome, mismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects a same-price product variant mismatch', { mismatchClickCount });
+    await pendingMismatchPage.close();
+    await pendingDiagnosticPage.close();
+    checkoutFixture = {
+      ...checkoutFixture,
+      pendingOrderContinuation: false,
+      pendingOrderConfirmationDelayMs: 0
+    };
 
     popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -3594,6 +3731,114 @@ async function main() {
     if (stalePendingResponse?.ok || !/no browser mission is waiting/i.test(String(stalePendingResponse?.error || ''))) {
       fail(`browser_extension_stale_permission_mission_visible:${JSON.stringify(stalePendingResponse)}`);
     }
+
+    // Disconnect the website's active port while a long merchant observation
+    // is in flight, then terminate the MV3 worker. The durable active run and
+    // crash-recovery alarm must resume the same read-only confirmation step;
+    // no browser mutation is replayed.
+    checkpoints.length = 0;
+    fulfillment = null;
+    distractorSession = null;
+    const disconnectedSessionId = 'browser-smoke-active-port-disconnect-session';
+    const disconnectedPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-active-port-disconnect-session',
+      startUrl: `${baseUrl}/checkout/processing-order?delay=40000`,
+      actions: [
+        {
+          id: 'open-processing-order',
+          type: 'navigate',
+          missionAction: 'browser_open',
+          url: `${baseUrl}/checkout/processing-order?delay=40000`
+        },
+        {
+          id: 'confirm-disconnected-order',
+          type: 'inspect',
+          missionAction: 'read_public_page',
+          awaitMerchantOrderConfirmation: true,
+          merchantConfirmationTimeoutMs: 75_000,
+          expectedMilestone: 'order_submitted'
+        }
+      ]
+    });
+    session = {
+      ...session,
+      id: disconnectedSessionId,
+      status: 'queued',
+      claimedByPluginId: null,
+      fulfillment: null,
+      extensionCheckoutProfileEnabled: false,
+      executionRequestedAt: new Date().toISOString(),
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        capabilityId: 'browser-smoke-active-port-disconnect-capability',
+        subject: { sessionId: disconnectedSessionId },
+        expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+      },
+      extensionMissionPlan: disconnectedPlan,
+      // This scenario begins after the irreversible click was already
+      // dispatched. The only recoverable work is observing its merchant
+      // confirmation, so retain that verified milestone explicitly.
+      extensionMissionPlanState: {
+        planHash: disconnectedPlan.planHash,
+        nextActionIndex: 0,
+        completedActionIds: [],
+        verifiedMilestones: ['final_submit_requested']
+      },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    const disconnectWakePage = await context.newPage();
+    await disconnectWakePage.goto(`${baseUrl}/external-wake`);
+    const disconnectedPort = await disconnectWakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+      const progress = [];
+      const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+      const timer = setTimeout(() => resolve({ disconnected: false, progress, error: 'confirmation_progress_timeout' }), 25_000);
+      port.onMessage.addListener((payload) => {
+        if (payload?.type !== 'RUNNER_PROGRESS') return;
+        progress.push(payload);
+        if (payload?.activeRun?.actionId !== 'confirm-disconnected-order') return;
+        clearTimeout(timer);
+        port.disconnect();
+        resolve({ disconnected: true, progress });
+      });
+      port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+      });
+      port.postMessage({ type: 'RUN_PENDING_SESSIONS', sessionId });
+    }), { extensionId, sessionId: disconnectedSessionId });
+    if (!disconnectedPort.disconnected) {
+      fail(`browser_extension_active_port_disconnect_not_exercised:${JSON.stringify(disconnectedPort)}`);
+    }
+    const disconnectRecoveryCdp = await context.newCDPSession(disconnectWakePage);
+    await disconnectRecoveryCdp.send('ServiceWorker.enable');
+    await disconnectRecoveryCdp.send('ServiceWorker.stopAllWorkers');
+    try {
+      await waitFor(() => Boolean(fulfillment), 60_000);
+    } catch {
+      const runnerState = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
+      }));
+      fail(`browser_extension_active_port_disconnect_recovery_timeout:${JSON.stringify({ runnerState, checkpoints })}`);
+    }
+    const disconnectWorkerStarts = [...new Set(checkpoints
+      .map((checkpoint) => String(checkpoint?.runnerTiming?.workerStartedAt || ''))
+      .filter(Boolean))];
+    const disconnectedConfirmation = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-disconnected-order'
+      && checkpoint.planActionStatus === 'completed');
+    if (!fulfillment
+      || disconnectedConfirmation?.browser?.orderSubmitted !== true
+      || !disconnectedConfirmation?.verifiedMilestones?.includes('order_submitted')
+      || disconnectWorkerStarts.length < 2) {
+      fail(`browser_extension_active_port_disconnect_not_recovered:${JSON.stringify({ fulfillment, disconnectWorkerStarts, checkpoints })}`);
+    }
+    recordPurchaseScenario('Disconnected active port recovers a long read-only confirmation after MV3 restart', {
+      progressPulsesBeforeDisconnect: disconnectedPort.progress.length,
+      workerStarts: disconnectWorkerStarts.length,
+      orderSubmitted: true
+    });
+    await disconnectWakePage.close();
+
     if (purchaseScenarioResults.length < 10) {
       fail(`browser_extension_purchase_matrix_incomplete:${JSON.stringify(purchaseScenarioResults)}`);
     }

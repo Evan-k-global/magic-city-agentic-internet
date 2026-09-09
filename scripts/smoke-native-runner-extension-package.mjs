@@ -73,6 +73,16 @@ if (!/function normalizeActiveRunCandidate/.test(packagedLegacyBackground)
   || !/selectedCandidate:\s*progress\.selectedCandidate/.test(packagedLegacyBackground)) {
   fail('interrupted cart actions must retain a compact selected-product identity for replay protection');
 }
+if (!/function normalizeActiveRunCartEvidence/.test(packagedLegacyBackground)
+  || !/function verifiedCartEvidenceFor/.test(packagedLegacyBackground)
+  || !/boundCartEvidence:\s*normalizeActiveRunCartEvidence/.test(packagedLegacyBackground)) {
+  fail('pending-order continuation must use session-bound evidence from the verified one-item cart');
+}
+if (!/Array\.isArray\(dispatches\[tabKey\]\)/.test(packagedLegacyBackground)
+  || !/receipts\.find\(\(receipt\) => receipt\?\.receiptScope/.test(packagedLegacyBackground)
+  || !/priorPendingOrderDispatchReceipt = await finalOrderDispatchReceiptFor/.test(packagedLegacyBackground)) {
+  fail('first-submit and continuation dispatch receipts must remain independently durable by action scope');
+}
 if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,600}phase: 'claiming'[\s\S]{0,1400}phase: 'claimed'/.test(packagedLegacyBackground)) {
   fail('the runner must persist recovery before its remote claim and retain it after claiming');
 }
@@ -116,6 +126,13 @@ if (!/function scheduleFinalOrderClick\(control\)/.test(packagedExecutor)
   || !/EXECUTOR_MESSAGE_LISTENER_KEY/.test(packagedExecutor)
   || !/function priorFinalOrderReceipt/.test(packagedExecutor)) {
   fail('final order dispatch must retain wrapper validation, durable receipts, and a single current executor listener');
+}
+if (!/function activeCartItemEvidence\(\)/.test(packagedExecutor)
+  || !/function pendingOrderMatchEvidence\(action/.test(packagedExecutor)
+  || !/identitySource:\s*asinRow \? 'asin'/.test(packagedExecutor)
+  || !/quantitySource:\s*quantityMatches \? 'verified_cart'/.test(packagedExecutor)
+  || !/action\.priorPendingOrderDispatchReceipt/.test(packagedExecutor)) {
+  fail('pending-order continuation must require exact product identity and previously verified cart quantity');
 }
 if (/if \(globalThis\.__magicCityExecutorInstalled\) return;/.test(packagedExecutor)
   || !/priorFinalOrderReceipt\([\s\S]{0,220}'click_dispatched'/.test(packagedExecutor)
