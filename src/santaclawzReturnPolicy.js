@@ -10,6 +10,28 @@ function sha256Hex(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function artifactResolutionFailure(validation, error) {
+  const statusCode = Number(error?.statusCode || error?.status || 0);
+  const reason = String(error?.message || '').trim();
+  if (statusCode === 409 && /^santaclawz_artifact_manifest_(?:request|name|hash)_mismatch$/.test(reason)) {
+    return { ...validation, ok: false, reason };
+  }
+  if (statusCode === 413) {
+    return {
+      ...validation,
+      ok: false,
+      reason: reason || 'santaclawz_deliverable_invalid'
+    };
+  }
+  return {
+    ...validation,
+    ok: false,
+    pending: true,
+    retryable: true,
+    reason: 'santaclawz_deliverable_temporarily_unavailable'
+  };
+}
+
 function normalizedManifestFiles(value) {
   if (!Array.isArray(value)) return null;
   const files = [];
@@ -190,7 +212,13 @@ export async function verifySantaClawzCompletedReturn(payload = {}, {
     const name = String(deliverable.name).trim();
     if (verifiedNames.has(name)) continue;
     if (typeof resolveArtifactBytes !== 'function') {
-      return { ...validation, ok: false, reason: 'santaclawz_deliverable_bytes_unavailable' };
+      return {
+        ...validation,
+        ok: false,
+        pending: true,
+        retryable: true,
+        reason: 'santaclawz_deliverable_verification_pending'
+      };
     }
     let resolved;
     try {
@@ -199,8 +227,8 @@ export async function verifySantaClawzCompletedReturn(payload = {}, {
         artifactManifestUrl: String(validation.verifiedOutput.artifact_manifest_url || '').trim(),
         requestId: validation.requestId
       });
-    } catch {
-      return { ...validation, ok: false, reason: 'santaclawz_deliverable_unavailable' };
+    } catch (error) {
+      return artifactResolutionFailure(validation, error);
     }
     const bytes = Buffer.isBuffer(resolved?.bytes)
       ? resolved.bytes

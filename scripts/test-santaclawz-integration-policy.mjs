@@ -240,4 +240,27 @@ assert.equal((await verifySantaClawzCompletedReturn(referencedReturn, {
   resolveArtifactBytes: async () => ({ bytes: Buffer.from('wrong bytes', 'utf8') })
 })).reason, 'santaclawz_deliverable_hash_mismatch');
 
+let transientDownloadAttempts = 0;
+const resolveAfterTransientOutage = async () => {
+  transientDownloadAttempts += 1;
+  if (transientDownloadAttempts === 1) {
+    throw Object.assign(new Error('santaclawz_artifact_http_502'), { statusCode: 502 });
+  }
+  return { bytes: Buffer.from(completedOutput, 'utf8') };
+};
+const pendingDownload = await verifySantaClawzCompletedReturn(referencedReturn, {
+  expectedRequestId: 'hire_current_contract',
+  resolveArtifactBytes: resolveAfterTransientOutage
+});
+assert.equal(pendingDownload.ok, false);
+assert.equal(pendingDownload.pending, true);
+assert.equal(pendingDownload.retryable, true);
+assert.equal(pendingDownload.reason, 'santaclawz_deliverable_temporarily_unavailable');
+const recoveredDownload = await verifySantaClawzCompletedReturn(referencedReturn, {
+  expectedRequestId: 'hire_current_contract',
+  resolveArtifactBytes: resolveAfterTransientOutage
+});
+assert.equal(recoveredDownload.ok, true);
+assert.equal(transientDownloadAttempts, 2);
+
 console.log('santaclawz integration policy regression passed');

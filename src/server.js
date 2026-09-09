@@ -14911,7 +14911,10 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
     payload?.executionState?.lifecycle?.returnRejection
   ].find((entry) => entry && typeof entry === 'object') || null;
   const returnValidation = verifiedReturn || validateSantaClawzCompletedReturn(payload, { expectedRequestId });
-  const malformedCurrentReturn = returnValidation.reason !== 'santaclawz_return_missing' && !returnValidation.ok;
+  const returnVerificationPending = returnValidation.pending === true || returnValidation.retryable === true;
+  const malformedCurrentReturn = !returnVerificationPending
+    && returnValidation.reason !== 'santaclawz_return_missing'
+    && !returnValidation.ok;
   const returnRejection = upstreamReturnRejection || (malformedCurrentReturn
     ? { code: returnValidation.reason, message: 'SantaClawz returned a result package that did not satisfy the current verified return contract.' }
     : null);
@@ -15023,6 +15026,7 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
     terminalFailure,
     returnRejected,
     returnRejection,
+    returnVerificationPending,
     returnValidation: returnValidation.ok
       ? {
           ok: true,
@@ -15031,7 +15035,12 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
           packageHash: returnValidation.packageHash,
           deliverableCount: returnValidation.deliverables.length
         }
-      : { ok: false, reason: returnValidation.reason },
+      : {
+          ok: false,
+          reason: returnValidation.reason,
+          pending: returnVerificationPending,
+          retryable: returnValidation.retryable === true
+        },
     incidentId,
     failureReason,
     protocolAllowsFreshPayment,
@@ -15043,6 +15052,8 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
     inlineOutputCount: delivery.inlineOutputs.length,
     nextAction: completed
       ? 'none'
+      : returnVerificationPending
+        ? 'retry_return_verification'
       : terminalFailure
         ? (agentFixRequired ? 'retry_new_job_after_agent_fix' : 'inspect_terminal_failure')
         : paymentAccepted

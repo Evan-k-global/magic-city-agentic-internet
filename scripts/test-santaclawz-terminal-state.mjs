@@ -129,4 +129,33 @@ const completed = summarize(true, {
 assert.equal(completed.completed, true);
 assert.equal(completed.returnValidation.ok, true);
 
+const pendingReturnVerification = summarize(true, {
+  paymentStatus: 'seller_settled',
+  settlementStatus: 'partially_settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: {
+    protocolState: 'DELIVERED_SETTLED',
+    paymentFinality: 'settled',
+    terminal: true,
+    sellerOutcome: 'completed'
+  },
+  protocolReturn
+}, {
+  expectedRequestId: 'hire_terminal_complete',
+  verifiedReturn: {
+    ok: false,
+    pending: true,
+    retryable: true,
+    reason: 'santaclawz_deliverable_temporarily_unavailable'
+  }
+});
+assert.equal(pendingReturnVerification.completed, false);
+assert.equal(pendingReturnVerification.paymentAccepted, true);
+assert.equal(pendingReturnVerification.terminalFailure, false);
+assert.equal(pendingReturnVerification.returnRejected, false);
+assert.equal(pendingReturnVerification.returnVerificationPending, true);
+assert.equal(pendingReturnVerification.safeToCreateFreshPayment, false);
+assert.equal(pendingReturnVerification.nextAction, 'retry_return_verification');
+
 console.log('santaclawz terminal-state regression passed');
