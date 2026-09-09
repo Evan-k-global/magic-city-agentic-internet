@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {
   SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID,
   isApprovedSantaClawzAgentId,
@@ -7,7 +8,10 @@ import {
   validateSantaClawzPaymentRequirement,
   validateSantaClawzRuntimeContract
 } from '../src/santaclawzIntegrationPolicy.js';
-import { validateSantaClawzCompletedReturn } from '../src/santaclawzReturnPolicy.js';
+import {
+  validateSantaClawzCompletedReturn,
+  verifySantaClawzCompletedReturn
+} from '../src/santaclawzReturnPolicy.js';
 
 const nowMs = Date.parse('2026-09-09T17:11:12.000Z');
 const ready = {
@@ -169,22 +173,29 @@ for (const mutate of [
   assert.equal(validateSantaClawzPaymentRequirement(changed, runtime).ok, false);
 }
 
+const completedOutput = '# Audit';
+const completedOutputHash = crypto.createHash('sha256').update(completedOutput).digest('hex');
+const completedFileHashes = { 'audit.md': completedOutputHash };
+const completedPackageHash = crypto.createHash('sha256').update(JSON.stringify(completedFileHashes)).digest('hex');
 const completedReturn = {
   schema_version: 'santaclawz-return/1.0',
   request_id: 'hire_current_contract',
   status: 'completed',
   agent_private: true,
   verified_output: {
-    package_hash: 'a'.repeat(64),
+    package_hash: completedPackageHash,
     hash_algorithm: 'sha256',
     verification_manifest: {
       input_digest_sha256: 'b'.repeat(64),
       checks_performed: ['dependency review'],
-      files_produced: [{ name: 'audit.md', sha256: 'c'.repeat(64) }],
+      request_id: 'hire_current_contract',
+      package_hash: completedPackageHash,
+      files_produced: [{ name: 'audit.md', sha256: completedOutputHash }],
+      file_hashes: completedFileHashes,
       blocked_suspicious_instructions: []
     },
-    deliverables: [{ name: 'audit.md', sha256: 'c'.repeat(64), content_type: 'text/markdown' }],
-    buyer_visible_outputs: [{ name: 'audit.md', text: '# Audit' }]
+    deliverables: [{ name: 'audit.md', sha256: completedOutputHash, content_type: 'text/markdown' }],
+    buyer_visible_outputs: [{ name: 'audit.md', text: completedOutput, sha256: completedOutputHash }]
   }
 };
 assert.equal(validateSantaClawzCompletedReturn(completedReturn, { expectedRequestId: 'hire_current_contract' }).ok, true);
@@ -194,5 +205,39 @@ assert.equal(validateSantaClawzCompletedReturn({
   ...completedReturn,
   verified_output: { ...completedReturn.verified_output, buyer_visible_outputs: [] }
 }).reason, 'santaclawz_buyer_delivery_missing');
+assert.equal(validateSantaClawzCompletedReturn({
+  ...completedReturn,
+  verified_output: {
+    ...completedReturn.verified_output,
+    buyer_visible_outputs: [{ name: 'audit.md', sha256: completedOutputHash }]
+  }
+}).reason, 'santaclawz_buyer_delivery_missing');
+assert.equal(validateSantaClawzCompletedReturn({
+  ...completedReturn,
+  verified_output: {
+    ...completedReturn.verified_output,
+    buyer_visible_outputs: [{ name: 'audit.md', text: '# Contradictory audit', sha256: completedOutputHash }]
+  }
+}).reason, 'santaclawz_inline_output_hash_mismatch');
+assert.equal((await verifySantaClawzCompletedReturn(completedReturn, {
+  expectedRequestId: 'hire_current_contract',
+  expectedInputDigestSha256: 'b'.repeat(64)
+})).ok, true);
+assert.equal((await verifySantaClawzCompletedReturn(completedReturn, {
+  expectedRequestId: 'hire_current_contract',
+  expectedInputDigestSha256: 'f'.repeat(64)
+})).reason, 'santaclawz_return_input_mismatch');
+
+const referencedReturn = structuredClone(completedReturn);
+referencedReturn.verified_output.deliverables[0].uri = 'https://api.santaclawz.ai/artifacts/audit.md';
+referencedReturn.verified_output.buyer_visible_outputs = [];
+assert.equal((await verifySantaClawzCompletedReturn(referencedReturn, {
+  expectedRequestId: 'hire_current_contract',
+  resolveArtifactBytes: async () => ({ bytes: Buffer.from(completedOutput, 'utf8') })
+})).ok, true);
+assert.equal((await verifySantaClawzCompletedReturn(referencedReturn, {
+  expectedRequestId: 'hire_current_contract',
+  resolveArtifactBytes: async () => ({ bytes: Buffer.from('wrong bytes', 'utf8') })
+})).reason, 'santaclawz_deliverable_hash_mismatch');
 
 console.log('santaclawz integration policy regression passed');

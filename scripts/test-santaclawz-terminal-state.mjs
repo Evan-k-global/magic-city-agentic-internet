@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { validateSantaClawzCompletedReturn } from '../src/santaclawzReturnPolicy.js';
 
@@ -87,22 +88,29 @@ const partial = summarize(true, {
 });
 assert.equal(partial.completed, false);
 
+const protocolOutput = '# Audit';
+const protocolOutputHash = crypto.createHash('sha256').update(protocolOutput).digest('hex');
+const protocolFileHashes = { 'audit.md': protocolOutputHash };
+const protocolPackageHash = crypto.createHash('sha256').update(JSON.stringify(protocolFileHashes)).digest('hex');
 const protocolReturn = {
   schema_version: 'santaclawz-return/1.0',
   request_id: 'hire_terminal_complete',
   status: 'completed',
   agent_private: true,
   verified_output: {
-    package_hash: 'a'.repeat(64),
+    package_hash: protocolPackageHash,
     hash_algorithm: 'sha256',
     verification_manifest: {
       input_digest_sha256: 'b'.repeat(64),
       checks_performed: ['audit'],
-      files_produced: ['audit.md'],
+      request_id: 'hire_terminal_complete',
+      package_hash: protocolPackageHash,
+      files_produced: [{ name: 'audit.md', sha256: protocolOutputHash }],
+      file_hashes: protocolFileHashes,
       blocked_suspicious_instructions: []
     },
-    deliverables: [{ name: 'audit.md', sha256: 'c'.repeat(64) }],
-    buyer_visible_outputs: [{ name: 'audit.md', text: '# Audit', sha256: 'c'.repeat(64) }]
+    deliverables: [{ name: 'audit.md', sha256: protocolOutputHash }],
+    buyer_visible_outputs: [{ name: 'audit.md', text: protocolOutput, sha256: protocolOutputHash }]
   }
 };
 const completed = summarize(true, {

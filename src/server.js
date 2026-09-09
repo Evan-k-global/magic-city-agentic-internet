@@ -254,7 +254,7 @@ import {
   validateSantaClawzPaymentRequirement,
   validateSantaClawzRuntimeContract
 } from './santaclawzIntegrationPolicy.js';
-import { validateSantaClawzCompletedReturn } from './santaclawzReturnPolicy.js';
+import { validateSantaClawzCompletedReturn, verifySantaClawzCompletedReturn } from './santaclawzReturnPolicy.js';
 import { buildExecutionTaskPackage, buildExecutionResult, describeCompletionState } from './executionRuntime.js';
 import {
   BROWSER_EXTENSION_PLAN_PROTOCOL,
@@ -14047,6 +14047,79 @@ async function requestSantaClawzJson(pathname, options = {}) {
   return requestSantaClawzEndpointJson(pathname, options);
 }
 
+async function fetchSantaClawzArtifactBytes(endpoint, { timeoutMs = 12000, maxBytes = 5 * 1024 * 1024 } = {}) {
+  const url = buildSantaClawzEndpointUrl(endpoint);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      redirect: 'error',
+      signal: controller.signal,
+      headers: {
+        accept: 'application/octet-stream, text/plain, application/json, text/markdown',
+        'user-agent': 'magic-city-santaclawz-return-verifier/1.0'
+      }
+    });
+    if (!response.ok) throw createHttpError(`santaclawz_artifact_http_${response.status}`, 502);
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    if (declaredLength > maxBytes) throw createHttpError('santaclawz_artifact_too_large', 413);
+    const chunks = [];
+    let received = 0;
+    const reader = response.body?.getReader();
+    if (!reader) throw createHttpError('santaclawz_artifact_body_missing', 502);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        throw createHttpError('santaclawz_artifact_too_large', 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (!received) throw createHttpError('santaclawz_artifact_size_invalid', 413);
+    return Buffer.concat(chunks, received);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveSantaClawzReturnArtifactBytes({ deliverable, artifactManifestUrl, requestId }) {
+  const directUri = String(deliverable?.uri || '').trim();
+  if (directUri) return { bytes: await fetchSantaClawzArtifactBytes(directUri) };
+  if (!artifactManifestUrl) return null;
+
+  const manifestBytes = await fetchSantaClawzArtifactBytes(artifactManifestUrl, { maxBytes: 256 * 1024 });
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes.toString('utf8'));
+  } catch {
+    throw createHttpError('santaclawz_artifact_manifest_invalid', 502);
+  }
+  const manifestRequestId = String(manifest.requestId || manifest.request_id || '').trim();
+  if (manifestRequestId && manifestRequestId !== String(requestId || '').trim()) {
+    throw createHttpError('santaclawz_artifact_manifest_request_mismatch', 409);
+  }
+  const manifestName = String(manifest.filename || manifest.name || '').trim();
+  if (manifestName && manifestName !== String(deliverable?.name || '').trim()) {
+    throw createHttpError('santaclawz_artifact_manifest_name_mismatch', 409);
+  }
+  const manifestDigest = String(
+    manifest.artifactDigestSha256 || manifest.digestSha256 || manifest.sha256 || ''
+  ).trim().toLowerCase();
+  if (manifestDigest && manifestDigest !== String(deliverable?.sha256 || '').trim().toLowerCase()) {
+    throw createHttpError('santaclawz_artifact_manifest_hash_mismatch', 409);
+  }
+  let downloadUrl = String(
+    manifest.artifactDownloadUrl || manifest.downloadUrl || manifest.artifactUrl || manifest.uri || ''
+  ).trim();
+  if (!downloadUrl && /\/manifest(?:\?|$)/.test(artifactManifestUrl)) {
+    downloadUrl = artifactManifestUrl.replace(/\/manifest(?=\?|$)/, '/download');
+  }
+  if (!downloadUrl) return null;
+  return { bytes: await fetchSantaClawzArtifactBytes(downloadUrl) };
+}
+
 async function requestSantaClawzConciergeJson(pathname, options = {}) {
   const apiKey = getSantaClawzConciergeApiKey();
   if (!isSantaClawzConciergeEnabled()) throw createHttpError('santaclawz_concierge_disabled', 409);
@@ -14673,7 +14746,12 @@ function isSantaClawzRequestTimeout(error) {
 
 const santaClawzSamePayloadRetriesInFlight = new Set();
 
+function isSantaClawzHireSubmissionEnabled() {
+  return MAGIC_CITY_SANTACLAWZ_LIVE;
+}
+
 function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
+  if (!isSantaClawzHireSubmissionEnabled()) return false;
   const directPayment = session?.santaclawzDirectPayment || {};
   const digest = String(directPayment.paymentPayloadDigestSha256 || '').trim();
   const retryResume = directPayment.paymentState?.retryResume || {};
@@ -14710,6 +14788,7 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
 
   setImmediate(async () => {
     try {
+      if (!isSantaClawzHireSubmissionEnabled()) return;
       const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
       const runtimeContract = await fetchSantaClawzRuntimeContract(approvedAgentId);
       const requirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, runtimeContract);
@@ -14726,14 +14805,22 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
       if (reconstructedDigest !== digest) {
         throw new Error('santaclawz_same_payload_digest_reconstruction_mismatch');
       }
+      const hireRequestBody = {
+        ...requireImmutableSantaClawzHireBody(directPayment),
+        paymentPayload
+      };
+      const hireRequestDigestSha256 = sha256HexDigest(JSON.stringify(hireRequestBody));
+      if (
+        directPayment.hireRequestDigestSha256
+        && hireRequestDigestSha256 !== directPayment.hireRequestDigestSha256
+      ) {
+        throw new Error('santaclawz_same_payload_hire_request_digest_mismatch');
+      }
       const hireEndpoint = directPayment.hireEndpoint
         || `/api/agents/${encodeURIComponent(externalSantaClawzAgentId(directPayment.agentId))}/hire`;
       const submit = await requestSantaClawzEndpointJson(hireEndpoint, {
         method: 'POST',
-        body: {
-          ...requireImmutableSantaClawzHireBody(directPayment),
-          paymentPayload
-        },
+        body: hireRequestBody,
         timeoutMs: 90_000,
         acceptedStatuses: [202, 400, 402, 409, 500, 503]
       });
@@ -14780,7 +14867,10 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
   return true;
 }
 
-function summarizeSantaClawzPaidExecution(responseOk, payload = {}, { expectedRequestId = '' } = {}) {
+function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
+  expectedRequestId = '',
+  verifiedReturn = null
+} = {}) {
   const operational = [
     payload?.operationalStatus,
     payload?.hireRequest?.operationalStatus,
@@ -14820,7 +14910,7 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, { expectedRe
     payload?.executionState?.returnRejection,
     payload?.executionState?.lifecycle?.returnRejection
   ].find((entry) => entry && typeof entry === 'object') || null;
-  const returnValidation = validateSantaClawzCompletedReturn(payload, { expectedRequestId });
+  const returnValidation = verifiedReturn || validateSantaClawzCompletedReturn(payload, { expectedRequestId });
   const malformedCurrentReturn = returnValidation.reason !== 'santaclawz_return_missing' && !returnValidation.ok;
   const returnRejection = upstreamReturnRejection || (malformedCurrentReturn
     ? { code: returnValidation.reason, message: 'SantaClawz returned a result package that did not satisfy the current verified return contract.' }
@@ -15179,8 +15269,15 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
       sessionForStatus.id,
       extractSantaClawzDelivery(combinedStatusPayload)
     );
+    const expectedReturnRequestId = sessionForStatus.santaclawzDirectPayment?.submittedRequestId || '';
+    const verifiedReturn = await verifySantaClawzCompletedReturn(combinedStatusPayload, {
+      expectedRequestId: expectedReturnRequestId,
+      expectedInputDigestSha256: sessionForStatus.santaclawzDirectPayment?.hireRequestDigestSha256 || '',
+      resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
+    });
     const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload, {
-      expectedRequestId: sessionForStatus.santaclawzDirectPayment?.submittedRequestId || ''
+      expectedRequestId: expectedReturnRequestId,
+      verifiedReturn
     });
     const runtimeHealth = recordSantaClawzRuntimeOutcome(sessionForStatus, summary);
     if (runtimeHealth?.status === 'quarantined') {
@@ -16876,6 +16973,11 @@ const server = http.createServer(async (req, res) => {
         issuedAtIso: paymentPayloadIssuedAtIso
       });
       const paymentPayloadDigestSha256 = santaClawzPaymentPayloadDigestSha256(paymentPayload);
+      const hireRequestBody = {
+        ...requireImmutableSantaClawzHireBody(directPayment),
+        paymentPayload
+      };
+      const hireRequestDigestSha256 = sha256HexDigest(JSON.stringify(hireRequestBody));
       const hireEndpoint = directPayment.hireEndpoint || `/api/agents/${encodeURIComponent(externalSantaClawzAgentId(directPayment.agentId))}/hire`;
       const x402RequestId = paymentPayload.requestId || directPayment.paymentRequirement?.requestId || null;
       const source = getSantaClawzSourceStatus();
@@ -16889,6 +16991,7 @@ const server = http.createServer(async (req, res) => {
         paymentPayloadIssuedAtIso,
         paymentPayloadDigestSha256,
         paymentPayloadDigestAlgorithm: 'santaclawz-json-stringify-v1',
+        hireRequestDigestSha256,
         x402RequestId,
         submittedRequestId: null,
         submitStatus: 202,
@@ -16909,10 +17012,7 @@ const server = http.createServer(async (req, res) => {
       try {
         submit = await requestSantaClawzEndpointJson(hireEndpoint, {
           method: 'POST',
-          body: {
-            ...requireImmutableSantaClawzHireBody(directPayment),
-            paymentPayload
-          },
+          body: hireRequestBody,
           timeoutMs: 20000,
           acceptedStatuses: [202, 400, 402, 409, 500, 503]
         });
@@ -16955,8 +17055,14 @@ const server = http.createServer(async (req, res) => {
         sessionForSubmit.id,
         extractSantaClawzDelivery(combinedSubmitPayload)
       );
+      const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || '',
+        expectedInputDigestSha256: hireRequestDigestSha256,
+        resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
+      });
       const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
-        expectedRequestId: submittedRequestId || ''
+        expectedRequestId: submittedRequestId || '',
+        verifiedReturn
       });
       const runtimeHealth = recordSantaClawzRuntimeOutcome({
         ...sessionForSubmit,
@@ -17232,10 +17338,16 @@ const server = http.createServer(async (req, res) => {
       const source = getSantaClawzSourceStatus();
       const submittedAt = new Date().toISOString();
       const paymentStateUrl = `${source.apiBase}/api/x402/payment-state?paymentPayloadDigestSha256=${encodeURIComponent(paymentPayloadDigestSha256)}`;
+      const hireRequestBody = {
+        ...requireImmutableSantaClawzHireBody(directPayment),
+        paymentPayload
+      };
+      const hireRequestDigestSha256 = sha256HexDigest(JSON.stringify(hireRequestBody));
       const pendingDirectPayment = sanitizeMetadata({
         ...directPayment,
         paymentPayloadDigestSha256,
         paymentPayloadDigestAlgorithm: 'santaclawz-json-stringify-v1',
+        hireRequestDigestSha256,
         x402RequestId,
         submittedRequestId: null,
         submitStatus: 202,
@@ -17256,10 +17368,7 @@ const server = http.createServer(async (req, res) => {
       try {
         submit = await requestSantaClawzEndpointJson(hireEndpoint, {
           method: 'POST',
-          body: {
-            ...requireImmutableSantaClawzHireBody(directPayment),
-            paymentPayload
-          },
+          body: hireRequestBody,
           timeoutMs: 20000,
           acceptedStatuses: [202, 400, 402, 409, 500, 503]
         });
@@ -17301,8 +17410,14 @@ const server = http.createServer(async (req, res) => {
         sessionForDirectSubmit.id,
         extractSantaClawzDelivery(combinedSubmitPayload)
       );
+      const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || '',
+        expectedInputDigestSha256: hireRequestDigestSha256,
+        resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
+      });
       const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
-        expectedRequestId: submittedRequestId || ''
+        expectedRequestId: submittedRequestId || '',
+        verifiedReturn
       });
       const runtimeHealth = recordSantaClawzRuntimeOutcome({
         ...sessionForDirectSubmit,
