@@ -23,6 +23,10 @@ assert.doesNotMatch(followUp, /collectAgentMatchText|recentCodeAuditConversation
 assert.doesNotMatch(followUp, /query_matched_santaclawz_directory/);
 
 assert.match(policySource, /MAGIC_CITY_SANTACLAWZ_AGENT_ALLOWLIST/);
+assert.match(
+  fs.readFileSync(new URL('../src/santaclawzAgentProvider.js', import.meta.url), 'utf8'),
+  /externalAgentId === SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID\s*\? \['developer-tools-agent'\]/
+);
 assert.match(serverSource, /isApprovedSantaClawzAgentId/);
 assert.match(serverSource, /santaclawz_enrollment_not_available/);
 assert.match(serverSource, /req\.method === 'POST' && agentId\.toLowerCase\(\)\.startsWith\('santaclawz:'\) && !isApprovedSantaClawzAgentId\(agentId\)/);

@@ -4,6 +4,7 @@ import {
   upsertSantaClawzPreflightSnapshot
 } from './store.js';
 import {
+  SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID,
   getSantaClawzApprovedExternalAgentIds,
   isApprovedSantaClawzAgentId
 } from './santaclawzIntegrationPolicy.js';
@@ -925,7 +926,9 @@ function normalizeSantaClawzAgent(agent) {
   if (isSantaClawzPlaceholderListing(agent)) return null;
   const externalAgentId = String(agent?.agentId || agent?.sessionId || '').trim();
   if (!externalAgentId) return null;
-  const supportedLanes = inferSupportedLanes(agent);
+  const supportedLanes = externalAgentId === SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID
+    ? ['developer-tools-agent']
+    : inferSupportedLanes(agent);
   const capabilities = supportedLanes.length
     ? supportedLanes
     : arrayOfStrings(agent?.capabilityTags).slice(0, 6);
