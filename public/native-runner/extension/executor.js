@@ -3857,18 +3857,15 @@
       'li'
     ].join(','))).filter(visible);
     const productLinks = Array.from(document.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]')).filter(visible);
-    const semanticRowFor = (element) => element?.closest?.('[data-asin]:not([data-asin=""]), [data-item-index], [data-testid*="item" i], article, li') || null;
-    const evidenceRowFor = (element) => {
-      const semanticRow = semanticRowFor(element);
-      if (semanticRow) return semanticRow;
-      let current = element || null;
-      for (let depth = 0; current && depth < 6 && current !== document.body; depth += 1) {
-        const text = String(current.innerText || current.textContent || '');
-        if (depth > 0 && /\$\s*\d{1,6}(?:\.\d{2})?/.test(text)) return current;
-        current = current.parentElement;
-      }
-      return element || null;
-    };
+    const semanticRowFor = (element) => element?.closest?.([
+      '[data-asin]:not([data-asin=""])',
+      '[data-item-index]',
+      '[data-testid*="item" i]',
+      'article',
+      'li',
+      '.a-fixed-left-grid-inner'
+    ].join(',')) || null;
+    const evidenceRowFor = (element) => semanticRowFor(element) || element || null;
     const asinElement = expectedAsin
       ? Array.from(document.querySelectorAll('[data-asin]:not([data-asin=""])')).find((element) => String(element.getAttribute('data-asin') || '').trim() === expectedAsin)
       : null;
@@ -3886,11 +3883,20 @@
     const identityMatches = Boolean(identityRow);
     const candidatePrice = Number(cartEvidence?.price ?? candidate?.price);
     const identityText = String(identityRow?.innerText || identityRow?.textContent || '');
-    const identityPrices = Array.from(identityText.matchAll(/\$\s*(\d{1,6}(?:\.\d{2})?)/g))
+    const identityPrices = Array.from(new Set(Array.from(identityText.matchAll(/\$\s*(\d{1,6}(?:\.\d{2})?)/g))
+      .filter((match) => {
+        const suffix = identityText.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 40);
+        const prefix = identityText.slice(Math.max(0, (match.index || 0) - 24), match.index || 0);
+        const unitSuffix = /^\s*(?:\/|per\b)\s*(?:\d+(?:\.\d+)?\s*)?(?:fl\s*oz|ounces?|oz|pounds?|lbs?|kilograms?|kgs?|grams?|g|milliliters?|ml|liters?|l|counts?|ct|each|units?)\b/i.test(suffix);
+        const unitPrefix = /(?:unit price|price per)\s*:?\s*$/i.test(prefix);
+        return !unitSuffix && !unitPrefix;
+      })
       .map((match) => Number(match[1]))
-      .filter((amount) => Number.isFinite(amount) && amount > 0);
+      .filter((amount) => Number.isFinite(amount) && amount > 0)));
+    const priceEvidenceAmbiguous = identityPrices.length > 1;
     const priceMatchesInIdentityRow = Number.isFinite(candidatePrice) && candidatePrice > 0
-      && identityPrices.some((amount) => Math.abs(amount - candidatePrice) <= 0.005);
+      && identityPrices.length === 1
+      && Math.abs(identityPrices[0] - candidatePrice) <= 0.005;
     const merchandiseSubtotalMatch = rawText.match(/\b(?:items?|merchandise subtotal|item subtotal|subtotal\s*\(\s*\d+\s*items?\s*\))\s*:?\s*\$\s*(\d{1,6}(?:\.\d{2})?)/i);
     const explicitMerchandiseSubtotal = merchandiseSubtotalMatch ? Number(merchandiseSubtotalMatch[1]) : null;
     const expectedItemCount = Number(action.expectedItemCount || 0);
@@ -3903,7 +3909,7 @@
     const merchandisePriceContradiction = Boolean(identityMatches
       && Number.isFinite(candidatePrice)
       && candidatePrice > 0
-      && (identityPrices.length > 0 && !priceMatchesInIdentityRow
+      && (identityPrices.length > 0 && (!priceMatchesInIdentityRow || priceEvidenceAmbiguous)
         || Number.isFinite(explicitMerchandiseSubtotal)
           && Number.isFinite(expectedMerchandiseSubtotal)
           && Math.abs(explicitMerchandiseSubtotal - expectedMerchandiseSubtotal) > 0.005));
@@ -3931,6 +3937,7 @@
       identitySource: asinRow ? 'asin' : exactTitleRow ? 'exact_title' : 'none',
       priceMatches,
       priceSource: priceMatchesInIdentityRow ? 'identity_row' : singleItemOrderTotalMatches ? 'single_item_order_total' : 'none',
+      priceEvidenceAmbiguous,
       merchandisePriceContradiction,
       explicitMerchandiseSubtotal: Number.isFinite(explicitMerchandiseSubtotal) ? explicitMerchandiseSubtotal : null,
       quantityMatches,

@@ -738,6 +738,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     const pendingAsin = searchParams.get('variant') === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
     const pendingQuantity = Number(searchParams.get('quantity')) || null;
     const pendingUnitPrice = Number(searchParams.get('unitPrice')) || 3.5;
+    const pendingComparisonUnitPrice = Number(searchParams.get('comparisonUnitPrice')) || 0.33;
+    const pendingComparisonUnit = searchParams.get('comparisonUnit') || 'ounce';
+    const siblingPriceOnly = searchParams.get('siblingPriceOnly') === '1';
     const pendingOrderTotal = Number(searchParams.get('orderTotal')) || pendingUnitPrice;
     const pendingClick = searchParams.get('stay') === '1'
       ? ''
@@ -747,7 +750,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     return [
       '<main><h1>This is a pending order</h1>',
       liveSparseDuplicateOrder
-        ? `<section class="a-section"><div class="a-fixed-left-grid"><img alt="" /><div class="a-fixed-left-grid-inner"><span class="a-size-base">${pendingTitle}</span><div><span class="a-price"><span aria-hidden="true">$${pendingUnitPrice.toFixed(2)}</span></span> <span>($0.33 / ounce)</span></div><span>Ships from and sold by Amazon.com</span></div></div></section>`
+        ? `<section class="a-section"><div class="a-fixed-left-grid"><img alt="" /><div class="a-fixed-left-grid-inner"><span class="a-size-base">${pendingTitle}</span>${siblingPriceOnly ? '' : `<div><span class="a-price"><span aria-hidden="true">$${pendingUnitPrice.toFixed(2)}</span></span> <span>($${pendingComparisonUnitPrice.toFixed(2)} / ${pendingComparisonUnit})</span></div>`}<span>Ships from and sold by Amazon.com</span></div>${siblingPriceOnly ? `<div class="a-fixed-left-grid-inner"><span class="a-size-base">Different sibling product</span><span class="a-price"><span aria-hidden="true">$${pendingUnitPrice.toFixed(2)}</span></span></div>` : ''}</div></section>`
         : `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$${pendingUnitPrice.toFixed(2)}</p>${pendingQuantity ? `<p>Quantity: ${pendingQuantity}</p>` : ''}</section>`,
       sparseDuplicateOrder ? '' : `<p>Order total: $${pendingOrderTotal.toFixed(2)}</p>`,
       '<p>Do you want to order these items again?</p>',
@@ -2474,6 +2477,70 @@ async function main() {
       clickCount: livePendingClickCount
     });
     await livePendingPage.close();
+
+    const pendingUnitPricePage = await context.newPage();
+    await pendingUnitPricePage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=3.97&comparisonUnitPrice=2.97&comparisonUnit=100%20g`);
+    const pendingUnitPriceTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingUnitPricePage.url());
+    const pendingUnitPriceOutcome = await invokePendingAction(pendingUnitPriceTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-unit-price-plan:confirm-pending-order',
+      sessionId: 'pending-unit-price-session',
+      planHash: 'pending-unit-price-plan',
+      boundCartEvidence: {
+        sessionId: 'pending-unit-price-session',
+        planHash: 'pending-unit-price-plan',
+        asin: 'NATURE-VALLEY-VALID',
+        title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const pendingUnitPriceClickCount = await pendingUnitPricePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (pendingUnitPriceOutcome?.completed !== false
+      || pendingUnitPriceOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || pendingUnitPriceOutcome?.pendingOrderMatchEvidence?.priceMatches !== false
+      || pendingUnitPriceOutcome?.pendingOrderMatchEvidence?.merchandisePriceContradiction !== true
+      || pendingUnitPriceClickCount !== 0) {
+      fail(`browser_extension_pending_order_unit_price_false_match_not_rejected:${JSON.stringify({ pendingUnitPriceOutcome, pendingUnitPriceClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects a matching unit price beside a contradictory merchandise price', {
+      expectedPrice: '$2.97',
+      merchandisePrice: '$3.97',
+      comparisonUnitPrice: '$2.97 / 100 g',
+      clickCount: pendingUnitPriceClickCount
+    });
+    await pendingUnitPricePage.close();
+
+    const pendingSiblingPricePage = await context.newPage();
+    await pendingSiblingPricePage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&siblingPriceOnly=1&unitPrice=2.97`);
+    const pendingSiblingPriceTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingSiblingPricePage.url());
+    const pendingSiblingPriceOutcome = await invokePendingAction(pendingSiblingPriceTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-sibling-price-plan:confirm-pending-order',
+      sessionId: 'pending-sibling-price-session',
+      planHash: 'pending-sibling-price-plan',
+      boundCartEvidence: {
+        sessionId: 'pending-sibling-price-session',
+        planHash: 'pending-sibling-price-plan',
+        asin: 'NATURE-VALLEY-VALID',
+        title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const pendingSiblingPriceClickCount = await pendingSiblingPricePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (pendingSiblingPriceOutcome?.completed !== false
+      || pendingSiblingPriceOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || pendingSiblingPriceOutcome?.pendingOrderMatchEvidence?.priceMatches !== false
+      || pendingSiblingPriceClickCount !== 0) {
+      fail(`browser_extension_pending_order_sibling_price_false_match_not_rejected:${JSON.stringify({ pendingSiblingPriceOutcome, pendingSiblingPriceClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation does not borrow a sibling product price', {
+      matchingProductPrice: 'missing',
+      siblingPrice: '$2.97',
+      clickCount: pendingSiblingPriceClickCount
+    });
+    await pendingSiblingPricePage.close();
 
     const pendingMismatchPage = await context.newPage();
     await pendingMismatchPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=cashew&unitPrice=3.50`);
