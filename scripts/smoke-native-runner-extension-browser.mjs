@@ -781,6 +781,8 @@ async function main() {
     const certificate = createCertificate(tmpDir);
     const checkpoints = [];
     const claimedSessionIds = [];
+    let registrationRequestCount = 0;
+    let sessionListRequestCount = 0;
     let fulfillment = null;
     let session = null;
     let distractorSession = null;
@@ -798,6 +800,7 @@ async function main() {
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
+    let stopAfterAlreadyOpenCartCheckpoint = false;
     // The full browser matrix intentionally runs longer than the initial
     // ten-minute test capability. Keep the fixture's active capabilities
     // fresh; expiry itself is covered by the focused mocked-clock regression.
@@ -827,8 +830,12 @@ async function main() {
       if (req.method === 'POST' && url.pathname === '/native-runner/extension/pairing/claim') {
         return json(res, 201, { setup: { baseUrl: origin, deviceToken: 'mcnr_browser_smoke_token', deviceId: 'browser-smoke-device' } });
       }
-      if (req.method === 'POST' && url.pathname === '/plugins/register') return json(res, 201, { registered: true });
+      if (req.method === 'POST' && url.pathname === '/plugins/register') {
+        registrationRequestCount += 1;
+        return json(res, 201, { registered: true });
+      }
       if (req.method === 'GET' && url.pathname === '/connectors/sessions') {
+        sessionListRequestCount += 1;
         session = renewTestCapability(session);
         distractorSession = renewTestCapability(distractorSession);
         const active = [distractorSession, session]
@@ -889,9 +896,13 @@ async function main() {
         }
         checkpoints.push({ ...body, testReceivedAtMs: Date.now() });
         const advanced = body.planActionStatus !== 'waiting';
+        const stopAfterCartCheckpoint = stopAfterAlreadyOpenCartCheckpoint
+          && expected.id === 'open-cart'
+          && body.planActionStatus !== 'waiting'
+          && body.browser?.runnerStep?.controlStrategy === 'amazon_cart_already_open';
         session = {
           ...session,
-          status: 'executing',
+          status: stopAfterCartCheckpoint ? 'failed' : 'executing',
           missionBoundaryLatestHash: `0x${crypto.randomBytes(8).toString('hex')}`,
           missionBoundaryEventCount: Number(session.missionBoundaryEventCount || 0) + 1,
           extensionMissionPlanState: advanced
@@ -1065,14 +1076,17 @@ async function main() {
     if (smokeMode === 'claim-startup') {
       checkpoints.length = 0;
       deferPrimaryClaimResponse = true;
+      const registrationBaseline = registrationRequestCount;
+      const sessionListBaseline = sessionListRequestCount;
       const wakePage = await context.newPage();
       await wakePage.goto(`${baseUrl}/external-wake`);
-      const claimPromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+      const claimPromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId, extensionDispatchNonce }) => new Promise((resolve) => {
         chrome.runtime.sendMessage(targetExtensionId, {
           type: 'RUN_PENDING_SESSIONS',
-          sessionId
+          sessionId,
+          extensionDispatchNonce
         }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
-      }), { extensionId, sessionId: session.id });
+      }), { extensionId, sessionId: session.id, extensionDispatchNonce: 'browser-smoke-dispatch' });
       await waitFor(() => claimedSessionIds.includes(session.id), 5_000);
       const claimingRun = await popup.evaluate(() => new Promise((resolve) => {
         chrome.storage.local.get(['activeSessionId', 'activeRun'], resolve);
@@ -1099,13 +1113,93 @@ async function main() {
       if (wakeResult.error || !wakeResult.response?.ok) {
         fail(`browser_extension_claim_startup_wake_failed:${JSON.stringify(wakeResult)}`);
       }
+      if (sessionListRequestCount !== sessionListBaseline || registrationRequestCount !== registrationBaseline) {
+        fail(`browser_extension_direct_claim_performed_redundant_startup_requests:${JSON.stringify({
+          registrationBaseline,
+          registrationRequestCount,
+          sessionListBaseline,
+          sessionListRequestCount
+        })}`);
+      }
       recordPurchaseScenario('Claim persistence survives the server-accepted startup gap before browser work', {
         phase: claimingRun.activeRun.phase,
-        checkpoint: startupCheckpoint.planActionStatus
+        checkpoint: startupCheckpoint.planActionStatus,
+        directClaim: wakeResult.response?.result?.directClaim === true,
+        redundantQueueRequests: sessionListRequestCount - sessionListBaseline
       });
       await wakePage.close();
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner claim startup recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'cart-already-open') {
+      checkpoints.length = 0;
+      stopAfterAlreadyOpenCartCheckpoint = true;
+      const openCartIndex = plan.actions.findIndex((action) => action.id === 'open-cart');
+      if (openCartIndex < 0) fail('browser_extension_cart_already_open_plan_action_missing');
+      session = {
+        ...session,
+        status: 'queued',
+        extensionMissionPlanState: {
+          planHash: plan.planHash,
+          nextActionIndex: openCartIndex,
+          completedActionIds: plan.actions.slice(0, openCartIndex).map((action) => action.id),
+          verifiedMilestones: ['candidate_selected', 'cart_confirmed']
+        }
+      };
+      const cartPage = await context.newPage();
+      await cartPage.goto(`${baseUrl}/gp/cart/view.html`);
+      const cartTab = await worker.evaluate(async (url) => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.find((candidate) => candidate.url === url) || null;
+      }, cartPage.url());
+      if (!cartTab?.id) fail(`browser_extension_cart_already_open_tab_missing:${cartPage.url()}`);
+      await worker.evaluate(async ({ sessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+        });
+      }, { sessionId: session.id, tabId: cartTab.id });
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        chrome.runtime.sendMessage(targetExtensionId, {
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'browser-smoke-cart-dispatch'
+        }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
+      }), { extensionId, sessionId: session.id });
+      try {
+        await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-cart'
+          && checkpoint.planActionStatus !== 'waiting'
+          && checkpoint.browser?.runnerStep?.controlStrategy === 'amazon_cart_already_open'), 5_000);
+      } catch {
+        const runnerState = await worker.evaluate(() => chrome.storage.local.get([
+          'lastError',
+          'lastExecution',
+          'activeSessionId',
+          'activeRun',
+          'activeMissionTabs'
+        ]));
+        fail(`browser_extension_cart_already_open_timeout:${JSON.stringify({ checkpoints, runnerState, session })}`);
+      }
+      const cartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-cart'
+        && checkpoint.planActionStatus !== 'waiting'
+        && checkpoint.browser?.runnerStep?.controlStrategy === 'amazon_cart_already_open');
+      if (!cartCheckpoint
+        || Number(cartCheckpoint.runnerTiming?.actionDurationMs || Infinity) >= 1_000
+        || !/\/gp\/cart\/view\.html/.test(cartPage.url())) {
+        fail(`browser_extension_cart_already_open_not_immediate:${JSON.stringify({ cartCheckpoint, url: cartPage.url() })}`);
+      }
+      await Promise.race([wakePromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      recordPurchaseScenario('An already-open Amazon cart advances without waiting or reloading', {
+        durationMs: cartCheckpoint.runnerTiming.actionDurationMs,
+        strategy: cartCheckpoint.browser.runnerStep.controlStrategy
+      });
+      await wakePage.close();
+      await cartPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner already-open cart smoke passed');
       return;
     }
     if (smokeMode === 'claim-rejection') {
@@ -1851,7 +1945,12 @@ async function main() {
       port.onDisconnect.addListener(() => {
         if (chrome.runtime.lastError) resolve({ response: null, error: chrome.runtime.lastError.message, progress, elapsedMs: performance.now() - startedAt });
       });
-      port.postMessage({ type: 'RUN_PENDING_SESSIONS', sessionId });
+      port.postMessage({
+        type: 'RUN_PENDING_SESSIONS',
+        sessionId,
+        extensionDispatchNonce: 'browser-smoke-full-dispatch',
+        clientRunStartedAt: new Date().toISOString()
+      });
     }), { extensionId, sessionId: session.id });
     const initialWakeState = await Promise.race([
       externalWakePromise,

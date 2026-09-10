@@ -59,26 +59,31 @@ assert.match(serverSource, /if \(actionRun\.status === 'completed'\)[\s\S]*repla
 assert.match(serverSource, /connectorSessionId: connectorSession\?\.id \|\| null/, 'completed actions must retain their connector session for idempotent replay');
 assert.match(
   html,
-  /async function requestNativeRunnerMissionWake\(sessionId = ''\)[\s\S]*setTimeout\(\(\) => resolve\(timeoutResult\), 2000\)/,
+  /async function requestNativeRunnerMissionWake\(sessionId = '', extensionDispatchNonce = '', clientRunStartedAt = ''\)[\s\S]*setTimeout\(\(\) => resolve\(timeoutResult\), 2000\)/,
   'the page-to-extension wake must have a short, bounded acknowledgement window'
 );
 assert.match(
   html,
-  /sendNativeRunnerExtensionMessage\(\{ type: 'RUN_PENDING_SESSIONS', sessionId \}\)/,
-  'the browser UI must target the exact approved connector session when it wakes the runner'
+  /type: 'RUN_PENDING_SESSIONS',[\s\S]{0,180}sessionId,[\s\S]{0,180}extensionDispatchNonce/,
+  'the browser UI must target the exact approved connector session and dispatch nonce when it wakes the runner'
 );
 const startExecutionSource = html.slice(
   html.indexOf('const startExecutionFromSheet = async () => {'),
   html.indexOf('const resumeCheckoutReconcileFromSheet = async () => {')
 );
 const startExecutionRequestIndex = startExecutionSource.indexOf('let data = await api(`/connectors/sessions/${session.id}/start-execution`');
-const startExecutionWakeIndex = startExecutionSource.indexOf('void requestNativeRunnerMissionWake(data.session?.id || session.id);');
+const startExecutionWakeIndex = startExecutionSource.indexOf('void requestNativeRunnerMissionWake(', startExecutionRequestIndex);
 const startExecutionRenderIndex = startExecutionSource.indexOf('await renderExecutionSheet(session.id, { focus: false });', startExecutionRequestIndex);
+const blockingPreStartRenderIndex = startExecutionSource.indexOf('await renderExecutionSheet(session.id, { focus: false });');
 assert.ok(startExecutionRequestIndex >= 0, 'browser runs must start an execution session');
 assert.ok(startExecutionWakeIndex > startExecutionRequestIndex, 'browser runs must wake the runner after a session exists');
 assert.ok(
   startExecutionWakeIndex < startExecutionRenderIndex,
   'browser runs must wake the runner before expensive execution-sheet rendering can consume its claim window'
+);
+assert.ok(
+  blockingPreStartRenderIndex < 0 || blockingPreStartRenderIndex > startExecutionRequestIndex,
+  'browser startup must not await a full execution-sheet redraw before start-execution'
 );
 assert.doesNotMatch(
   html,
@@ -149,9 +154,9 @@ assert.match(localRunnerBackground, /Preserve recovery across a service-worker r
 assert.match(localRunnerBackground, /Keep the external message open through the exact-session claim/, 'an external runner wake must stay alive until it has begun the exact approved mission');
 assert.match(localRunnerBackground, /return dispatch\(message, \{ origin \}\);/, 'an external runner wake must execute the requested session directly');
 assert.doesNotMatch(localRunnerBackground, /queueExplicitMissionWake|dispatchExplicitMissionWake|EXPLICIT_WAKE_ALARM/, 'the runner must not detach startup into an MV3 one-shot alarm');
-assert.match(localRunnerLegacyBackground, /async function pollAndExecute\(requestedSessionId = ''\)/, 'the runner must support an exact approved session target');
+assert.match(localRunnerLegacyBackground, /async function pollAndExecute\(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = ''\)/, 'the runner must support an exact approved session and dispatch target');
 assert.match(localRunnerLegacyBackground, /String\(session\?\.id \|\| ''\) === normalizedSessionId/, 'a targeted runner wake must not execute a different queued session');
-assert.match(localRunnerLegacyBackground, /async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id\)/, 'the heartbeat may recover only an unexpired, user-dispatched extension mission');
+assert.match(localRunnerLegacyBackground, /async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id, dispatchedSession\.extensionRunDispatch\?\.nonce/, 'the heartbeat may recover only an unexpired, user-dispatched extension mission');
 assert.match(serverSource, /extensionRunDispatch: hasActiveExtensionRunDispatch\(session\)/, 'the extension poll payload must carry the short-lived user dispatch required for heartbeat recovery');
 assert.match(localRunnerExecutor, /function amazonAccountState/, 'Amazon missions must distinguish signed-in, signed-out, and unknown account state');
 assert.match(localRunnerExecutor, /function applyAmazonFulfillmentPreference/, 'Amazon search must apply a bounded delivery refinement');

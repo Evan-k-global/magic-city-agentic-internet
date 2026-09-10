@@ -6206,6 +6206,7 @@
 	    const attemptedLiveFoodDiscovery = new Set();
 	    const executionPendingSessions = new Set();
     const executionLocalErrors = new Map();
+	    const executionLocalRunnerProgress = new Map();
 	    const executionProtocolPollingSessions = new Set();
 	    const executionDismissedSessions = new Set();
 	    const executionCancellingSessions = new Set();
@@ -10720,6 +10721,71 @@
 	      return lastFailure || { ok: false, reason: 'extension_not_reachable' };
 	    }
 
+	    function runnerProgressLabel(payload = {}) {
+	      const explicit = String(payload.activeRun?.progressLabel || '').replace(/\s+/g, ' ').trim();
+	      if (explicit) return explicit;
+	      const status = String(payload.lastExecution?.status || payload.activeRun?.phase || '').trim();
+	      const labels = {
+	        wake_received: 'Starting Runner',
+	        registering_runner: 'Connecting Runner',
+	        locating_mission: 'Finding mission',
+	        claiming: 'Claiming mission',
+	        claimed: 'Validating mission',
+	        validating: 'Validating mission',
+	        starting_browser: 'Starting browser',
+	        opening_browser: 'Opening Amazon',
+	        browser_ready: 'Browser ready'
+	      };
+	      return labels[status] || String(payload.activeRun?.actionId || status || 'Runner active').replace(/[-_]/g, ' ');
+	    }
+
+	    function rememberExecutionRunnerProgress(sessionId = '', payload = {}) {
+	      const normalizedSessionId = String(sessionId || payload.activeRun?.sessionId || payload.lastExecution?.sessionId || '').trim();
+	      if (!normalizedSessionId) return false;
+	      const streamId = String(payload.streamId || payload.activeRun?.workerId || 'legacy').trim();
+	      const sequence = Math.max(0, Number(payload.sequence || payload.activeRun?.progressSequence || 0) || 0);
+	      const observedAt = Date.parse(payload.activeRun?.progressUpdatedAt || payload.at || payload.lastExecution?.at || '') || Date.now();
+	      const current = executionLocalRunnerProgress.get(normalizedSessionId) || null;
+	      if (current?.streamId === streamId && sequence <= current.sequence) return false;
+	      if (current?.streamId !== streamId && observedAt < Number(current?.observedAt || 0)) return false;
+	      executionLocalRunnerProgress.set(normalizedSessionId, {
+	        streamId,
+	        sequence,
+	        observedAt,
+	        label: runnerProgressLabel(payload),
+	        state: String(payload.activeRun?.progressState || payload.lastExecution?.status || payload.activeRun?.phase || '').trim(),
+	        startupTiming: payload.activeRun?.startupTiming || null
+	      });
+	      const session = executionSessionCache.get(normalizedSessionId) || null;
+	      if (session) {
+	        refreshExecutionPanelInPlace(session);
+	        requestAnimationFrame(() => refreshExecutionPanelInPlace(executionSessionCache.get(normalizedSessionId) || session));
+	      }
+	      return true;
+	    }
+
+	    function clearExecutionRunnerProgress(sessionId = '') {
+	      if (sessionId) executionLocalRunnerProgress.delete(sessionId);
+	    }
+
+	    function applyExecutionRunnerProgress(session, panel = null) {
+	      const status = String(session?.status || '').toLowerCase();
+	      const progress = executionLocalRunnerProgress.get(session?.id) || null;
+	      const localError = executionLocalErrors.get(session?.id) || null;
+	      if (executionLocalErrorApplies(session, localError)) return false;
+	      if (!progress || !['queued', 'claimed', 'executing'].includes(status) || Date.now() - progress.observedAt > 30_000) return false;
+	      const target = panel || $('executionDock')?.querySelector(`[data-session-panel="${escapeExecutionSelectorValue(session.id)}"]`);
+	      if (!target) return false;
+	      const label = progress.label || 'Runner active';
+	      const runTitle = target.querySelector('.execution-run-state > div > strong');
+	      const runDetail = target.querySelector('.execution-run-state > div > span');
+	      const statusText = target.querySelector('#executionStatusText');
+	      if (runTitle) runTitle.textContent = label;
+	      if (runDetail) runDetail.textContent = 'Magic City Runner is continuing this authorized browser mission.';
+	      if (statusText) statusText.textContent = `Session ${session.id} · ${label}`;
+	      return true;
+	    }
+
 	    function sendNativeRunnerExtensionPortMessage(extensionId, message = {}) {
 	      return new Promise((resolve) => {
 	        let port = null;
@@ -10734,10 +10800,8 @@
 	          port = window.chrome.runtime.connect(extensionId, { name: 'magic-city-active-run-v1' });
 	          port.onMessage.addListener((payload) => {
 	            if (payload?.type === 'RUNNER_PROGRESS') {
-	              const sessionId = String(message.sessionId || payload.activeRun?.sessionId || '');
-	              const statusEl = getExecutionSheetScrollElement(sessionId)?.querySelector('#executionStatusText') || $('executionStatusText');
-	              const actionLabel = String(payload.activeRun?.actionId || payload.activeRun?.phase || 'starting').replace(/-/g, ' ');
-	              if (statusEl && sessionId) statusEl.textContent = `Session ${sessionId} · Runner active · ${actionLabel}`;
+	              const sessionId = String(message.sessionId || payload.activeRun?.sessionId || payload.lastExecution?.sessionId || '');
+	              rememberExecutionRunnerProgress(sessionId, payload);
 	              return;
 	            }
 	            if (payload?.type === 'RUNNER_RESULT') {
@@ -10758,7 +10822,7 @@
 	      });
 	    }
 
-    async function requestNativeRunnerMissionWake(sessionId = '') {
+	    async function requestNativeRunnerMissionWake(sessionId = '', extensionDispatchNonce = '', clientRunStartedAt = '') {
       const describeWakeFailure = (wake) => {
         if (!wake?.ok) {
           const reason = String(wake?.reason || 'extension_not_reachable');
@@ -10798,7 +10862,14 @@
         if (statusEl) statusEl.textContent = `Session ${sessionId} · runner accepted the mission`;
         return wake;
       };
-      const wakeRequest = sendNativeRunnerExtensionMessage({ type: 'RUN_PENDING_SESSIONS', sessionId });
+	      const cachedSession = executionSessionCache.get(sessionId) || null;
+	      const dispatchNonce = String(extensionDispatchNonce || cachedSession?.extensionRunDispatch?.nonce || '').trim();
+	      const wakeRequest = sendNativeRunnerExtensionMessage({
+	        type: 'RUN_PENDING_SESSIONS',
+	        sessionId,
+	        clientRunStartedAt: String(clientRunStartedAt || '').trim() || new Date().toISOString(),
+	        ...(dispatchNonce ? { extensionDispatchNonce: dispatchNonce } : {})
+	      });
       const timeoutResult = { ok: true, pending: true, reason: 'extension_wake_pending' };
       const wake = await Promise.race([
         wakeRequest,
@@ -15165,6 +15236,7 @@
 	      if (live) live.innerHTML = renderExecutionLiveView(session);
 	      const trace = panel.querySelector('#executionTrace');
 	      if (trace) trace.innerHTML = renderExecutionTrace(session);
+	      applyExecutionRunnerProgress(session, panel);
 	      return true;
 	    }
 
@@ -15187,6 +15259,7 @@
 	      if (isTerminalExecutionStatus(session.status) || terminalBrowserOrder) {
 	        executionPendingSessions.delete(session.id);
 	        executionProtocolPollingSessions.delete(session.id);
+	        clearExecutionRunnerProgress(session.id);
 	        clearSelectedAgentExecution(session.id);
 	      }
 	      const nextBucket = executionPollingRenderBucket(session);
@@ -19007,6 +19080,7 @@
       };
 
 	      const startExecutionFromSheet = async () => {
+	        const clientRunStartedAt = new Date().toISOString();
 	        try {
 	          if (session.santaclawzDirectPayment?.summary?.retryBlocked === true || session.santaclawzDirectPayment?.summary?.returnRejected === true) {
 	            throw new Error('This agent returned an invalid SantaClawz result package. Retry is disabled until the agent runtime is updated.');
@@ -19027,6 +19101,7 @@
 	            await populateVaultLocalitiesFromZip({ announce: false });
 	          }
 	          const localCheckoutProfile = isBrowserRun ? buildLocalCheckoutProfile(session) : null;
+	          let provisionedCheckoutProfileSessionId = '';
 	          if (checkoutProfileNeeded && getStoredVaultRecord() && !localCheckoutProfileHasValues(localCheckoutProfile)) {
 	            throw new Error('Complete the shipping address in Local Data Vault, then run again.');
 	          }
@@ -19049,13 +19124,14 @@
           if (isBrowserRun) {
             await ensureNativeBrowserWorkerReadyForRun(session);
           }
-          if (isBrowserRun && extensionCheckoutProfileEnabled) {
-            await sendNativeRunnerExtensionMessage({
-              type: 'SET_LOCAL_CHECKOUT_PROFILE',
-              sessionId: session.id,
-              profile: localCheckoutProfile
-            });
-          }
+	          if (isBrowserRun && extensionCheckoutProfileEnabled) {
+	            await sendNativeRunnerExtensionMessage({
+	              type: 'SET_LOCAL_CHECKOUT_PROFILE',
+	              sessionId: session.id,
+	              profile: localCheckoutProfile
+	            });
+	            provisionedCheckoutProfileSessionId = session.id;
+	          }
           let executionSession = session;
           if (canRenewBrowserMissionInPlace(session)) {
             const renewed = await api(`/connectors/sessions/${session.id}/renew-mission`, {
@@ -19066,17 +19142,22 @@
             if (executionSession.id) executionSessionCache.set(executionSession.id, executionSession);
             if (['queued', 'claimed', 'executing'].includes(String(executionSession.status || '').toLowerCase())) {
               executionPendingSessions.add(executionSession.id);
-	              if (extensionCheckoutProfileEnabled) {
+	              if (extensionCheckoutProfileEnabled && provisionedCheckoutProfileSessionId !== executionSession.id) {
 	                await sendNativeRunnerExtensionMessage({
 	                  type: 'SET_LOCAL_CHECKOUT_PROFILE',
 	                  sessionId: executionSession.id,
 	                  profile: localCheckoutProfile
 	                });
+	                provisionedCheckoutProfileSessionId = executionSession.id;
 	              }
 	              // Claim the renewed mission before redrawing the execution sheet.
 	              // Rendering can issue several authenticated requests and must not
 	              // consume the runner's short claim window.
-                void requestNativeRunnerMissionWake(executionSession.id);
+	                void requestNativeRunnerMissionWake(
+	                  executionSession.id,
+	                  executionSession.extensionRunDispatch?.nonce || '',
+	                  clientRunStartedAt
+	                );
 	              await renderExecutionSheet(executionSession.id, { focus: false });
 	              ensureExecutionPolling();
 	              return;
@@ -19094,7 +19175,7 @@
             selections.stablecoinPaymentAmountUsdCents = stablecoinPayment.amountUsdCents;
 	          }
 	          executionPendingSessions.add(session.id);
-	          await renderExecutionSheet(session.id, { focus: false });
+	          refreshExecutionPanelInPlace(session);
 	          let data = await api(`/connectors/sessions/${session.id}/start-execution`, {
             method: 'POST',
             body: JSON.stringify({
@@ -19124,16 +19205,22 @@
 	            syncSantaClawzActionResultForPolling(session.id, data);
 	          }
 	          if (isBrowserRun && (data.session?.preferredExecutionAgentId === RUNNER_EXTENSION_PLUGIN_ID || data.executionAgent?.pluginId === RUNNER_EXTENSION_PLUGIN_ID)) {
-	            if (extensionCheckoutProfileEnabled) {
+	            const startedSessionId = data.session?.id || session.id;
+	            if (extensionCheckoutProfileEnabled && provisionedCheckoutProfileSessionId !== startedSessionId) {
 	              await sendNativeRunnerExtensionMessage({
 	                type: 'SET_LOCAL_CHECKOUT_PROFILE',
-	                sessionId: data.session?.id || session.id,
+	                sessionId: startedSessionId,
 	                profile: localCheckoutProfile
 	              });
+	              provisionedCheckoutProfileSessionId = startedSessionId;
 	            }
 	            // Send the exact wake before any UI or balance refresh. A fresh
 	            // heartbeat only proves liveness; this call is what claims work.
-                void requestNativeRunnerMissionWake(data.session?.id || session.id);
+                void requestNativeRunnerMissionWake(
+	                  startedSessionId,
+	                  data.session?.extensionRunDispatch?.nonce || '',
+	                  clientRunStartedAt
+	                );
 	          }
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(session.id);
@@ -19155,8 +19242,9 @@
 		        }
       };
 
-      const resumeCheckoutReconcileFromSheet = async () => {
-        const currentSession = executionSessionCache.get(session.id) || session;
+	      const resumeCheckoutReconcileFromSheet = async () => {
+	        const currentSession = executionSessionCache.get(session.id) || session;
+	        const clientRunStartedAt = new Date().toISOString();
         try {
           clearExecutionStatusError(currentSession.id);
           if (hasStoredVaultDeviceAuth() && !isVaultUnlocked()) {
@@ -19176,8 +19264,8 @@
             profile: localCheckoutProfile
           });
           const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(currentSession));
-          executionPendingSessions.add(currentSession.id);
-          await renderExecutionSheet(currentSession.id, { focus: false });
+	          executionPendingSessions.add(currentSession.id);
+	          refreshExecutionPanelInPlace(currentSession);
           const data = await api(`/connectors/sessions/${currentSession.id}/start-execution`, {
             method: 'POST',
             body: JSON.stringify({
@@ -19195,7 +19283,11 @@
 	          if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
 	          // Do not wait for the execution widget to re-render before the
 	          // runner claims this narrow, already-approved continuation.
-          void requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
+	          void requestNativeRunnerMissionWake(
+	            data.session?.id || currentSession.id,
+	            data.session?.extensionRunDispatch?.nonce || '',
+	            clientRunStartedAt
+	          );
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(currentSession.id);
           await renderExecutionSheet(currentSession.id, { focus: false });
@@ -19210,8 +19302,9 @@
         }
       };
 
-      const submitReviewedOrderFromSheet = async () => {
-        const currentSession = executionSessionCache.get(session.id) || session;
+	      const submitReviewedOrderFromSheet = async () => {
+	        const currentSession = executionSessionCache.get(session.id) || session;
+	        const clientRunStartedAt = new Date().toISOString();
         try {
           clearExecutionStatusError(currentSession.id);
           if (hasStoredVaultDeviceAuth()) {
@@ -19260,8 +19353,8 @@
               profile: localCheckoutProfile
             });
           }
-          executionPendingSessions.add(currentSession.id);
-          await renderExecutionSheet(currentSession.id, { focus: false });
+	          executionPendingSessions.add(currentSession.id);
+	          refreshExecutionPanelInPlace(currentSession);
           const data = await api(`/connectors/sessions/${currentSession.id}/start-execution`, {
             method: 'POST',
             body: JSON.stringify({
@@ -19280,7 +19373,11 @@
           if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
 	          // Final submission uses the same immediate wake path as the
 	          // initial run; rendering must never spend its claim window.
-          void requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
+	          void requestNativeRunnerMissionWake(
+	            data.session?.id || currentSession.id,
+	            data.session?.extensionRunDispatch?.nonce || '',
+	            clientRunStartedAt
+	          );
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(currentSession.id);
           await renderExecutionSheet(currentSession.id, { focus: false });

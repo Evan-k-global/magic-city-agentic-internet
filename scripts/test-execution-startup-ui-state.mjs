@@ -7,7 +7,9 @@ const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), '
 function extractFunctionSource(name) {
   const start = html.indexOf(`function ${name}`);
   assert.notEqual(start, -1, `missing inline function ${name}`);
-  const braceStart = html.indexOf('{', start);
+  const signatureEnd = html.indexOf(') {', start);
+  assert.notEqual(signatureEnd, -1, `missing function body for ${name}`);
+  const braceStart = html.indexOf('{', signatureEnd);
   let depth = 0;
   for (let index = braceStart; index < html.length; index += 1) {
     if (html[index] === '{') depth += 1;
@@ -20,7 +22,11 @@ function extractFunctionSource(name) {
 const context = {
   RUNNER_EXTENSION_PLUGIN_ID: 'magic-city-runner-extension',
   executionLocalErrors: new Map(),
+  executionLocalRunnerProgress: new Map(),
+  executionSessionCache: new Map(),
   executionPendingSessions: new Set(),
+  requestAnimationFrame: (callback) => callback(),
+  refreshExecutionPanelInPlace: () => true,
   isTerminalExecutionStatus: (status) => ['fulfilled', 'failed'].includes(String(status || '').toLowerCase()),
   isAwaitingExecutionConfirmation: () => false,
   sessionHasBrowserOrderSubmitted: () => false,
@@ -31,6 +37,8 @@ vm.runInContext([
   extractFunctionSource('executionLocalErrorApplies'),
   extractFunctionSource('clearExecutionStatusError'),
   extractFunctionSource('reconcileExecutionWakeError'),
+  extractFunctionSource('runnerProgressLabel'),
+  extractFunctionSource('rememberExecutionRunnerProgress'),
   extractFunctionSource('getExecutionStatusModel'),
   extractFunctionSource('describeExecutionRunState')
 ].join('\n'), context);
@@ -102,6 +110,27 @@ const checkpointRecoveredSession = {
 assert.equal(context.getExecutionStatusModel(checkpointRecoveredSession).statusValue, 'executing');
 assert.equal(context.executionLocalErrors.has(sessionId), false, 'a newer Runner checkpoint must also clear the obsolete rejection');
 
+assert.equal(context.rememberExecutionRunnerProgress(sessionId, {
+  streamId: 'worker-a',
+  sequence: 2,
+  at: '2026-09-08T20:00:33.000Z',
+  activeRun: { sessionId, progressLabel: 'Opening Amazon', progressState: 'opening_browser' }
+}), true);
+assert.equal(context.executionLocalRunnerProgress.get(sessionId).label, 'Opening Amazon');
+assert.equal(context.rememberExecutionRunnerProgress(sessionId, {
+  streamId: 'worker-a',
+  sequence: 1,
+  at: '2026-09-08T20:00:34.000Z',
+  activeRun: { sessionId, progressLabel: 'Claiming mission', progressState: 'claiming' }
+}), false, 'an older sequence from the same worker must not move progress backward');
+assert.equal(context.executionLocalRunnerProgress.get(sessionId).label, 'Opening Amazon');
+assert.equal(context.rememberExecutionRunnerProgress(sessionId, {
+  streamId: 'worker-b',
+  sequence: 1,
+  at: '2026-09-08T20:00:32.000Z',
+  activeRun: { sessionId, progressLabel: 'Starting Runner', progressState: 'wake_received' }
+}), false, 'an older replacement worker message must not overwrite newer progress');
+
 assert.match(
   html,
   /runState\.title === 'Runner did not start'[\s\S]*'Retry runner start'/,
@@ -116,6 +145,11 @@ assert.match(
   html,
   /runtime\.connect\(extensionId, \{ name: 'magic-city-active-run-v1' \}\)[\s\S]*RUNNER_PROGRESS[\s\S]*RUNNER_RESULT/,
   'a website-started mission must keep a live progress channel through the extension result'
+);
+assert.match(
+  html,
+  /type: 'RUN_PENDING_SESSIONS',[\s\S]*extensionDispatchNonce/,
+  'the website wake must pass the exact signed dispatch nonce for direct claim'
 );
 
 console.log('execution startup UI state ok');

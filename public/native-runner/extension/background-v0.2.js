@@ -32,11 +32,14 @@ const CHECKOUT_PROFILE_RECONCILE_TIMEOUT_MS = 24_000;
 const TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS = [200, 700];
 const TAB_COMMAND_TIMEOUT_MS = 15_000;
 const BROWSER_ACTION_TIMEOUT_MS = 45_000;
+const EXECUTOR_REGISTRATION_REUSE_MS = 30_000;
 const LOCAL_CHECKOUT_PROFILE_STORAGE_KEY = 'magicCityLocalCheckoutProfiles';
 const SAFE_PLAN_ACTION_TYPES = new Set(['navigate', 'inspect', 'search', 'select_candidate', 'click_intent', 'fill_checkout_profile', 'final_submit', 'pause']);
 const inFlightSessionIds = new Set();
 const RUNNER_WORKER_STARTED_AT = new Date().toISOString();
 const RUNNER_WORKER_ID = globalThis.crypto?.randomUUID?.() || `worker-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let executorRegistrationCache = null;
+let executorRegistrationInFlight = null;
 
 function normalizeBaseUrl(value = '') {
   return String(value || DEFAULT_BASE_URL).trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
@@ -639,6 +642,16 @@ function normalizeActiveRun(entry = null) {
     sessionId,
     planHash: String(entry?.planHash || '').trim() || null,
     phase: String(entry?.phase || 'claimed').trim() || 'claimed',
+    progressLabel: String(entry?.progressLabel || '').replace(/\s+/g, ' ').trim().slice(0, 120) || null,
+    progressState: String(entry?.progressState || '').trim().slice(0, 64) || null,
+    progressSequence: Math.max(0, Number(entry?.progressSequence || 0) || 0),
+    progressUpdatedAt: String(entry?.progressUpdatedAt || '').trim().slice(0, 48) || null,
+    startupTiming: entry?.startupTiming && typeof entry.startupTiming === 'object'
+      ? Object.fromEntries(Object.entries(entry.startupTiming)
+          .filter(([key, value]) => /^[a-z][a-zA-Z0-9]{0,63}$/.test(key)
+            && (typeof value === 'string' || Number.isFinite(Number(value))))
+          .slice(0, 24))
+      : null,
     tabId: Number(entry?.tabId || 0) || null,
     actionId: String(entry?.actionId || '').trim() || null,
     actionIndex: Number.isInteger(Number(entry?.actionIndex)) ? Number(entry.actionIndex) : null,
@@ -679,12 +692,15 @@ async function saveActiveRun(patch = {}) {
   const sessionId = String(patch.sessionId || current?.sessionId || '').trim();
   if (!sessionId) throw new Error('active_run_session_required');
   const now = new Date().toISOString();
+  const progressChanged = patch.progressLabel !== undefined || patch.progressState !== undefined;
   const activeRun = normalizeActiveRun({
     ...(current?.sessionId === sessionId ? current : {}),
     ...patch,
     sessionId,
     workerId: RUNNER_WORKER_ID,
     workerStartedAt: RUNNER_WORKER_STARTED_AT,
+    progressSequence: progressChanged ? Number(current?.progressSequence || 0) + 1 : current?.progressSequence,
+    progressUpdatedAt: progressChanged ? now : current?.progressUpdatedAt,
     startedAt: patch.startedAt || (current?.sessionId === sessionId ? current.startedAt : now),
     updatedAt: now
   });
@@ -1019,7 +1035,22 @@ async function registerExecutor(config = null) {
   const current = config || await getConfig();
   if (!current.deviceToken) throw new Error('runner_not_paired');
   const origins = await extensionHostPermissions();
-  return api('/plugins/register', {
+  const registrationKey = stableJson({
+    baseUrl: normalizeBaseUrl(current.baseUrl),
+    deviceId: current.deviceId || '',
+    deviceToken: current.deviceToken,
+    extensionId: chrome.runtime.id || '',
+    extensionVersion: chrome.runtime.getManifest().version,
+    origins: [...origins].sort()
+  });
+  if (executorRegistrationCache?.key === registrationKey
+    && executorRegistrationCache.validUntil > Date.now()) {
+    return { ...executorRegistrationCache.result, registrationReused: true };
+  }
+  if (executorRegistrationInFlight?.key === registrationKey) {
+    return executorRegistrationInFlight.promise;
+  }
+  const registrationPromise = api('/plugins/register', {
     method: 'POST',
     bearer: current.deviceToken,
     body: {
@@ -1061,6 +1092,23 @@ async function registerExecutor(config = null) {
       }
     }
   });
+  executorRegistrationInFlight = { key: registrationKey, promise: registrationPromise };
+  try {
+    const result = await registrationPromise;
+    executorRegistrationCache = {
+      key: registrationKey,
+      result,
+      validUntil: Date.now() + EXECUTOR_REGISTRATION_REUSE_MS
+    };
+    return result;
+  } finally {
+    if (executorRegistrationInFlight?.promise === registrationPromise) executorRegistrationInFlight = null;
+  }
+}
+
+function invalidateExecutorRegistration() {
+  executorRegistrationCache = null;
+  executorRegistrationInFlight = null;
 }
 
 async function pollSessions() {
@@ -1711,7 +1759,7 @@ async function missionCheckpoint(session, { label, detail, state, missionAction,
   return data.session || session;
 }
 
-async function checkpointRunnerStartup(session, plan, nextAction) {
+async function checkpointRunnerStartup(session, plan, nextAction, startupTiming = null) {
   // This is deliberately non-advancing. It closes the MV3 gap between a
   // successful server-side claim and the first browser operation, while the
   // signed open-site action remains the next action to execute.
@@ -1724,7 +1772,10 @@ async function checkpointRunnerStartup(session, plan, nextAction) {
     plan,
     planAction: nextAction,
     planActionStatus: 'waiting',
-    runnerTiming: { phase: 'startup' }
+    runnerTiming: {
+      phase: 'startup',
+      ...(startupTiming && typeof startupTiming === 'object' ? startupTiming : {})
+    }
   });
 }
 
@@ -2770,6 +2821,22 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
     const outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
     if (!outcome?.completed) return outcome;
+    if (outcome.alreadyInCart === true) {
+      return {
+        ...outcome,
+        navigationRequested: false,
+        cartFallbackUsed: false,
+        state: {
+          url: before?.url || action.url,
+          title: before?.title || '',
+          browserState: 'cart',
+          browserStateConfidence: 1,
+          browserStateReason: 'Amazon cart was already open; the next approved step verifies its contents.',
+          checkoutSummary: { stage: 'cart', nextAction: 'Inspecting cart' },
+          navigationReady: true
+        }
+      };
+    }
     let usedFallback = Boolean(outcome.cartFallbackRequested);
     if (!usedFallback) {
       await waitForTabUrlChange(tabId, before.url, 2_500)
@@ -3206,6 +3273,11 @@ async function runSession(rawSession) {
   let currentAction = null;
   let currentActionStartedAt = 0;
   let retainActiveRun = false;
+  const startupTiming = {
+    clientRunStartedAt: String(rawSession?.runnerClientRunStartedAt || '').trim() || null,
+    wakeReceivedAt: String(rawSession?.runnerWakeReceivedAt || '').trim() || null,
+    runStartedAt: new Date().toISOString()
+  };
   try {
     // Read durable state before claiming. An MV3 restart may be resuming an
     // action after the browser accepted its click but before a checkpoint was
@@ -3215,16 +3287,32 @@ async function runSession(rawSession) {
     if (!resumingPersistedRun) {
       // Persist before the remote claim. If MV3 is suspended after the server
       // accepts the claim, the gateway can recover this exact signed session.
-      await saveActiveRun({ sessionId: rawSession.id, phase: 'claiming' });
+      startupTiming.claimStartedAt = new Date().toISOString();
+      await saveActiveRun({
+        sessionId: rawSession.id,
+        phase: 'claiming',
+        progressLabel: 'Claiming mission',
+        progressState: 'claiming',
+        startupTiming
+      });
     }
     await saveConfig({
       lastError: '',
       lastExecution: { sessionId: rawSession.id, status: 'claiming', at: new Date().toISOString() }
     });
     scheduleRunnerResume(8_000);
+    if (!startupTiming.claimStartedAt) startupTiming.claimStartedAt = new Date().toISOString();
     session = await claimSession(rawSession);
+    startupTiming.claimAcceptedAt = new Date().toISOString();
+    startupTiming.claimDurationMs = Math.max(0, Date.parse(startupTiming.claimAcceptedAt) - Date.parse(startupTiming.claimStartedAt));
     if (!resumingPersistedRun) {
-      await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
+      await saveActiveRun({
+        sessionId: session.id,
+        phase: 'claimed',
+        progressLabel: 'Validating mission',
+        progressState: 'validating',
+        startupTiming
+      });
     }
     await saveConfig({
       lastError: '',
@@ -3236,8 +3324,10 @@ async function runSession(rawSession) {
     scheduleRunnerResume(8_000);
     plan = await validatePlanForSession(session);
     assertLocalMissionAuthority(session);
+    startupTiming.planValidatedAt = new Date().toISOString();
     await bindLocalCheckoutProfileToPlan(session.id, plan.planHash);
     const savedCheckoutProfile = await getLocalCheckoutProfile(session.id, plan.planHash);
+    startupTiming.profileBoundAt = new Date().toISOString();
     const checkoutProfileExpected = Boolean(session.extensionCheckoutProfileEnabled);
     const checkoutProfileAvailable = Boolean(savedCheckoutProfile);
     const checkoutProfile = savedCheckoutProfile ? { ...savedCheckoutProfile } : null;
@@ -3257,6 +3347,9 @@ async function runSession(rawSession) {
       sessionId: session.id,
       planHash: plan.planHash,
       phase: resumesInterruptedAction ? 'executing_step' : 'running',
+      progressLabel: 'Starting browser',
+      progressState: 'starting_browser',
+      startupTiming,
       nextActionIndex: Number(planState.nextActionIndex || 0),
       ...(resumesInterruptedAction ? {
         actionId: interruptedRun.actionId,
@@ -3268,7 +3361,21 @@ async function runSession(rawSession) {
     const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
     if (!nextAction) return reconcileCompletedPlan(session, plan, planState, checkoutProfile);
     if (String(session.status || '').toLowerCase() !== 'executing') {
-      session = await checkpointRunnerStartup(session, plan, nextAction);
+      startupTiming.startupCheckpointStartedAt = new Date().toISOString();
+      session = await checkpointRunnerStartup(session, plan, nextAction, startupTiming);
+      startupTiming.startupCheckpointAcceptedAt = new Date().toISOString();
+      startupTiming.startupCheckpointDurationMs = Math.max(
+        0,
+        Date.parse(startupTiming.startupCheckpointAcceptedAt) - Date.parse(startupTiming.startupCheckpointStartedAt)
+      );
+      await saveActiveRun({
+        sessionId: session.id,
+        planHash: plan.planHash,
+        phase: resumesInterruptedAction ? 'executing_step' : 'running',
+        progressLabel: 'Opening Amazon',
+        progressState: 'opening_browser',
+        startupTiming
+      });
     }
     if (!await hasPermissionForUrl(startUrl)) {
       const domain = domainForUrl(startUrl);
@@ -3296,10 +3403,14 @@ async function runSession(rawSession) {
       preferExistingCheckout: plan.resumeCheckoutReconcile === true,
       plan
     });
+    startupTiming.browserTabAcquiredAt = new Date().toISOString();
     await saveActiveRun({
       sessionId: session.id,
       planHash: plan.planHash,
       phase: resumesInterruptedAction ? 'executing_step' : 'running',
+      progressLabel: 'Browser ready',
+      progressState: 'browser_ready',
+      startupTiming,
       tabId: Number(tab?.id || 0) || null,
       nextActionIndex: Number(planState.nextActionIndex || 0),
       ...(resumesInterruptedAction ? {
@@ -3368,6 +3479,7 @@ async function runSession(rawSession) {
     }
     for (let index = Number(planState.nextActionIndex || 0); index < plan.actions.length; index += 1) {
       const action = plan.actions[index];
+      const presentation = planActionPresentation(action);
       currentAction = action;
       currentActionStartedAt = Date.now();
       const durableRun = await getActiveRun();
@@ -3387,6 +3499,8 @@ async function runSession(rawSession) {
         actionId: action.id,
         actionIndex: index,
         nextActionIndex: index,
+        progressLabel: presentation.label,
+        progressState: presentation.state,
         selectedCandidate: progress.selectedCandidate
       });
       // A worker can restart after Amazon accepted the irreversible click but
@@ -3399,7 +3513,6 @@ async function runSession(rawSession) {
         : null;
       const recoveredFinalOrderAlreadyConfirmed = action.type === 'final_submit'
         && hasConfirmedMerchantOrder(recoveredState);
-      const presentation = planActionPresentation(action);
       // A slow control-plane heartbeat must not race Amazon's irreversible
       // button, but this is not an unlimited offline bypass. The signed
       // capability must still be current and the runner must have observed a
@@ -3825,7 +3938,10 @@ async function runSession(rawSession) {
           actionDurationMs,
           resumedFromActiveRun: resumingPersistedRun,
           resumedPhase: resumingPersistedRun ? (persistedActiveRun?.phase || null) : null,
-          recoveredAction: Boolean(recoveringInterruptedAction || outcome.recoveredFromInterruption)
+          recoveredAction: Boolean(recoveringInterruptedAction || outcome.recoveredFromInterruption),
+          ...(index === Number(planState.nextActionIndex || 0) ? {
+            browserTabAcquiredAt: startupTiming.browserTabAcquiredAt || null
+          } : {})
         }
       });
       // The authenticated checkpoint immediately before the signed
@@ -4115,8 +4231,10 @@ async function resumeActiveRun() {
   return runSession(session);
 }
 
-async function pollAndExecute(requestedSessionId = '') {
+async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = '') {
   const normalizedSessionId = String(requestedSessionId || '').trim();
+  const normalizedDispatchNonce = String(requestedDispatchNonce || '').trim();
+  const wakeReceivedAt = new Date().toISOString();
   const recordWake = async (status, message = '') => {
     if (!normalizedSessionId) return;
     await saveConfig({
@@ -4143,18 +4261,42 @@ async function pollAndExecute(requestedSessionId = '') {
   await recordWake('wake_received');
   let poll;
   try {
+    await recordWake('registering_runner');
     await registerExecutor(config);
+    if (normalizedSessionId && normalizedDispatchNonce) {
+      await recordWake('claiming');
+      const directSession = {
+        id: normalizedSessionId,
+        extensionRunDispatch: { nonce: normalizedDispatchNonce },
+        runnerClientRunStartedAt: String(clientRunStartedAt || '').trim() || null,
+        runnerWakeReceivedAt: wakeReceivedAt
+      };
+      const execution = await runSession(directSession);
+      return {
+        paired: true,
+        sessions: [],
+        actionableCount: 1,
+        directClaim: true,
+        requestedSessionId: normalizedSessionId,
+        requestedSessionFound: true,
+        executed: [execution]
+      };
+    }
+    await recordWake('locating_mission');
     poll = await pollSessions();
   } catch (error) {
     const message = error?.message || String(error);
-    await recordWake('wake_failed', message);
+    const status = /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
+      ? 'claim_failed'
+      : 'wake_failed';
+    await recordWake(status, message);
     return {
       paired: true,
       sessions: [],
       actionableCount: 0,
       requestedSessionId: normalizedSessionId || null,
       requestedSessionFound: false,
-      executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status: 'wake_failed', error: message }] : []
+      executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status, error: message }] : []
     };
   }
   const executed = [];
@@ -4225,7 +4367,7 @@ async function pollOnly() {
     return Number.isFinite(dispatchExpiry) && dispatchExpiry > Date.now();
   });
   if (!dispatchedSession?.id) return poll;
-  return pollAndExecute(dispatchedSession.id);
+  return pollAndExecute(dispatchedSession.id, dispatchedSession.extensionRunDispatch?.nonce || '');
 }
 
 async function getPendingMissionSite() {
@@ -4279,6 +4421,7 @@ async function allowAndStartPendingMissionSite() {
 async function pairWithCode({ baseUrl = DEFAULT_BASE_URL, code = '' } = {}) {
   const pairingCode = normalizePairingCode(code);
   if (!pairingCode || pairingCode.length < 6) throw new Error('Enter the pairing code from Magic City.');
+  invalidateExecutorRegistration();
   await saveConfig({ baseUrl: normalizeBaseUrl(baseUrl), lastError: '' });
   const claimed = await api('/native-runner/extension/pairing/claim', {
     method: 'POST',
@@ -4380,12 +4523,19 @@ async function handleMessage(message, sender = null) {
   if (message?.type === 'ALLOW_AND_START_PENDING_MISSION_SITE' || message?.type === 'ENABLE_PENDING_MISSION_SITE') {
     return allowAndStartPendingMissionSite();
   }
-  if (message?.type === 'RUN_PENDING_SESSIONS') return pollAndExecute(message.sessionId || '');
+  if (message?.type === 'RUN_PENDING_SESSIONS') {
+    return pollAndExecute(
+      message.sessionId || '',
+      message.extensionDispatchNonce || '',
+      message.clientRunStartedAt || ''
+    );
+  }
   if (message?.type === 'REGISTER_PLUGIN') {
     await registerExecutor();
     return { registered: true };
   }
   if (message?.type === 'DISCONNECT') {
+    invalidateExecutorRegistration();
     await chrome.storage.local.clear();
     await chrome.storage.session?.clear?.().catch(() => null);
     return { disconnected: true };

@@ -9,7 +9,8 @@ const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
-const LEAN_RUNTIME_MODE = 'v0.4.33-pending-order-contradictions';
+const LEAN_RUNTIME_MODE = 'v0.4.35-latency-instrumentation';
+const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
   'https://magic-city-staging.fly.dev'
@@ -140,17 +141,27 @@ chrome.runtime.onConnectExternal.addListener((port) => {
 
   let started = false;
   let progressTimer = null;
+  let progressSequence = 0;
+  let progressQueued = false;
   const postProgress = async () => {
     try {
       const { activeRun = null, lastExecution = null } = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
+      progressSequence += 1;
       port.postMessage({
         type: 'RUNNER_PROGRESS',
+        streamId: PROGRESS_STREAM_ID,
+        sequence: progressSequence,
         activeRun: activeRun ? {
           sessionId: activeRun.sessionId || '',
           phase: activeRun.phase || '',
+          progressLabel: activeRun.progressLabel || '',
+          progressState: activeRun.progressState || '',
+          progressSequence: Number(activeRun.progressSequence || 0) || 0,
+          progressUpdatedAt: activeRun.progressUpdatedAt || activeRun.updatedAt || '',
           actionId: activeRun.actionId || '',
           workerId: activeRun.workerId || '',
-          lastAwaitedOperation: activeRun.lastAwaitedOperation || null
+          lastAwaitedOperation: activeRun.lastAwaitedOperation || null,
+          startupTiming: activeRun.startupTiming || null
         } : null,
         lastExecution: lastExecution || null,
         at: new Date().toISOString()
@@ -159,13 +170,37 @@ chrome.runtime.onConnectExternal.addListener((port) => {
       // A progress pulse is advisory; the durable checkpoints remain primary.
     }
   };
+  const queueProgress = () => {
+    if (progressQueued) return;
+    progressQueued = true;
+    queueMicrotask(() => {
+      progressQueued = false;
+      void postProgress();
+    });
+  };
+  const onStorageChanged = (changes, areaName) => {
+    if (areaName !== 'local') return;
+    const activeRunChanged = Boolean(changes.activeRun && (
+      Number(changes.activeRun.newValue?.progressSequence || 0) !== Number(changes.activeRun.oldValue?.progressSequence || 0)
+      || String(changes.activeRun.newValue?.actionId || '') !== String(changes.activeRun.oldValue?.actionId || '')
+      || String(changes.activeRun.newValue?.workerId || '') !== String(changes.activeRun.oldValue?.workerId || '')
+    ));
+    const lastExecutionChanged = Boolean(changes.lastExecution && (
+      String(changes.lastExecution.newValue?.status || '') !== String(changes.lastExecution.oldValue?.status || '')
+      || String(changes.lastExecution.newValue?.sessionId || '') !== String(changes.lastExecution.oldValue?.sessionId || '')
+    ));
+    if (!activeRunChanged && !lastExecutionChanged) return;
+    queueProgress();
+  };
 
   port.onDisconnect.addListener(() => {
     if (progressTimer) clearInterval(progressTimer);
+    chrome.storage.onChanged?.removeListener?.(onStorageChanged);
   });
   port.onMessage.addListener((message) => {
     if (started) return;
     started = true;
+    chrome.storage.onChanged?.addListener?.(onStorageChanged);
     void postProgress();
     progressTimer = setInterval(() => { void postProgress(); }, ACTIVE_MISSION_PROGRESS_INTERVAL_MS);
     dispatch(message, { origin })

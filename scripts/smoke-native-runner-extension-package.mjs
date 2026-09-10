@@ -97,7 +97,7 @@ const startupCheckpointSection = startupCheckpointStart >= 0
   ? packagedLegacyBackground.slice(startupCheckpointStart, startupCheckpointStart + 1_200)
   : '';
 if (!startupCheckpointSection.includes("planActionStatus: 'waiting'")
-  || !packagedLegacyBackground.includes('session = await checkpointRunnerStartup(session, plan, nextAction);')) {
+  || !packagedLegacyBackground.includes('session = await checkpointRunnerStartup(session, plan, nextAction, startupTiming);')) {
   fail('the runner must report a non-advancing startup checkpoint before browser work');
 }
 if (!/const isCartMutation = action\.type === 'click_intent' && action\.intent === 'add_to_cart';[\s\S]{0,500}cartStateVerifiesCandidateSelection\(report, action\)/.test(packagedLegacyBackground)) {
@@ -164,7 +164,8 @@ if (!/ACTIVE_MISSION_RECOVERY_DELAY_MS\s*=\s*30_000/.test(packagedBackground)
 if (!/onConnectExternal/.test(packagedBackground)
   || !/magic-city-active-run-v1/.test(packagedBackground)
   || !/RUNNER_PROGRESS/.test(packagedBackground)
-  || !/RUNNER_RESULT/.test(packagedBackground)) {
+  || !/RUNNER_RESULT/.test(packagedBackground)
+  || !/chrome\.storage\.onChanged\?\.addListener/.test(packagedBackground)) {
   fail('normal mission execution must use a live progress channel instead of alarm-paced continuation');
 }
 if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.test(packagedBackground)
@@ -172,12 +173,22 @@ if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.t
   || !/Keep the external message open through the exact-session claim/.test(packagedBackground)) {
   fail('external runner wake must run through the direct exact-session claim path, without detached MV3 work');
 }
-if (!/async function pollAndExecute\(requestedSessionId = ''\)/.test(packagedLegacyBackground)
-  || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)) {
+if (!/async function pollAndExecute\(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = ''\)/.test(packagedLegacyBackground)
+  || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)
+  || !/directClaim:\s*true/.test(packagedLegacyBackground)
+  || !/extensionRunDispatch:\s*\{ nonce: normalizedDispatchNonce \}/.test(packagedLegacyBackground)) {
   fail('runner execution must select the exact session requested by Magic City');
 }
-if (!/async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id\)/.test(packagedLegacyBackground)) {
+if (!/async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id, dispatchedSession\.extensionRunDispatch\?\.nonce/.test(packagedLegacyBackground)) {
   fail('heartbeat fallback must execute only a still-valid user-dispatched browser mission');
+}
+if (!/EXECUTOR_REGISTRATION_REUSE_MS\s*=\s*30_000/.test(packagedLegacyBackground)
+  || !/executorRegistrationInFlight/.test(packagedLegacyBackground)
+  || !/registrationReused:\s*true/.test(packagedLegacyBackground)) {
+  fail('startup must reuse or share a recent executor registration');
+}
+if (!/outcome\.alreadyInCart === true[\s\S]{0,500}amazon cart was already open/i.test(packagedLegacyBackground)) {
+  fail('an already-open cart must bypass navigation waits and fallback reloads');
 }
 if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackground)
   || !/const navigation = waitForTabNavigation\(tabId, beforeUrl, timeoutMs\);[\s\S]*const updatedTab = await withTimeout/.test(packagedLegacyBackground)) {
