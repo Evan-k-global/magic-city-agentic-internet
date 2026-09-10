@@ -32,6 +32,37 @@ assert.match(runnerStatusRoute, /advisory: true/);
 assert.match(runnerStatusRoute, /return sendAdvisoryJson\(res, 200/);
 assert.doesNotMatch(runnerStatusRoute, /recordNativeRunnerActivity|touchNativeRunnerDevice\(/);
 
+const registrationStart = server.indexOf("if (req.method === 'POST' && urlPath === '/plugins/register')");
+const registrationEnd = server.indexOf("if ((req.method === 'GET' || req.method === 'HEAD')", registrationStart);
+assert.notEqual(registrationStart, -1, 'missing plugin registration route');
+assert.ok(registrationEnd > registrationStart, 'missing route after plugin registration');
+const registrationRoute = server.slice(registrationStart, registrationEnd);
+assert.match(registrationRoute, /nativeRunnerRegistrationMatches\(existingPlugin, requestedRegistration\)/);
+assert.match(registrationRoute, /registrationReused: true/);
+assert.match(registrationRoute, /return sendAdvisoryJson\(res, 200/);
+assert.match(registrationRoute, /requirePluginApiKeyOrNativeRunner\(req, \{ body, pluginId: body\.pluginId, advisory: true \}\)/);
+
+const nativePollStart = server.indexOf("const nativeRunnerDevice = assertActiveNativeRunnerBearer(req);");
+const nativePollEnd = server.indexOf("const auth = getAuthenticatedContext(req);", nativePollStart);
+assert.notEqual(nativePollStart, -1, 'missing native runner queue poll');
+assert.ok(nativePollEnd > nativePollStart, 'missing route after native runner queue poll');
+const nativePollRoute = server.slice(nativePollStart, nativePollEnd);
+assert.match(nativePollRoute, /updateNativeRunnerDeviceEphemeral\(/);
+assert.match(nativePollRoute, /const sendPollResponse = watchdogMutated \? sendJson : sendAdvisoryJson/);
+assert.match(nativePollRoute, /return sendPollResponse\(res, 200/);
+assert.doesNotMatch(nativePollRoute, /touchNativeRunnerDevice\(/);
+
+const watchdogStart = server.indexOf('async function sweepConnectorSessionExecutionWatchdog(');
+const watchdogEnd = server.indexOf('function scheduleExecutionWatchdogSweep(', watchdogStart);
+assert.notEqual(watchdogStart, -1, 'missing execution watchdog sweep');
+assert.ok(watchdogEnd > watchdogStart, 'missing function after execution watchdog sweep');
+const watchdogSweep = server.slice(watchdogStart, watchdogEnd);
+assert.match(watchdogSweep, /durableMutation = true/);
+assert.match(watchdogSweep, /return durableMutation/);
+
+assert.match(server, /native_runner_startup_request/);
+assert.match(server, /responseWaitMs/);
+
 const ephemeralUpdate = extractFunction(store, 'updateNativeRunnerDeviceEphemeral');
 assert.doesNotMatch(ephemeralUpdate, /persistState\(/);
 

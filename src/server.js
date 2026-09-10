@@ -6880,6 +6880,62 @@ function touchNativeRunnerDevice(device, patch = {}) {
   }) || device;
 }
 
+function nativeRunnerRegistrationFields(registration = {}) {
+  return {
+    pluginId: String(registration.pluginId || '').trim(),
+    ownerAgentId: String(registration.ownerAgentId || '').trim(),
+    kind: String(registration.kind || '').trim(),
+    endpoint: String(registration.endpoint || '').trim(),
+    localOnly: registration.localOnly !== false,
+    capabilities: Array.isArray(registration.capabilities) ? registration.capabilities : [],
+    tools: Array.isArray(registration.tools) ? registration.tools : [],
+    privacyModes: Array.isArray(registration.privacyModes) ? registration.privacyModes : ['private'],
+    helperAgents: Array.isArray(registration.helperAgents) ? registration.helperAgents : [],
+    metadata: sanitizeMetadata(registration.metadata || {})
+  };
+}
+
+function nativeRunnerRegistrationMatches(existing, requested) {
+  if (!existing || existing.status !== 'active') return false;
+  return stableJsonStringify(nativeRunnerRegistrationFields(existing))
+    === stableJsonStringify(nativeRunnerRegistrationFields(requested));
+}
+
+function beginNativeRunnerRequestTiming(req, res, urlPath) {
+  if (!isChromeExtensionRunnerRequest(req)) return null;
+  const stage = urlPath === '/plugins/register'
+    ? 'register'
+    : urlPath === '/connectors/sessions'
+      ? 'poll'
+      : /\/claim$/.test(urlPath)
+        ? 'claim'
+        : /\/checkpoint$/.test(urlPath)
+          ? 'checkpoint'
+          : null;
+  if (!stage) return null;
+  const startedAt = Date.now();
+  const marks = {};
+  const metadata = {};
+  res.once('finish', () => {
+    console.log('[agent-verification] native_runner_startup_request', JSON.stringify({
+      stage,
+      method: req.method,
+      sessionId: String(urlPath.match(/^\/connectors\/sessions\/([^/]+)/)?.[1] || '').slice(0, 96) || null,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      responseWaitMs: marks.responseReady == null ? null : Date.now() - startedAt - marks.responseReady,
+      marks,
+      ...metadata
+    }));
+  });
+  return {
+    mark(name, values = null) {
+      marks[name] = Date.now() - startedAt;
+      if (values && typeof values === 'object') Object.assign(metadata, sanitizeMetadata(values));
+    }
+  };
+}
+
 function nativeRunnerDeviceActorIds(device) {
   const allowed = new Set([
     device.pluginId || RUNNER_EXTENSION_PLUGIN_ID,
@@ -8423,8 +8479,9 @@ async function failConnectorSessionFromWatchdog(session, reasonKey) {
 }
 
 async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {}) {
-  if (!EXECUTION_WATCHDOG_ENABLED || executionWatchdogRuntime.processing) return;
+  if (!EXECUTION_WATCHDOG_ENABLED || executionWatchdogRuntime.processing) return false;
   executionWatchdogRuntime.processing = true;
+  let durableMutation = false;
   try {
     const candidates = sessionId
       ? [getConnectorSession(sessionId)].filter(Boolean)
@@ -8480,10 +8537,13 @@ async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {})
         && getConnectorSessionWatchdogRetryCount(session) < EXECUTION_WATCHDOG_MAX_RETRIES;
       if (shouldRetryWithHostedWorker) {
         requeueConnectorSessionFromWatchdog(session, reasonKey);
+        durableMutation = true;
       } else {
         await failConnectorSessionFromWatchdog(session, reasonKey);
+        durableMutation = true;
       }
     }
+    return durableMutation;
   } finally {
     executionWatchdogRuntime.processing = false;
   }
@@ -15886,6 +15946,7 @@ function finalizeActionForIntent({ intent, actionRun, execution, candidateAgent,
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', buildRequestBaseUrl(req));
   const urlPath = url.pathname;
+  const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
 
   try {
     if (req.method === 'GET' && urlPath === '/health') {
@@ -16784,7 +16845,8 @@ const server = http.createServer(async (req, res) => {
       }
       const nativeRunnerDevice = assertActiveNativeRunnerBearer(req);
       if (nativeRunnerDevice) {
-        await sweepConnectorSessionExecutionWatchdog();
+        nativeRunnerRequestTiming?.mark('authenticated');
+        const watchdogMutated = await sweepConnectorSessionExecutionWatchdog();
         const nativeRunnerActorIds = Array.from(nativeRunnerDeviceActorIds(nativeRunnerDevice));
         let sessions = listConnectorSessions(100)
           .filter((session) => nativeRunnerActorIds.some((pluginId) =>
@@ -16816,7 +16878,8 @@ const server = http.createServer(async (req, res) => {
               })
             }
           : {};
-        touchNativeRunnerDevice(nativeRunnerDevice, {
+        updateNativeRunnerDeviceEphemeral(nativeRunnerDevice.id, {
+          lastSeenAt: new Date().toISOString(),
           lastPollAt: new Date().toISOString(),
           lastQueueCount: sessions.length,
           ...metadataPatch
@@ -16836,7 +16899,9 @@ const server = http.createServer(async (req, res) => {
             queueCount: sessions.length
           }));
         }
-        return sendJson(res, 200, {
+        nativeRunnerRequestTiming?.mark('responseReady', { queueCount: sessions.length });
+        const sendPollResponse = watchdogMutated ? sendJson : sendAdvisoryJson;
+        return sendPollResponse(res, 200, {
           sessions: isChromeExtensionRunnerRequest(req)
             ? sessions.map((session) => formatConnectorSessionForExtension(session))
             : sessions
@@ -20030,8 +20095,10 @@ const server = http.createServer(async (req, res) => {
       const session = getConnectorSession(sessionId);
       if (!session) return notFound(res);
       const body = await readBody(req);
+      nativeRunnerRequestTiming?.mark('bodyRead');
       requireFields(body, ['pluginId', 'label']);
       const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      nativeRunnerRequestTiming?.mark('authenticated');
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'checkpoint_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
@@ -20124,6 +20191,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      nativeRunnerRequestTiming?.mark('responseReady', { checkpointLabel });
       return sendJson(res, 200, {
         updated: true,
         session: formatConnectorSessionForRunnerResponse(req, updated, body.pluginId)
@@ -20229,9 +20297,11 @@ const server = http.createServer(async (req, res) => {
         const session = getConnectorSession(sessionId);
         if (!session) return notFound(res);
         const body = await readBody(req);
+        nativeRunnerRequestTiming?.mark('bodyRead');
         requireFields(body, ['pluginId']);
         const declarativeExtensionClaim = isChromeExtensionDeclarativeRunnerRequest(req);
         const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+        nativeRunnerRequestTiming?.mark('authenticated');
         const plugin = getPluginRegistration(body.pluginId);
         if (!plugin || plugin.status !== 'active') {
           return sendJson(res, 404, { error: 'plugin_not_found' });
@@ -20340,6 +20410,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      nativeRunnerRequestTiming?.mark('responseReady', { claimAccepted: true });
       return sendJson(res, 200, {
         claimed: true,
         session: formatConnectorSessionForRunnerResponse(req, updated, plugin.pluginId),
@@ -20912,8 +20983,10 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/plugins/register') {
       const body = await readBody(req);
+      nativeRunnerRequestTiming?.mark('bodyRead');
       requireFields(body, ['pluginId', 'ownerAgentId', 'kind', 'endpoint']);
-      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, pluginId: body.pluginId });
+      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, pluginId: body.pluginId, advisory: true });
+      nativeRunnerRequestTiming?.mark('authenticated');
       const nativeRunnerSeenAt = new Date().toISOString();
       if (pluginAuth.type === 'native_runner') {
         if (!nativeRunnerDeviceCanActAsPlugin(pluginAuth.nativeRunnerDevice, body.ownerAgentId)) {
@@ -20923,7 +20996,7 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 403, { error: 'native_runner_kind_mismatch' });
         }
       }
-      const plugin = upsertPluginRegistration({
+      const requestedRegistration = {
         pluginId: body.pluginId,
         ownerAgentId: body.ownerAgentId,
         kind: body.kind,
@@ -20938,7 +21011,24 @@ const server = http.createServer(async (req, res) => {
           nativeRunnerDeviceId: pluginAuth.nativeRunnerDevice?.id || null,
           ...(body.metadata ?? {})
         })
-      });
+      };
+      const existingPlugin = getPluginRegistration(body.pluginId);
+      if (nativeRunnerRegistrationMatches(existingPlugin, requestedRegistration)) {
+        if (pluginAuth.type === 'native_runner') {
+          updateNativeRunnerDeviceEphemeral(pluginAuth.nativeRunnerDevice.id, {
+            lastSeenAt: nativeRunnerSeenAt,
+            metadata: sanitizeMetadata({
+              ...(pluginAuth.nativeRunnerDevice.metadata || {}),
+              extensionVersion: body.metadata?.version || pluginAuth.nativeRunnerDevice.metadata?.extensionVersion || null,
+              extensionId: body.metadata?.extensionId || pluginAuth.nativeRunnerDevice.metadata?.extensionId || null,
+              runnerSurface: 'chrome_extension_executor'
+            })
+          });
+        }
+        nativeRunnerRequestTiming?.mark('responseReady', { registrationReused: true });
+        return sendAdvisoryJson(res, 200, { plugin: existingPlugin, registrationReused: true });
+      }
+      const plugin = upsertPluginRegistration(requestedRegistration);
       if (pluginAuth.type === 'native_runner') {
         const isExtensionExecutor = isDeclarativeExtensionExecutionAgentId(plugin.pluginId);
         const registeredDevice = isExtensionExecutor
@@ -20966,6 +21056,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      nativeRunnerRequestTiming?.mark('responseReady', { registrationReused: false });
       return sendJson(res, 201, { plugin });
     }
 

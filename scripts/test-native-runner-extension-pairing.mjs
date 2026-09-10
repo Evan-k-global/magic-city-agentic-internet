@@ -205,27 +205,54 @@ async function main() {
     if (claim.data.device?.trustMode !== 'trusted_under_cap') throw new Error('pairing_claim_lost_trust_mode');
     if (!claim.data.device?.useExistingBrowser) throw new Error('pairing_claim_lost_browser_profile_choice');
 
+    const extensionRegistration = {
+      pluginId: 'magic-city-runner-extension',
+      ownerAgentId: 'magic-city-runner-extension',
+      kind: 'browser',
+      endpoint: 'chrome-extension://magic-city-runner-test',
+      executionAgent: true,
+      capabilities: ['browser-worker-agent', 'browser.extension_dom_executor', 'browser.prepare_cart'],
+      tools: ['browser.open_local_profile', 'browser.inspect', 'browser.prepare_cart'],
+      metadata: {
+        extensionOnly: true,
+        extensionExecutor: true,
+        executionBackend: 'extension_dom_executor',
+        browserPermissionReady: true
+      }
+    };
     const extensionRegister = await request(baseUrl, '/plugins/register', {
       method: 'POST',
       bearer: token,
-      body: {
-        pluginId: 'magic-city-runner-extension',
-        ownerAgentId: 'magic-city-runner-extension',
-        kind: 'browser',
-        endpoint: 'chrome-extension://magic-city-runner-test',
-        executionAgent: true,
-        capabilities: ['browser-worker-agent', 'browser.extension_dom_executor', 'browser.prepare_cart'],
-        tools: ['browser.open_local_profile', 'browser.inspect', 'browser.prepare_cart'],
-        metadata: {
-          extensionOnly: true,
-          extensionExecutor: true,
-          executionBackend: 'extension_dom_executor',
-          browserPermissionReady: true
-        }
-      }
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: extensionVersion,
+      runnerExtensionId: 'test-extension-id',
+      body: extensionRegistration
     });
     if (extensionRegister.response.status !== 201) {
       throw new Error(`extension_plugin_register_failed:${extensionRegister.response.status}:${JSON.stringify(extensionRegister.data)}`);
+    }
+    if (extensionRegister.response.headers.get('x-magic-city-durability') === 'advisory') {
+      throw new Error('initial_extension_registration_was_not_durable');
+    }
+    const repeatedRegistrationStartedAt = Date.now();
+    const repeatedExtensionRegister = await request(baseUrl, '/plugins/register', {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: extensionVersion,
+      runnerExtensionId: 'test-extension-id',
+      body: extensionRegistration
+    });
+    const repeatedRegistrationDurationMs = Date.now() - repeatedRegistrationStartedAt;
+    if (repeatedExtensionRegister.response.status !== 200
+      || repeatedExtensionRegister.data.registrationReused !== true
+      || repeatedExtensionRegister.response.headers.get('x-magic-city-durability') !== 'advisory') {
+      throw new Error(`extension_plugin_register_not_reused:${repeatedExtensionRegister.response.status}:${JSON.stringify(repeatedExtensionRegister.data)}`);
+    }
+    if (repeatedRegistrationDurationMs >= 1000) {
+      throw new Error(`extension_plugin_register_reuse_slow:${repeatedRegistrationDurationMs}`);
     }
     const statusAfterExtensionRegister = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
       cookie: auth.cookie
@@ -253,6 +280,9 @@ async function main() {
     });
     if (!versionedPoll.response.ok) {
       throw new Error(`versioned_extension_poll_failed:${versionedPoll.response.status}:${JSON.stringify(versionedPoll.data)}`);
+    }
+    if (versionedPoll.response.headers.get('x-magic-city-durability') !== 'advisory') {
+      throw new Error('versioned_extension_poll_waited_for_global_persistence');
     }
     const statusAfterVersionedPoll = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
       cookie: auth.cookie
@@ -1532,7 +1562,11 @@ async function main() {
       }
     }
 
-    console.log('native-runner extension pairing regression passed');
+    console.log(JSON.stringify({
+      nativeRunnerExtensionPairing: 'passed',
+      repeatedRegistrationDurationMs,
+      startupBoundary: 'claim_and_first_checkpoint'
+    }));
   } finally {
     await stopServer();
     fs.rmSync(tmpDir, { recursive: true, force: true });
