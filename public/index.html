@@ -6169,6 +6169,7 @@
     const executionLocalErrors = new Map();
 	    const executionLocalRunnerProgress = new Map();
 	    const executionProtocolPollingSessions = new Set();
+	    const executionPollingRequestsInFlight = new Set();
 	    const executionDismissedSessions = new Set();
 	    const executionCancellingSessions = new Set();
 	    const NATIVE_RUNNER_CHECK_TIMEOUT_MS = 6000;
@@ -15096,6 +15097,7 @@
 	      executionDraftCache.clear();
 	      executionPendingSessions.clear();
 	      executionProtocolPollingSessions.clear();
+	      executionPollingRequestsInFlight.clear();
 	      executionCancellingSessions.clear();
 	      clearSelectedAgentExecution();
       if (executionPollHandle) {
@@ -15113,6 +15115,7 @@
 	      executionDraftCache.delete(sessionId);
 	      executionPendingSessions.delete(sessionId);
 	      executionProtocolPollingSessions.delete(sessionId);
+	      executionPollingRequestsInFlight.delete(sessionId);
 	      executionCancellingSessions.delete(sessionId);
 	      executionLocalErrors.delete(sessionId);
 	      clearSelectedAgentExecution(sessionId);
@@ -15188,6 +15191,32 @@
 		      return !isTerminalSantaClawzDirectPaymentStatus(directPayment.status);
 		    }
 
+		    function getSantaClawzDeliveryVerificationState(session) {
+		      const hasSantaClawz = session?.externalExecutionHandoff?.source === 'santaclawz'
+		        || Boolean(session?.santaclawzDirectPayment);
+		      if (!hasSantaClawz) return { available: false, accepted: false, pending: false, rejected: false };
+		      const directPayment = session.santaclawzDirectPayment || {};
+		      const summary = directPayment.summary || {};
+		      const items = collectSantaClawzDeliveryItems(session);
+		      const rejected = summary.returnRejected === true
+		        || (summary.terminalFailure === true && summary.returnVerificationPending !== true);
+		      const validationRejected = summary.returnValidation?.ok === false
+		        && summary.returnValidation?.pending !== true;
+		      const accepted = !rejected
+		        && !validationRejected
+		        && (
+		          summary.completed === true
+		          || String(session?.status || '').toLowerCase() === 'fulfilled'
+		          || String(directPayment.status || '').toLowerCase() === 'completed'
+		        );
+		      const pending = items.length > 0 && !accepted && !rejected;
+		      return { available: items.length > 0, accepted, pending, rejected, items };
+		    }
+
+		    function hasPendingSantaClawzDeliveryVerification(session) {
+		      return getSantaClawzDeliveryVerificationState(session).pending;
+		    }
+
 		    function syncExecutionProtocolPollingSession(session) {
 		      if (!session?.id) return false;
 		      const active = shouldPollExecutionSession(session);
@@ -15212,10 +15241,11 @@
 		      return syncExecutionProtocolPollingSession(pollableSession);
 		    }
 
-    function shouldPollExecutionSession(session) {
+	    function shouldPollExecutionSession(session) {
       if (!session) return false;
       if (executionDismissedSessions.has(session.id) || executionCancellingSessions.has(session.id)) return false;
 		      const status = String(session.status || '').toLowerCase();
+		      if (hasPendingSantaClawzDeliveryVerification(session)) return true;
 		      if (['queued', 'claimed', 'executing'].includes(status)) return true;
 		      if (isTerminalExecutionStatus(status)) return false;
 		      return hasActiveSantaClawzDirectPayment(session);
@@ -15293,12 +15323,28 @@
 	      return true;
 	    }
 
+		    function shouldApplyPolledExecutionSession(previousSession, nextSession) {
+		      if (!previousSession || !nextSession) return Boolean(nextSession);
+		      const previousUpdatedAt = Date.parse(String(previousSession.updatedAt || ''));
+		      const nextUpdatedAt = Date.parse(String(nextSession.updatedAt || ''));
+		      if (Number.isFinite(previousUpdatedAt) && Number.isFinite(nextUpdatedAt) && nextUpdatedAt < previousUpdatedAt) {
+		        return false;
+		      }
+		      if (sessionHasBrowserOrderSubmitted(previousSession) && !sessionHasBrowserOrderSubmitted(nextSession)) return false;
+		      if (hasReadySantaClawzDelivery(previousSession) && !hasReadySantaClawzDelivery(nextSession)) return false;
+		      return true;
+		    }
+
 		    async function refreshExecutionSessionForPolling(sessionId) {
 	      if (executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return;
+	      if (executionPollingRequestsInFlight.has(sessionId)) return { mode: 'coalesced' };
+	      executionPollingRequestsInFlight.add(sessionId);
+	      try {
 	      const previousSession = executionSessionCache.get(sessionId) || null;
 	      const previousBucket = executionPollingRenderBucket(previousSession);
 	      const { session } = await api(`/connectors/sessions/${sessionId}`);
 	      if (!session || executionCancellingSessions.has(session.id) || executionDismissedSessions.has(session.id)) return;
+	      if (!shouldApplyPolledExecutionSession(previousSession, session)) return { mode: 'stale-response' };
 	      const draft = getExecutionDraft(sessionId);
 	      if (draft) {
 	        session.selections = { ...(session.selections || {}), ...(draft.selections || {}) };
@@ -15323,6 +15369,9 @@
 	      }
 	      ensureExecutionPolling();
 	      return { mode: 'in-place', previousBucket, nextBucket };
+	      } finally {
+	        executionPollingRequestsInFlight.delete(sessionId);
+	      }
 		    }
 
 	    function ensureExecutionPolling() {
@@ -15379,6 +15428,9 @@
       if (hasReadySantaClawzDelivery(session)) {
         return { statusValue: 'fulfilled', label: 'Done', cls: 'completed', phase: 2 };
       }
+	      if (hasPendingSantaClawzDeliveryVerification(session)) {
+	        return { statusValue: 'verification_pending', label: 'Report available', cls: 'queued', phase: 2 };
+	      }
       if (localWakeError) {
         return { statusValue: 'failed', label: 'Runner needed', cls: 'failed', phase: 1 };
       }
@@ -15512,6 +15564,7 @@
       const browserStopState = String(browserExecution.stopState || result.stopState || '').toLowerCase();
       const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
       const santaClawzDeliveryReady = hasReadySantaClawzDelivery(session);
+	      const santaClawzVerificationPending = hasPendingSantaClawzDeliveryVerification(session);
       const travelMode = kind === 'travel'
         ? resolveTravelModeValue(session.selections?.travelMode || session.paymentOrchestration?.travelMode || 'itinerary_build')
         : '';
@@ -15530,6 +15583,13 @@
           badgeLabel: 'Done'
         };
       }
+	      if (kind === 'agent' && santaClawzVerificationPending) {
+	        return {
+	          title: 'Report available',
+	          detail: 'Delivery verification is still pending. No additional hire or payment is needed.',
+	          badgeLabel: 'Verification pending'
+	        };
+	      }
       if (statusModel.statusValue === 'failed') {
         if (kind === 'agent' && localExecutionError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
           return {
@@ -18327,19 +18387,7 @@
 	    }
 
 	    function hasReadySantaClawzDelivery(session) {
-	      const hasSantaClawz = session?.externalExecutionHandoff?.source === 'santaclawz' || session?.santaclawzDirectPayment;
-	      if (!hasSantaClawz || String(session?.status || '').toLowerCase() === 'failed') return false;
-	      const directPayment = session.santaclawzDirectPayment || {};
-	      const summary = directPayment.summary || {};
-	      if (summary.terminalFailure === true || summary.returnRejected === true) return false;
-	      if (String(session?.status || '').toLowerCase() === 'fulfilled' || String(directPayment.status || '').toLowerCase() === 'completed' || summary.completed === true) {
-	        return true;
-	      }
-	      const items = collectSantaClawzDeliveryItems(session);
-	      if (!items.length || !isSantaClawzCodeAuditDelivery(session, items)) return false;
-	      const payload = getSantaClawzAuditPayload(items);
-	      const auditStatus = String(getSantaClawzAuditValue(payload, ['audit_status', 'status']) || '').toLowerCase();
-	      return ['complete', 'completed', 'success', 'succeeded'].includes(auditStatus);
+	      return getSantaClawzDeliveryVerificationState(session).accepted;
 	    }
 
 	    function openSantaClawzAuditOutput(sessionId = '', format = 'markdown') {
@@ -18416,12 +18464,13 @@
 	      const items = collectSantaClawzDeliveryItems(session);
 	      const codeAuditPanel = renderSantaClawzCodeAuditPanel(session, items);
 	      const outputReady = hasReadySantaClawzDelivery(session);
+	      const verificationPending = hasPendingSantaClawzDeliveryVerification(session);
 	      const directPayment = session.santaclawzDirectPayment || {};
 	      const status = directPayment.status || session.status || 'ready';
 		      const paymentSummary = directPayment.summary || {};
-		      const terminalFailure = paymentSummary.terminalFailure === true
+		      const terminalFailure = !verificationPending && (paymentSummary.terminalFailure === true
 		        || String(status).toLowerCase() === 'failed'
-		        || String(session?.status || '').toLowerCase() === 'failed';
+		        || String(session?.status || '').toLowerCase() === 'failed');
 		      const failureMessage = paymentSummary.failureReason
 		        || directPayment?.executionState?.returnRejection?.message
 		        || session?.fulfillment?.result?.latestFailureReason
@@ -18448,7 +18497,9 @@
 		            ? `last update ${elapsedSeconds}s`
 		            : `ready ${elapsedSeconds}s`;
 		      const retryBlocked = directPayment?.summary?.retryBlocked === true || directPayment?.summary?.returnRejected === true;
-		      const waitingText = terminalFailure
+		      const waitingText = verificationPending
+		        ? 'Report available. Delivery verification is pending.'
+		        : terminalFailure
 		        ? (retryBlocked
 		          ? 'The agent runtime returned a protocol-invalid package. No Base USDC settled; credits returned.'
 		          : 'No valid output was delivered. Credits returned.')
@@ -18467,11 +18518,11 @@
 	          <div class="trace-label">SantaClawz delivery</div>
 	          <div class="trace-meta">
 	            <div class="execution-proof-row">
-		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : items.length ? 'Output ready' : statusLabel)}</span>
+		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : verificationPending ? 'Verification pending' : items.length ? 'Output ready' : statusLabel)}</span>
 		              ${requestId ? `<span class="execution-proof-badge">request ${escapeExecutionValue(String(requestId).slice(0, 18))}</span>` : ''}
 		              ${elapsedBadge ? `<span class="execution-proof-badge">${escapeExecutionValue(elapsedBadge)}</span>` : ''}
 		            </div>
-			            ${items.length && codeAuditPanel ? '' : `<div style="margin-top:8px">${escapeExecutionValue(waitingText)}</div>`}
+			            ${items.length && codeAuditPanel && !verificationPending ? '' : `<div style="margin-top:8px">${escapeExecutionValue(waitingText)}</div>`}
 			            ${stateLinks ? `<div class="execution-proof-links">${stateLinks}</div>` : ''}
 			            ${terminalFailure
 			              ? `<div class="execution-output-wait">${escapeExecutionValue(failureMessage)}</div>`
@@ -18639,13 +18690,16 @@
         `;
       }
       if (session.status === 'failed') {
+	      if (hasPendingSantaClawzDeliveryVerification(session)) {
+	        return `${directX402Panel}${santaClawzDeliveryPanel}`;
+	      }
         const failedReason = fulfillment?.result?.error
           ? normalizeExecutionErrorMessage(fulfillment.result.error, { lane: session.handoffData?.kind || '' })
           : '';
 	        return `${directX402Panel}${santaClawzDeliveryPanel}${verification}<div class="execution-muted">Failed.${failedReason ? `<br />${escapeExecutionValue(compactExecutionSentence(failedReason, 110))}` : ''}</div>`;
       }
 	      if (['queued', 'claimed', 'executing'].includes(String(session.status || ''))) {
-	        return `${directX402Panel}${santaClawzDeliveryPanel}${hasReadySantaClawzDelivery(session) ? '' : `<div class="execution-output-wait">${directX402Panel || santaClawzDeliveryPanel ? 'Polling delivery.' : 'Running.'}</div>`}`;
+	        return `${directX402Panel}${santaClawzDeliveryPanel}${hasReadySantaClawzDelivery(session) || hasPendingSantaClawzDeliveryVerification(session) ? '' : `<div class="execution-output-wait">${directX402Panel || santaClawzDeliveryPanel ? 'Polling delivery.' : 'Running.'}</div>`}`;
 	      }
 	      return `${directX402Panel}${santaClawzDeliveryPanel}<div class="execution-muted">No output yet.</div>`;
 	    }

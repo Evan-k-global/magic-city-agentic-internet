@@ -114,32 +114,61 @@ vm.runInContext([
   extractFunctionSource('getSantaClawzAuditHighestSeverity'),
   extractFunctionSource('getSantaClawzAuditFindingCount'),
   extractFunctionSource('getSantaClawzAuditSummary'),
+  extractFunctionSource('getSantaClawzDeliveryVerificationState'),
+  extractFunctionSource('hasPendingSantaClawzDeliveryVerification'),
   extractFunctionSource('hasReadySantaClawzDelivery'),
   extractFunctionSource('openSantaClawzAuditOutput'),
   extractFunctionSource('renderSantaClawzCodeAuditPanel'),
   extractFunctionSource('getExecutionStatusModel'),
   extractFunctionSource('shouldShowExecutionActivityBar'),
   extractFunctionSource('describeExecutionRunState'),
+  extractFunctionSource('shouldApplyPolledExecutionSession'),
   extractFunctionSource('renderExecutionResult')
 ].join('\n'), context);
 const helpers = vm.runInContext(`({
   collectSantaClawzDeliveryItems,
+  getSantaClawzDeliveryVerificationState,
+  hasPendingSantaClawzDeliveryVerification,
   hasReadySantaClawzDelivery,
   getExecutionStatusModel,
   shouldShowExecutionActivityBar,
   describeExecutionRunState,
+  shouldApplyPolledExecutionSession,
   renderSantaClawzCodeAuditPanel,
   openSantaClawzAuditOutput,
   renderExecutionResult
 })`, context);
 
 const items = helpers.collectSantaClawzDeliveryItems(session);
-assert.equal(helpers.hasReadySantaClawzDelivery(session), true, 'completed audit output must override a stale executing presentation');
+assert.equal(helpers.hasReadySantaClawzDelivery(session), false, 'unverified output must not claim accepted completion');
+assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(session), true);
 const status = helpers.getExecutionStatusModel(session);
-assert.equal(status.statusValue, 'fulfilled');
-assert.equal(status.label, 'Done');
+assert.equal(status.statusValue, 'verification_pending');
+assert.equal(status.label, 'Report available');
 assert.equal(helpers.shouldShowExecutionActivityBar(session, status), false);
-assert.equal(helpers.describeExecutionRunState(session, status).title, 'Audit complete');
+assert.equal(helpers.describeExecutionRunState(session, status).title, 'Report available');
+
+const watchdogFailedSession = structuredClone(session);
+watchdogFailedSession.status = 'failed';
+watchdogFailedSession.updatedAt = '2026-09-10T06:47:06.209Z';
+assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(watchdogFailedSession), true);
+assert.equal(helpers.getExecutionStatusModel(watchdogFailedSession).label, 'Report available');
+
+const acceptedSession = structuredClone(session);
+acceptedSession.status = 'fulfilled';
+acceptedSession.updatedAt = '2026-09-10T06:48:00.000Z';
+acceptedSession.santaclawzDirectPayment.status = 'completed';
+acceptedSession.santaclawzDirectPayment.summary = {
+  completed: true,
+  returnValidation: { ok: true }
+};
+assert.equal(helpers.hasReadySantaClawzDelivery(acceptedSession), true);
+assert.equal(helpers.getExecutionStatusModel(acceptedSession).label, 'Done');
+
+const staleAcceptedSession = structuredClone(acceptedSession);
+staleAcceptedSession.updatedAt = '2026-09-10T06:46:00.000Z';
+assert.equal(helpers.shouldApplyPolledExecutionSession(acceptedSession, staleAcceptedSession), false);
+assert.equal(helpers.shouldApplyPolledExecutionSession(watchdogFailedSession, acceptedSession), true);
 
 const panel = helpers.renderSantaClawzCodeAuditPanel(session, items);
 assert.match(panel, /Highest severity[\s\S]*high/i);
