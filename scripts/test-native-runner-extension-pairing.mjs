@@ -529,6 +529,7 @@ async function main() {
     }
 
     const holderKey = crypto.generateKeyPairSync('ed25519');
+    const claimStartedAt = Date.now();
     const claimedSession = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/claim`, {
       method: 'POST',
       bearer: token,
@@ -540,6 +541,7 @@ async function main() {
         extensionDispatchNonce: extensionSession.extensionRunDispatch.nonce
       }
     });
+    const claimDurationMs = Date.now() - claimStartedAt;
     if (!claimedSession.response.ok) {
       throw new Error(`extension_claim_failed:${claimedSession.response.status}:${JSON.stringify(claimedSession.data)}`);
     }
@@ -550,6 +552,7 @@ async function main() {
     if (!extensionPlan?.planHash || extensionPlan.actions?.[0]?.id !== 'open-site') {
       throw new Error(`extension_claim_missing_plan:${JSON.stringify(extensionPlan || {})}`);
     }
+    const firstCheckpointStartedAt = Date.now();
     const permissionCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
       method: 'POST',
       bearer: token,
@@ -573,6 +576,7 @@ async function main() {
         })
       }
     });
+    const firstCheckpointDurationMs = Date.now() - firstCheckpointStartedAt;
     if (!permissionCheckpoint.response.ok) {
       throw new Error(`extension_permission_checkpoint_failed:${permissionCheckpoint.response.status}:${JSON.stringify(permissionCheckpoint.data)}`);
     }
@@ -1565,6 +1569,9 @@ async function main() {
     console.log(JSON.stringify({
       nativeRunnerExtensionPairing: 'passed',
       repeatedRegistrationDurationMs,
+      claimDurationMs,
+      firstCheckpointDurationMs,
+      claimToFirstCheckpointMs: claimDurationMs + firstCheckpointDurationMs,
       startupBoundary: 'claim_and_first_checkpoint'
     }));
   } finally {

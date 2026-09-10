@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import pg from 'pg';
 import { CREDIT_SCALE, toUnits } from './units.js';
 import { buildPostgresPoolOptions } from './postgresConfig.js';
@@ -22,6 +23,10 @@ const ALLOW_STATE_RESET_ON_READ_ERROR = String(process.env.MAGIC_CITY_ALLOW_STAT
 const MAX_CONNECTOR_ACTIVITY_ROWS = Math.max(
   100,
   Math.min(Number(process.env.MAGIC_CITY_MAX_CONNECTOR_ACTIVITY_ROWS || 1000) || 1000, 10000)
+);
+const POSTGRES_PERSIST_TIMING_LOG_MS = Math.max(
+  100,
+  Number(process.env.MAGIC_CITY_POSTGRES_PERSIST_TIMING_LOG_MS || 1000) || 1000
 );
 
 const defaultState = () => ({
@@ -344,7 +349,9 @@ function serializePostgresState(snapshot = JSON.stringify(state)) {
 }
 
 function hydratePostgresState(value) {
-  if (!value || typeof value !== 'object' || value.schema !== 'magic-city-encrypted-state-v1') {
+  const encryptedSchema = value?.schema === 'magic-city-encrypted-state-v1'
+    || value?.schema === 'magic-city-encrypted-state-v2';
+  if (!value || typeof value !== 'object' || !encryptedSchema) {
     if (REQUIRE_STATE_ENCRYPTION && value) {
       throw new Error('unencrypted_postgres_state_not_allowed');
     }
@@ -355,10 +362,16 @@ function hydratePostgresState(value) {
   try {
     const decipher = crypto.createDecipheriv('aes-256-gcm', stateEncryptionKey, Buffer.from(value.iv, 'base64'));
     decipher.setAuthTag(Buffer.from(value.tag, 'base64'));
-    const plaintext = Buffer.concat([
+    const decrypted = Buffer.concat([
       decipher.update(Buffer.from(value.ciphertext, 'base64')),
       decipher.final()
-    ]).toString('utf8');
+    ]);
+    const plaintext = value.schema === 'magic-city-encrypted-state-v2'
+      ? (() => {
+          if (value.compression !== 'gzip') throw new Error('unsupported_magic_city_state_compression');
+          return zlib.gunzipSync(decrypted).toString('utf8');
+        })()
+      : decrypted.toString('utf8');
     return withDefaults(JSON.parse(plaintext));
   } catch (error) {
     throw new Error(`postgres_state_decryption_failed:${error instanceof Error ? error.message : String(error)}`);
@@ -563,8 +576,11 @@ if (pool) {
 }
 
 async function writePostgresSnapshot(snapshot = JSON.stringify(state)) {
+  const startedAt = Date.now();
   await ensurePostgresWriterLock();
+  const serializeStartedAt = Date.now();
   const storedSnapshot = serializePostgresState(snapshot);
+  const serializedAt = Date.now();
   await pool.query(
     `
       insert into app_state (state_key, state_json, updated_at)
@@ -574,6 +590,18 @@ async function writePostgresSnapshot(snapshot = JSON.stringify(state)) {
     `,
     [STATE_ROW_KEY, storedSnapshot]
   );
+  const completedAt = Date.now();
+  persistence.lastWriteMetrics = {
+    plaintextBytes: Buffer.byteLength(snapshot),
+    storedBytes: Buffer.byteLength(storedSnapshot),
+    lockWaitMs: serializeStartedAt - startedAt,
+    serializeEncryptMs: serializedAt - serializeStartedAt,
+    databaseWriteMs: completedAt - serializedAt,
+    totalMs: completedAt - startedAt
+  };
+  if (persistence.lastWriteMetrics.totalMs >= POSTGRES_PERSIST_TIMING_LOG_MS) {
+    console.info('[agent-verification] postgres_persist_timing', JSON.stringify(persistence.lastWriteMetrics));
+  }
   markPostgresWriteSuccess();
 }
 

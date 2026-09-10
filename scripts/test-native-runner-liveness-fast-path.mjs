@@ -63,6 +63,14 @@ assert.match(watchdogSweep, /return durableMutation/);
 assert.match(server, /native_runner_startup_request/);
 assert.match(server, /responseWaitMs/);
 
+const healthStart = server.indexOf("if (req.method === 'GET' && urlPath === '/health')");
+const healthEnd = server.indexOf("if (req.method === 'GET' && urlPath === '/network/zeko/status')", healthStart);
+assert.notEqual(healthStart, -1, 'missing health route');
+assert.ok(healthEnd > healthStart, 'missing route after health');
+const healthRoute = server.slice(healthStart, healthEnd);
+assert.match(healthRoute, /return sendAdvisoryJson\(res, persistenceReady \? 200 : 503/);
+assert.doesNotMatch(healthRoute, /sendJson\(/);
+
 const ephemeralUpdate = extractFunction(store, 'updateNativeRunnerDeviceEphemeral');
 assert.doesNotMatch(ephemeralUpdate, /persistState\(/);
 

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import http from 'node:http';
+import zlib from 'node:zlib';
 import pg from 'pg';
 
 function deferred() {
@@ -27,6 +29,23 @@ process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE = 'false';
 process.env.MAGIC_CITY_REQUIRE_STATE_ENCRYPTION = 'false';
 process.env.MAGIC_CITY_STATE_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
 
+function compressedEncryptedState(value) {
+  const key = Buffer.alloc(32, 7);
+  const iv = Buffer.alloc(12, 9);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const compressed = zlib.gzipSync(Buffer.from(JSON.stringify(value), 'utf8'));
+  const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
+  return {
+    schema: 'magic-city-encrypted-state-v2',
+    alg: 'aes-256-gcm',
+    compression: 'gzip',
+    keyId: crypto.createHash('sha256').update(key).digest('hex').slice(0, 16),
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64')
+  };
+}
+
 const originalQuery = pg.Pool.prototype.query;
 let snapshotWriter = async () => ({ rows: [] });
 let snapshotWriteCount = 0;
@@ -35,7 +54,10 @@ let encryptedSnapshotCount = 0;
 pg.Pool.prototype.query = async function query(text, values) {
   const sql = String(text || '');
   if (/select state_json from app_state/i.test(sql)) {
-    return { rows: [{ state_json: { unitScale: 1000 } }] };
+    return { rows: [{ state_json: compressedEncryptedState({
+      unitScale: 1000,
+      agents: { legacy: { agentId: 'legacy', status: 'active' } }
+    }) }] };
   }
   if (/insert into app_state\s*\(/i.test(sql)) {
     snapshotWriteCount += 1;
@@ -50,6 +72,7 @@ pg.Pool.prototype.query = async function query(text, values) {
 let server;
 try {
   const store = await import(`../src/store.js?persistence-boundary=${Date.now()}`);
+  assert.equal(store.getAgent('legacy')?.agentId, 'legacy', 'compressed encrypted snapshots must be readable before rollout');
   const controlledWrites = [];
   snapshotWriter = async () => {
     const write = deferred();

@@ -11175,7 +11175,10 @@ function getPublicPersistenceStatus() {
       algorithm: persistence.atRestEncryption?.algorithm ?? null
     },
     singleWriterRequired: Boolean(persistence.singleWriterRequired),
-    writerLockAcquired: Boolean(persistence.writerLockAcquired)
+    writerLockAcquired: Boolean(persistence.writerLockAcquired),
+    lastWriteAt: persistence.lastWriteAt || null,
+    lastWriteMetrics: persistence.lastWriteMetrics || null,
+    writeFailureCount: Number(persistence.writeFailureCount || 0)
   };
 }
 
@@ -15954,7 +15957,7 @@ const server = http.createServer(async (req, res) => {
       const persistenceReady = persistence.ready
         && persistence.healthy
         && (!persistence.singleWriterRequired || persistence.writerLockAcquired);
-      return sendJson(res, persistenceReady ? 200 : 503, {
+      return sendAdvisoryJson(res, persistenceReady ? 200 : 503, {
         status: persistenceReady ? 'ok' : 'degraded',
         service: 'agent-verification',
         now: new Date().toISOString(),
