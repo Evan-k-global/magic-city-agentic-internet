@@ -84,6 +84,45 @@ function loadHelpers(api) {
   assert.match(html, /triggerButton\.textContent = 'Check approval'/);
 }
 
+{
+  let approvalAttempt = 0;
+  let startExecutionRequests = 0;
+  const api = async (requestPath, options = {}) => {
+    if (options.method === 'POST') {
+      if (requestPath.endsWith('/start-execution')) {
+        startExecutionRequests += 1;
+        return {};
+      }
+      approvalAttempt += 1;
+      if (approvalAttempt === 1) throw new Error('network_request_failed:lost_response');
+      return {
+        approved: true,
+        replayed: true,
+        actionRun: { id: 'action-failed-session', status: 'completed', connectorSessionId: 'cs-failed' },
+        connectorSession: { id: 'cs-failed', status: 'failed' }
+      };
+    }
+    if (requestPath === '/actions/action-failed-session') {
+      throw new Error('network_request_failed:recovery_unavailable');
+    }
+    throw new Error(`unexpected_request:${requestPath}`);
+  };
+  const helpers = loadHelpers(api);
+  await assert.rejects(
+    helpers.approveActionWithRecovery('action-failed-session'),
+    (error) => error.actionApprovalRecoverable === true
+  );
+  const replayed = await helpers.approveActionWithRecovery('action-failed-session');
+  const shouldAutoRunMagicInternetAction = true;
+  if (shouldAutoRunMagicInternetAction && !helpers.approvedSessionAlreadyStarted(replayed)) {
+    await api(`/connectors/sessions/${replayed.connectorSession.id}/start-execution`, { method: 'POST' });
+  }
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.connectorSession.status, 'failed');
+  assert.equal(helpers.approvedSessionAlreadyStarted(replayed), true);
+  assert.equal(startExecutionRequests, 0, 'a replayed approval for an existing failed session must only open its widget');
+}
+
 assert.match(
   html,
   /await revealExecutionSheet\(data\.connectorSession\.id,[\s\S]*if \(autoRunAction\)/,

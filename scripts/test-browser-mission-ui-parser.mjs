@@ -65,6 +65,11 @@ assert.match(
   'completed approval recovery must fetch the original connector session'
 );
 assert.match(html, /approvedSessionAlreadyStarted\(data\)/, 'an already-running recovered session must not be restarted');
+assert.doesNotMatch(
+  html,
+  /function approvedSessionAlreadyStarted\(data = \{\}\) \{[\s\S]{0,120}approvalRecovered/,
+  'restart protection must apply to replayed approval responses as well as GET recovery'
+);
 assert.match(serverSource, /if \(actionRun\.status === 'completed'\)[\s\S]*replayed: true/, 'completed action approvals must replay their existing result');
 assert.match(serverSource, /connectorSessionId: connectorSession\?\.id \|\| null/, 'completed actions must retain their connector session for idempotent replay');
 assert.match(
