@@ -659,7 +659,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<label><input type="radio" name="delivery" /> Try Prime FREE one-day trial</label></div></div>',
       `<input aria-label="Billing street address" value="${confirmedPendingOrder ? '99 Billing Plaza' : '1 Wrong Billing Way'}" />`,
       `<input aria-label="Billing ZIP code" value="${confirmedPendingOrder ? '10001' : '99999'}" />`,
-      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/pending-order'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
+      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
       `<p id="order-result">${confirmedPendingOrder ? 'Order placed' : ''}</p>`,
       confirmedPendingOrder ? '<script>document.querySelector(\'[aria-label="Street address"]\').value="1 Magic City Way"; document.querySelector(\'[aria-label="City"]\').value="San Francisco"; document.querySelector(\'[aria-label="State"]\').value="CA"; document.querySelector(\'[aria-label="ZIP code"]\').value="94107"; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true; document.querySelector(\'#payment-options\').hidden=true;</script>' : '',
       '</main>'
@@ -723,11 +723,12 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       // realistic shape so the runner must preserve the wrapper validation
       // when dispatching the native click.
       '<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" /></div>',
-      `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'submitOrderButtonId') return; sessionStorage.setItem('magic-city-native-final-click', '1'); ${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/pending-order'" : "document.body.dataset.orderSubmitted='1'; event.preventDefault()"}; }, true)</script>`,
+      `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'submitOrderButtonId') return; sessionStorage.setItem('magic-city-native-final-click', '1'); ${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.body.dataset.orderSubmitted='1'; event.preventDefault()"}; }, true)</script>`,
       '</main>'
     ].join('');
   }
-  if (pathname === '/checkout/pending-order') {
+  if (pathname === '/checkout/pending-order' || pathname === '/checkout/duplicateOrder') {
+    const sparseDuplicateOrder = pathname === '/checkout/duplicateOrder';
     const pendingTitle = searchParams.get('variant') === 'cashew' ? 'Nature Valley Cashew Granola Bars' : 'Test Gadget';
     const pendingAsin = searchParams.get('variant') === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
     const pendingQuantity = Number(searchParams.get('quantity')) || null;
@@ -741,7 +742,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     return [
       '<main><h1>This is a pending order</h1>',
       `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$${pendingUnitPrice.toFixed(2)}</p>${pendingQuantity ? `<p>Quantity: ${pendingQuantity}</p>` : ''}</section>`,
-      `<p>Order total: $${pendingOrderTotal.toFixed(2)}</p>`,
+      sparseDuplicateOrder ? '' : `<p>Order total: $${pendingOrderTotal.toFixed(2)}</p>`,
       '<p>Do you want to order these items again?</p>',
       '<div id="amazon-pending-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="confirmPendingOrderButtonId" type="submit" /></div>',
       `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'confirmPendingOrderButtonId') return; const count=Number(sessionStorage.getItem('magic-city-pending-final-clicks')||0)+1; sessionStorage.setItem('magic-city-pending-final-clicks',String(count)); ${pendingClick} }, true)</script>`,
@@ -817,6 +818,8 @@ async function main() {
     let dropInspectReviewCheckpointResponse = false;
     let inspectReviewCheckpointCommitted = false;
     let releaseDroppedInspectReviewResponse = null;
+    let dropPrepareCartCheckpointResponse = false;
+    let prepareCartCheckpointCommittedAtMs = 0;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
@@ -944,6 +947,11 @@ async function main() {
           dropInspectReviewCheckpointResponse = false;
           req.socket.destroy();
           return;
+        }
+        if (dropPrepareCartCheckpointResponse && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
+          dropPrepareCartCheckpointResponse = false;
+          prepareCartCheckpointCommittedAtMs = Date.now();
+          return json(res, 503, { error: 'test_committed_checkpoint_response_lost' });
         }
         return json(res, 200, { updated: true, session });
       }
@@ -1999,6 +2007,7 @@ async function main() {
       // than one Chrome heartbeat without making browser steps slow.
       pendingOrderConfirmationDelayMs: 65_000
     };
+    dropPrepareCartCheckpointResponse = true;
     await popup.close();
     const externalWakePage = await context.newPage();
     await externalWakePage.goto(`${baseUrl}/external-wake`);
@@ -2096,18 +2105,37 @@ async function main() {
       .filter(Boolean))];
     const pendingContinuationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
       && checkpoint.planActionStatus === 'completed');
+    const checkpointAfterPrepareCart = checkpoints.find((checkpoint) => (
+      Number(checkpoint.testReceivedAtMs || 0) > prepareCartCheckpointCommittedAtMs
+      && !/^prepare-cart(?:-\d+)?$/.test(String(checkpoint.planActionId || ''))
+    ));
+    const inlineCartRecoveryMs = Number(checkpointAfterPrepareCart?.testReceivedAtMs || 0) - prepareCartCheckpointCommittedAtMs;
+    const prepareCartCheckpointCount = checkpoints.filter((checkpoint) => /^prepare-cart(?:-\d+)?$/.test(String(checkpoint.planActionId || ''))).length;
+    const sawReconnectingRunner = (externalWake.progress || []).some((entry) => (
+      entry?.activeRun?.progressState === 'reconnecting_control_plane'
+      && entry?.activeRun?.progressLabel === 'Reconnecting Runner'
+    ));
     const continuationDispatchMs = Number(pendingContinuationCheckpoint?.testReceivedAtMs || 0) - externalWakeStartedAtMs;
     if (externalWake.elapsedMs < 60_000
       || externalWake.elapsedMs >= 90_000
       || externalWake.progress?.length < 4
       || connectedWorkerIds.length !== 1
       || continuationDispatchMs <= 0
-      || continuationDispatchMs >= 30_000) {
+      || continuationDispatchMs >= 30_000
+      || prepareCartCheckpointCommittedAtMs <= 0
+      || inlineCartRecoveryMs <= 0
+      || inlineCartRecoveryMs >= 8_000
+      || prepareCartCheckpointCount !== 1
+      || !sawReconnectingRunner) {
       fail(`browser_extension_active_run_port_lifecycle_failed:${JSON.stringify({
         elapsedMs: externalWake.elapsedMs,
         progressCount: externalWake.progress?.length || 0,
         connectedWorkerIds,
-        continuationDispatchMs
+        continuationDispatchMs,
+        prepareCartCheckpointCommittedAtMs,
+        inlineCartRecoveryMs,
+        prepareCartCheckpointCount,
+        sawReconnectingRunner
       })}`);
     }
     recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
@@ -2118,6 +2146,11 @@ async function main() {
       progressPulses: externalWake.progress.length,
       workerCount: connectedWorkerIds.length,
       startupCheckpoint: 'open-site waiting'
+    });
+    recordPurchaseScenario('Lost committed cart checkpoint resumes inline without replay', {
+      recoveryMs: inlineCartRecoveryMs,
+      prepareCartCheckpointCount,
+      progressLabel: 'Reconnecting Runner'
     });
     const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
     const pendingFinalClicks = primaryStorePage
@@ -2142,7 +2175,7 @@ async function main() {
       || !durableScopes.includes(`${plan.planHash}:confirm-pending-order`)) {
       fail(`browser_extension_pending_order_dispatch_receipts_not_both_durable:${JSON.stringify(durableDispatches)}`);
     }
-    recordPurchaseScenario('Matching Amazon pending order is continued exactly once', { pendingFinalClicks });
+    recordPurchaseScenario('Sparse Amazon duplicateOrder page is continued exactly once', { pendingFinalClicks });
 
     const replayPage = await context.newPage();
     await replayPage.goto(`${baseUrl}/checkout/pending-order?stay=1`);

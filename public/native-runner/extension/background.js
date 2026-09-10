@@ -9,7 +9,8 @@ const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
-const LEAN_RUNTIME_MODE = 'v0.4.37-checkpoint-lease-recovery';
+const INLINE_CART_RECONCILIATION_DELAY_MS = 200;
+const LEAN_RUNTIME_MODE = 'v0.5.0-inline-cart-checkpoint-recovery';
 const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
@@ -41,6 +42,57 @@ async function dispatch(message, sender = null) {
   const result = await legacyController.handleMessage(message, sender);
   await ensureHeartbeatAlarm();
   return result;
+}
+
+function retryingControlPlaneExecution(result) {
+  if (result?.status === 'retrying_control_plane') return result;
+  return Array.isArray(result?.executed)
+    ? result.executed.find((entry) => entry?.status === 'retrying_control_plane') || null
+    : null;
+}
+
+function replaceExecutionResult(result, recovered) {
+  if (!Array.isArray(result?.executed)) return recovered;
+  return {
+    ...result,
+    executed: result.executed.map((entry) => (
+      String(entry?.sessionId || '') === String(recovered?.sessionId || '') ? recovered : entry
+    ))
+  };
+}
+
+async function reconcileCommittedCartCheckpoint(result) {
+  const interrupted = retryingControlPlaneExecution(result);
+  if (!interrupted?.sessionId) return result;
+  const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
+  const actionId = String(stored.lastExecution?.actionId || '');
+  const sessionId = String(interrupted.sessionId || '');
+  if (!/^prepare-cart(?:-\d+)?$/.test(actionId)
+    || String(stored.lastExecution?.sessionId || '') !== sessionId
+    || String(stored.activeRun?.sessionId || '') !== sessionId) {
+    return result;
+  }
+  const now = new Date().toISOString();
+  await chrome.storage.local.set({
+    activeRun: {
+      ...stored.activeRun,
+      progressLabel: 'Reconnecting Runner',
+      progressState: 'reconnecting_control_plane',
+      progressSequence: Number(stored.activeRun?.progressSequence || 0) + 1,
+      progressUpdatedAt: now,
+      updatedAt: now
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, INLINE_CART_RECONCILIATION_DELAY_MS));
+  try {
+    const recovered = await legacyController.resumeActiveRun();
+    return recovered?.sessionId === sessionId
+      ? replaceExecutionResult(result, recovered)
+      : result;
+  } catch {
+    // The controller already armed the normal recovery alarm before yielding.
+    return result;
+  }
 }
 
 async function dispatchAlarm(alarm = null) {
@@ -204,6 +256,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
     void postProgress();
     progressTimer = setInterval(() => { void postProgress(); }, ACTIVE_MISSION_PROGRESS_INTERVAL_MS);
     dispatch(message, { origin })
+      .then(reconcileCommittedCartCheckpoint)
       .then((result) => port.postMessage({ type: 'RUNNER_RESULT', ok: true, result }))
       .catch((error) => port.postMessage({ type: 'RUNNER_RESULT', ok: false, error: error?.message || String(error) }))
       .finally(() => {
