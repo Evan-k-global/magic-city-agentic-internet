@@ -38,7 +38,9 @@ assert.match(htmlSource, /__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__/);
 assert.match(htmlSource, /isApprovedSantaClawzClientAgent/);
 const chatSubmitStart = htmlSource.indexOf('async function submitIntentFromChat');
 const chatSubmitEnd = htmlSource.indexOf("$('sendBtn').addEventListener", chatSubmitStart);
-assert.doesNotMatch(htmlSource.slice(chatSubmitStart, chatSubmitEnd), /attachAddAgentCallToAction|isAddAgentIntent/);
+const chatSubmit = htmlSource.slice(chatSubmitStart, chatSubmitEnd);
+assert.match(chatSubmit, /const addAgentIntent = isAddAgentIntent\(prompt\)/);
+assert.match(chatSubmit, /if \(addAgentIntent\) attachAddAgentCallToAction/);
 const helperHeading = htmlSource.slice(
   htmlSource.indexOf('id="helperPlatformAgentsSection"'),
   htmlSource.indexOf('id="helperPlatformAgentsList"')

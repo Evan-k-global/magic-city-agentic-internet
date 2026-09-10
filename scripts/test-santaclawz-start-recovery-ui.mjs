@@ -102,5 +102,43 @@ assert.doesNotMatch(
   'SantaClawz submission must not wait for a widget render'
 );
 assert.match(fallbackStart, /reconcileAgentExecutionStartFailure\(session, error\)/);
+const fallbackDraftIndex = fallbackStart.indexOf('executionDraftCache.set(session.id, { selections, localPrivateInputs })');
+assert.ok(fallbackDraftIndex >= 0 && fallbackDraftIndex < startRequestIndex, 'fallback start must retain its draft before preflight');
+const fallbackClearIndex = fallbackStart.indexOf('clearExecutionDraft(session.id)');
+assert.ok(fallbackClearIndex > startRequestIndex, 'fallback start must clear its draft only after success');
+
+const sheetStart = html.slice(
+  html.indexOf('const startExecutionFromSheet = async () =>'),
+  html.indexOf('const resumeCheckoutReconcileFromSheet = async () =>', html.indexOf('const startExecutionFromSheet = async () =>'))
+);
+const sheetStartRequestIndex = sheetStart.indexOf('/start-execution');
+const sheetDraftIndex = sheetStart.indexOf('executionDraftCache.set(session.id, { selections, localPrivateInputs })');
+const sheetClearIndex = sheetStart.indexOf('clearExecutionDraft(session.id)');
+assert.ok(sheetDraftIndex >= 0 && sheetDraftIndex < sheetStartRequestIndex, 'sheet start must retain its draft before preflight');
+assert.ok(sheetClearIndex > sheetStartRequestIndex, 'sheet start must clear its draft only after success');
+
+{
+  const errorContext = {
+    normalizeApiErrorCode(value) {
+      return String(value || '');
+    }
+  };
+  vm.createContext(errorContext);
+  vm.runInContext(extractFunctionSource('normalizeExecutionErrorMessage'), errorContext);
+  assert.match(
+    errorContext.normalizeExecutionErrorMessage({
+      message: 'santaclawz_runtime_ready_timeout',
+      data: { error: 'santaclawz_runtime_ready_timeout' }
+    }),
+    /readiness check in time.*No payment was submitted/i
+  );
+  assert.match(
+    errorContext.normalizeExecutionErrorMessage({
+      message: 'santaclawz_runtime_x402_plan_timeout',
+      data: { error: 'santaclawz_runtime_x402_plan_timeout' }
+    }),
+    /payment contract in time.*No payment was submitted/i
+  );
+}
 
 console.log('santaclawz start recovery UI regression passed');

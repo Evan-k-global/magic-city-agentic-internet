@@ -7069,6 +7069,12 @@
       if (/mission_capability_expired/i.test(serverCode) || /mission_capability_expired/i.test(raw)) {
         return 'This browser mission expired before it could continue. Retry to renew the same approved scope.';
       }
+      if (/santaclawz_runtime_ready_timeout/i.test(serverCode) || /santaclawz_runtime_ready_timeout/i.test(raw)) {
+        return 'SantaClawz did not answer its readiness check in time. No payment was submitted; retry this saved run.';
+      }
+      if (/santaclawz_runtime_x402_plan_timeout/i.test(serverCode) || /santaclawz_runtime_x402_plan_timeout/i.test(raw)) {
+        return 'SantaClawz did not return its payment contract in time. No payment was submitted; retry this saved run.';
+      }
       if (/network_request_failed|failed to fetch|networkerror|network request failed|load failed|non_json_response|invalid_json|unexpected token|unexpected end of json input|http_502|http_503|http_504/i.test(raw)) {
         return `${lanePrefix} could not reach the service right now. Retry in a moment.`;
       }
@@ -13280,6 +13286,12 @@
 	          await hireAgent(agents[index] || null, event.currentTarget);
 	        });
 	      });
+	      if (agentFollowUp.autoOpenExecutionSheet === true && primaryAgent) {
+	        const primaryButton = card.querySelector('[data-agent-completion-primary]');
+	        queueMicrotask(() => {
+	          void hireAgent(primaryAgent, primaryButton);
+	        });
+	      }
 	      return card;
 	    }
 
@@ -17256,6 +17268,7 @@
         clearExecutionStatusError(session.id);
         const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(session));
         const localPrivateInputs = collectExecutionPrivateInputs(session);
+        executionDraftCache.set(session.id, { selections, localPrivateInputs });
         const missingInputs = getMissingAgentInputLabels(session, selections, localPrivateInputs);
         if (missingInputs.length) {
           throw new Error(`Add ${missingInputs.join(' and ')} before running this agent.`);
@@ -17293,6 +17306,7 @@
         await refreshCreditsBalance().catch(() => null);
         clearExecutionStatusError(session.id);
         if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
+        clearExecutionDraft(session.id);
         await renderExecutionSheet(session.id, { focus: false });
         ensureExecutionPolling();
       } catch (error) {
@@ -19221,6 +19235,7 @@
 	            isBrowserRun && nativeRunnerSupportsAutomaticFinalSubmit()
 	          );
 	          const localPrivateInputs = collectExecutionPrivateInputs(session);
+	          if (!isBrowserRun) executionDraftCache.set(session.id, { selections, localPrivateInputs });
 	          const missingAgentInputs = isBrowserRun ? [] : getMissingAgentInputLabels(session, selections, localPrivateInputs);
 	          if (missingAgentInputs.length) {
 	            throw new Error(`Add ${missingAgentInputs.join(' and ')} before running this agent.`);
@@ -19331,10 +19346,11 @@
 	          }
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(session.id);
-		          setExecutionHtml('executionAgentText', data.executionAgent
-		            ? renderExecutionAgentSummary(data.executionAgent, { handed: true })
-		            : renderExecutionAgentSummary(null));
+	          setExecutionHtml('executionAgentText', data.executionAgent
+	            ? renderExecutionAgentSummary(data.executionAgent, { handed: true })
+	            : renderExecutionAgentSummary(null));
 	          if (data.session) executionSessionCache.set(session.id, data.session);
+	          if (!isBrowserRun) clearExecutionDraft(session.id);
 	          await renderExecutionSheet(session.id, { focus: false });
 	          ensureExecutionPolling();
         } catch (error) {

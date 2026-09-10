@@ -13070,6 +13070,7 @@ function isDedicatedCodeAuditAgentCandidate(agent = {}) {
 function recentCodeAuditConversationText(intentInput = {}, limit = 8) {
   return (Array.isArray(intentInput.context) ? intentInput.context : [])
     .slice(-limit)
+    .filter((entry) => entry?.role === 'user')
     .map((entry) => String(entry?.content || '').trim())
     .filter(Boolean)
     .join('\n');
@@ -13126,7 +13127,10 @@ async function buildCodeAuditChatIntake(intentInput = {}) {
 async function buildSantaClawzAgentFollowUp(intentInput = {}) {
   if (!MAGIC_CITY_SANTACLAWZ_LIVE) return null;
   const currentUserMessage = String(intentInput.metadata?.prompt || intentInput.prompt || '');
-  if (!isSantaClawzAuditOfferMessage(currentUserMessage)) return null;
+  const directAuditRequest = isSantaClawzAuditOfferMessage(currentUserMessage);
+  const codeAuditIntake = await buildCodeAuditChatIntake(intentInput);
+  const continuingAuditRequest = !directAuditRequest && Boolean(codeAuditIntake);
+  if (!directAuditRequest && !continuingAuditRequest) return null;
   if (isMagicInternetPurchaseRequest(currentUserMessage)) return null;
   const source = getSantaClawzSourceStatus();
   const executionAgent = await getSantaClawzExecutionAgentByMagicId(
@@ -13152,7 +13156,13 @@ async function buildSantaClawzAgentFollowUp(intentInput = {}) {
     agent,
     agents: [agent],
     source,
-    reason: 'literal_audit_keyword'
+    ...(codeAuditIntake ? { chatIntake: codeAuditIntake } : {}),
+    autoOpenExecutionSheet: Boolean(
+      continuingAuditRequest
+      && codeAuditIntake?.required === false
+      && codeAuditIntake?.githubUrl
+    ),
+    reason: continuingAuditRequest ? 'pending_code_audit_continuation' : 'literal_audit_keyword'
   };
 }
 
@@ -14083,6 +14093,33 @@ async function requestSantaClawzJson(pathname, options = {}) {
   return requestSantaClawzEndpointJson(pathname, options);
 }
 
+async function requestSantaClawzRuntimeContractPart(externalId, part, { timeoutMs = 8000 } = {}) {
+  const endpoint = part === 'ready'
+    ? `/api/agents/${encodeURIComponent(externalId)}/ready`
+    : `/api/agents/${encodeURIComponent(externalId)}/x402-plan`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await requestSantaClawzJson(endpoint, {
+        timeoutMs,
+        includeApiKey: false
+      });
+    } catch (error) {
+      if (!isSantaClawzRequestTimeout(error)) throw error;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
+      const timeoutError = createHttpError(
+        part === 'ready' ? 'santaclawz_runtime_ready_timeout' : 'santaclawz_runtime_x402_plan_timeout',
+        503
+      );
+      timeoutError.cause = error;
+      throw timeoutError;
+    }
+  }
+  throw createHttpError('santaclawz_runtime_contract_unavailable', 503);
+}
+
 async function fetchSantaClawzArtifactBytes(endpoint, { timeoutMs = 12000, maxBytes = 5 * 1024 * 1024 } = {}) {
   const url = buildSantaClawzEndpointUrl(endpoint);
   const controller = new AbortController();
@@ -14175,14 +14212,8 @@ async function requestSantaClawzConciergeJson(pathname, options = {}) {
 async function fetchSantaClawzRuntimeContract(agentId) {
   const externalId = assertApprovedSantaClawzAgent(agentId);
   const [readyResponse, planResponse] = await Promise.all([
-    requestSantaClawzJson(`/api/agents/${encodeURIComponent(externalId)}/ready`, {
-      timeoutMs: 8000,
-      includeApiKey: false
-    }),
-    requestSantaClawzJson(`/api/agents/${encodeURIComponent(externalId)}/x402-plan`, {
-      timeoutMs: 8000,
-      includeApiKey: false
-    })
+    requestSantaClawzRuntimeContractPart(externalId, 'ready'),
+    requestSantaClawzRuntimeContractPart(externalId, 'x402_plan')
   ]);
   const validation = validateSantaClawzRuntimeContract({
     agentId: externalId,
@@ -18832,10 +18863,14 @@ const server = http.createServer(async (req, res) => {
       if (session.handoffData?.kind === 'food') {
         localPrivateInputs.zipCode = resolveFoodZipCode(session, localPrivateInputs);
       }
+      const sessionWithSavedPublicInputs = updateConnectorSession(sessionId, {
+        selections,
+        finalSelections: selections
+      }) || session;
       const sessionWithPrivateInputs = {
-        ...session,
+        ...sessionWithSavedPublicInputs,
         localPrivateContext: {
-          ...(isBrowserSession ? stripBrowserLocalPrivateContext(session.localPrivateContext) : session.localPrivateContext ?? {}),
+          ...(isBrowserSession ? stripBrowserLocalPrivateContext(sessionWithSavedPublicInputs.localPrivateContext) : sessionWithSavedPublicInputs.localPrivateContext ?? {}),
           ...localPrivateInputs
         }
       };

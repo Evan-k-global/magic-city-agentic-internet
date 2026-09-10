@@ -57,6 +57,7 @@
     "test:santaclawz-terminal-state": "node scripts/test-santaclawz-terminal-state.mjs",
     "test:santaclawz-runtime-health": "node scripts/test-santaclawz-runtime-health.mjs",
     "test:santaclawz-runtime-revalidation": "node scripts/test-santaclawz-runtime-revalidation.mjs",
+    "test:santaclawz-runtime-contract-timeout": "node scripts/test-santaclawz-runtime-contract-timeout.mjs",
     "test:santaclawz-read-only-retry": "node scripts/test-santaclawz-read-only-retry.mjs",
     "test:santaclawz-start-recovery-ui": "node scripts/test-santaclawz-start-recovery-ui.mjs",
     "test:credit-settlement-refund": "node scripts/test-credit-settlement-refund.mjs",

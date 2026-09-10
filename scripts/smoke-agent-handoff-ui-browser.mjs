@@ -21,6 +21,12 @@ let responseMode = 'add-agent-error';
 let loseNextSessionStartResponse = false;
 let lostSessionId = '';
 const sessionStartRequestIds = [];
+let executionStartCount = 0;
+page.on('request', (request) => {
+  if (/\/connectors\/sessions\/[^/]+\/start-execution$/.test(new URL(request.url()).pathname)) {
+    executionStartCount += 1;
+  }
+});
 await page.route('**/intent/stream', async (route) => {
   if (responseMode === 'add-agent-error') {
     await route.fulfill({
@@ -55,16 +61,27 @@ await page.route('**/intent/stream', async (route) => {
       ]
     }
   };
+  const request = route.request().postDataJSON();
+  const prompt = String(request?.prompt || request?.metadata?.prompt || '');
+  const repoUrl = prompt.match(/https:\/\/github\.com\/[^\s]+/i)?.[0] || '';
+  const continuingAudit = Boolean(repoUrl);
   await route.fulfill({
     status: 200,
     contentType: 'text/event-stream',
     body: [
       sseEvent('start', {}),
       sseEvent('final', {
-        assistant: { content: 'I can prepare a Code Audit Agent handoff after you choose to hire it.', providerId: 'smoke' },
+        assistant: {
+          content: continuingAudit
+            ? `Verified public GitHub repository for Code Audit Agent: ${repoUrl}`
+            : 'I can prepare a Code Audit Agent handoff after you choose to hire it.',
+          providerId: 'smoke'
+        },
         agentFollowUp: {
           kind: 'developer',
-          chatIntake: { required: true, githubUrl: '' },
+          reason: continuingAudit ? 'pending_code_audit_continuation' : 'literal_audit_keyword',
+          autoOpenExecutionSheet: continuingAudit,
+          chatIntake: { required: !continuingAudit, githubUrl: repoUrl },
           agent: codeAuditAgent,
           agents: [codeAuditAgent]
         },
@@ -130,35 +147,51 @@ assert.equal(await completionCard.locator('.agent-completion-inline-links').coun
 const completionCardBox = await completionCard.boundingBox();
 assert.ok(completionCardBox && completionCardBox.height < 104, `default match card should stay compact, got ${completionCardBox?.height}px`);
 
+const repoUrl = 'https://github.com/zeko-labs/santa_clawz-private_agents';
 loseNextSessionStartResponse = true;
-await codeAuditMessage.getByRole('button', { name: 'Hire', exact: true }).first().click();
-await codeAuditMessage.locator('[data-agent-completion-status]').filter({ hasText: 'Your selection is saved' }).waitFor({ state: 'visible' });
+await page.locator('#chatPrompt').fill(repoUrl);
+await page.locator('#sendBtn').click();
+const firstContinuation = page.locator('.msg.assistant').filter({ hasText: 'Verified public GitHub repository' }).last();
+await firstContinuation.locator('[data-agent-completion-status]').filter({ hasText: 'Your selection is saved' }).waitFor({ state: 'visible' });
 assert.ok(lostSessionId, 'the interrupted opening must have created one recoverable server session');
 assert.equal(await page.locator('[data-session-panel]').count(), 0, 'a lost create response must not invent a client-side session');
-await codeAuditMessage.getByRole('button', { name: 'Hire', exact: true }).first().click();
+await page.locator('#chatPrompt').fill(repoUrl);
+await page.locator('#sendBtn').click();
+const recoveredContinuation = page.locator('.msg.assistant').filter({ hasText: 'Verified public GitHub repository' }).last();
 const executionPanel = page.locator('[data-session-panel]').last();
 try {
   await executionPanel.waitFor({ state: 'visible', timeout: 10000 });
 } catch (error) {
-  const cardText = await codeAuditMessage.textContent().catch(() => '');
-  throw new Error(`Code Audit Hire did not open a session. Card: ${cardText}. Runtime: ${runtimeErrors.join(' | ')}`, { cause: error });
+  const cardText = await recoveredContinuation.textContent().catch(() => '');
+  throw new Error(`Code Audit continuation did not open a session. Card: ${cardText}. Runtime: ${runtimeErrors.join(' | ')}`, { cause: error });
 }
 assert.equal(await executionPanel.getAttribute('data-session-panel'), lostSessionId, 'retry must reopen the original draft session');
 assert.equal(sessionStartRequestIds.length, 2, 'opening recovery must make one idempotent retry');
 assert.ok(sessionStartRequestIds[0], 'opening requests must carry an idempotency key');
 assert.equal(sessionStartRequestIds[1], sessionStartRequestIds[0], 'opening recovery must reuse the same idempotency key');
-assert.equal(await codeAuditMessage.getByRole('button', { name: 'Selected', exact: true }).count(), 1);
 const githubField = executionPanel.locator('[data-agent-field="githubUrl"]');
 await githubField.waitFor({ state: 'visible' });
-assert.equal(await githubField.inputValue(), '');
+assert.equal(await githubField.inputValue(), repoUrl, 'repository-only continuation must prefill the execution sheet');
+assert.equal(executionStartCount, 0, 'opening the prefilled sheet must not start a hire or payment');
 
-const repoUrl = 'https://github.com/zeko-labs/santa_clawz-private_agents';
-await page.locator('#chatPrompt').fill(repoUrl);
-await page.locator('#sendBtn').click();
-await page.waitForFunction(
-  ({ selector, expected }) => document.querySelector(selector)?.value === expected,
-  { selector: '[data-agent-field="githubUrl"]', expected: repoUrl }
-);
+const auditFocusField = executionPanel.locator('[data-agent-field="auditFocus"]');
+await auditFocusField.fill('performance and reliability');
+await page.route('**/connectors/sessions/*/start-execution', async (route) => {
+  await route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      error: 'santaclawz_runtime_ready_timeout',
+      unstartedSantaClawz: true
+    })
+  });
+});
+await executionPanel.locator('[data-execution-run-agent="true"]').first().click();
+await executionPanel.getByText(/SantaClawz did not answer its readiness check in time/i).waitFor({ state: 'visible' });
+assert.equal(await githubField.inputValue(), repoUrl, 'repository must survive a readiness timeout');
+assert.equal(await auditFocusField.inputValue(), 'performance and reliability', 'local draft must survive a readiness timeout');
+await page.waitForTimeout(250);
+assert.equal(executionStartCount, 1, 'a readiness timeout must not duplicate the hire request');
 
 const scrollResult = await page.evaluate(async () => {
   let panel = document.querySelector('[data-session-panel]');
