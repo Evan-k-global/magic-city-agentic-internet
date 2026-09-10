@@ -9758,7 +9758,24 @@ function inferAgentExecutionFields({ prompt = '', selectedAgent = null } = {}) {
   };
 }
 
-function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary = {}, authUser = null, preferredExecutionAgentId = '', selectedAgent = null }) {
+function normalizeExecutionClientRequestId(value = '') {
+  const normalized = String(value || '').trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(normalized) ? normalized : '';
+}
+
+function findAgentExecutionSessionByClientRequestId(authUser, clientRequestId = '', expectedAgentId = '') {
+  const normalized = normalizeExecutionClientRequestId(clientRequestId);
+  const expected = String(expectedAgentId || '').trim();
+  if (!authUser?.id || !normalized) return null;
+  return listConnectorSessions(500).find((session) => (
+    session?.authUserId === authUser.id
+    && session?.handoffData?.kind === 'agent'
+    && session?.clientRequestId === normalized
+    && (!expected || String(session?.preferredExecutionAgentId || session?.handoffData?.selectedAgent?.pluginId || '').trim() === expected)
+  )) || null;
+}
+
+function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary = {}, authUser = null, preferredExecutionAgentId = '', selectedAgent = null, clientRequestId = '' }) {
   const effectivePrompt = String(prompt || '').trim() || 'Prepare an agent execution task.';
   const safeProfileSummary = sanitizeMetadata(profileSummary || {});
   const auth = req ? getAuthenticatedContext(req) : null;
@@ -9841,6 +9858,7 @@ function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary =
     }),
     requesterId: authUser?.requesterId || null,
     requesterHash: authUser?.requesterId ? hashIdentifier(authUser.requesterId) : null,
+    clientRequestId: normalizeExecutionClientRequestId(clientRequestId) || null,
     handoffData,
     actionSummary: sanitizeMetadata({
       title: handoffData.title,
@@ -16745,6 +16763,13 @@ const server = http.createServer(async (req, res) => {
         String(body.capability || body.kind || '').toLowerCase() === 'agent-execution' ||
         String(body.kind || '').toLowerCase() === 'agent'
       );
+      const clientRequestId = normalizeExecutionClientRequestId(body.clientRequestId);
+      const existingAgentSession = hasSelectedExecutionAgent
+        ? findAgentExecutionSessionByClientRequestId(auth?.authUser || null, clientRequestId, preferredExecutionAgentId)
+        : null;
+      if (existingAgentSession) {
+        return sendJson(res, 200, { session: existingAgentSession, reused: true });
+      }
       const session = connectorId && !hasSelectedExecutionAgent
         ? buildDirectConnectorSession({
             req,
@@ -16760,7 +16785,8 @@ const server = http.createServer(async (req, res) => {
             profileSummary: body.profileSummary || {},
             authUser: auth?.authUser || null,
             preferredExecutionAgentId,
-            selectedAgent: body.selectedAgent || null
+            selectedAgent: body.selectedAgent || null,
+            clientRequestId
           });
       return sendJson(res, 201, { session });
     }

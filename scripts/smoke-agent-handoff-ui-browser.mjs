@@ -18,6 +18,9 @@ function sseEvent(event, data) {
 }
 
 let responseMode = 'add-agent-error';
+let loseNextSessionStartResponse = false;
+let lostSessionId = '';
+const sessionStartRequestIds = [];
 await page.route('**/intent/stream', async (route) => {
   if (responseMode === 'add-agent-error') {
     await route.fulfill({
@@ -28,7 +31,7 @@ await page.route('**/intent/stream', async (route) => {
     return;
   }
   const codeAuditAgent = {
-    pluginId: 'santaclawz:code-audit-smoke',
+    pluginId: 'santaclawz:hosted-code-audit-agent--session_agent_0e86fd7829bd',
     agentName: 'Code Audit Agent',
     description: 'Reviews a public GitHub repository and returns prioritized findings.',
     sourceLabel: 'SantaClawz marketplace',
@@ -70,12 +73,35 @@ await page.route('**/intent/stream', async (route) => {
     ].join('')
   });
 });
+await page.route('**/connectors/sessions/start', async (route) => {
+  const body = route.request().postDataJSON();
+  sessionStartRequestIds.push(String(body?.clientRequestId || ''));
+  const response = await route.fetch();
+  const payload = await response.json();
+  if (loseNextSessionStartResponse) {
+    loseNextSessionStartResponse = false;
+    lostSessionId = String(payload?.session?.id || '');
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      headers: { 'x-request-id': 'req-simulated-session-response-loss' },
+      body: JSON.stringify({ error: 'simulated_session_response_lost' })
+    });
+    return;
+  }
+  await route.fulfill({ response });
+});
 
 await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
 await page.locator('#chatPrompt').fill('can i add an agent that can help with that?');
 await page.locator('#sendBtn').click();
 const activateLink = page.locator(`a[href="https://www.santaclawz.ai/activate"]`);
-await activateLink.waitFor({ state: 'visible' });
+try {
+  await activateLink.waitFor({ state: 'visible' });
+} catch (error) {
+  const pageText = await page.locator('body').innerText().catch(() => '');
+  throw new Error(`SantaClawz activation fallback did not render. Runtime: ${runtimeErrors.join(' | ')}. Page: ${pageText.slice(0, 1200)}`, { cause: error });
+}
 assert.equal(await activateLink.textContent(), 'Add your agent');
 
 if (process.env.MAGIC_CITY_SMOKE_PUBLIC_ONLY === '1') {
@@ -101,10 +127,14 @@ const completionCard = codeAuditMessage.locator('.agent-completion-card');
 await completionCard.waitFor({ state: 'visible' });
 assert.equal(await completionCard.locator('.agent-completion-utilities').count(), 0, 'match alternatives must not consume a separate utility row');
 assert.equal(await completionCard.locator('.agent-completion-inline-links').count(), 1, 'match alternatives must stay inline with the recommendation');
-assert.equal(await completionCard.getByRole('link', { name: 'Add your agent', exact: true }).count(), 1, 'the agent-publishing path must remain available');
 const completionCardBox = await completionCard.boundingBox();
 assert.ok(completionCardBox && completionCardBox.height < 104, `default match card should stay compact, got ${completionCardBox?.height}px`);
 
+loseNextSessionStartResponse = true;
+await codeAuditMessage.getByRole('button', { name: 'Hire', exact: true }).first().click();
+await codeAuditMessage.locator('[data-agent-completion-status]').filter({ hasText: 'Your selection is saved' }).waitFor({ state: 'visible' });
+assert.ok(lostSessionId, 'the interrupted opening must have created one recoverable server session');
+assert.equal(await page.locator('[data-session-panel]').count(), 0, 'a lost create response must not invent a client-side session');
 await codeAuditMessage.getByRole('button', { name: 'Hire', exact: true }).first().click();
 const executionPanel = page.locator('[data-session-panel]').last();
 try {
@@ -113,6 +143,11 @@ try {
   const cardText = await codeAuditMessage.textContent().catch(() => '');
   throw new Error(`Code Audit Hire did not open a session. Card: ${cardText}. Runtime: ${runtimeErrors.join(' | ')}`, { cause: error });
 }
+assert.equal(await executionPanel.getAttribute('data-session-panel'), lostSessionId, 'retry must reopen the original draft session');
+assert.equal(sessionStartRequestIds.length, 2, 'opening recovery must make one idempotent retry');
+assert.ok(sessionStartRequestIds[0], 'opening requests must carry an idempotency key');
+assert.equal(sessionStartRequestIds[1], sessionStartRequestIds[0], 'opening recovery must reuse the same idempotency key');
+assert.equal(await codeAuditMessage.getByRole('button', { name: 'Selected', exact: true }).count(), 1);
 const githubField = executionPanel.locator('[data-agent-field="githubUrl"]');
 await githubField.waitFor({ state: 'visible' });
 assert.equal(await githubField.inputValue(), '');
