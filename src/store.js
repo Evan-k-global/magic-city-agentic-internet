@@ -1481,6 +1481,7 @@ export function recordSantaClawzRuntimeRejection({
     && existing.sourceSessionId === normalizedSourceSessionId
     && existing.reasonCode === String(reasonCode || 'return_schema_rejected').slice(0, 120)
   );
+  if (sameIncident) return existing;
   const row = {
     ...(existing || {}),
     schemaVersion: 'magic-city-santaclawz-runtime-health-v1',
@@ -1512,6 +1513,9 @@ export function clearSantaClawzRuntimeRejection(agentId, { reason = 'accepted_re
   if (!normalizedAgentId) return null;
   const existingIndex = state.santaclawzRuntimeHealth.findIndex((row) => row.agentId === normalizedAgentId);
   if (existingIndex < 0) return null;
+  if (state.santaclawzRuntimeHealth[existingIndex]?.status === 'healthy') {
+    return state.santaclawzRuntimeHealth[existingIndex];
+  }
   const now = new Date().toISOString();
   const row = {
     ...state.santaclawzRuntimeHealth[existingIndex],

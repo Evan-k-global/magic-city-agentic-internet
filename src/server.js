@@ -228,6 +228,11 @@ import { buildSeededAgents, executeProvider, executeProviderStream, getConfigure
 import { buildAnchorPayload, compileArtifactProofProgram, generateArtifactProof, verifyArtifactProof } from './zekoProof.js';
 import { getAnchorConfig, getMbaRelayerReadiness, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
 import { canonicalValueToFieldDecimal } from './mba/canonicalField.js';
+import {
+  createSantaClawzStatusRefreshCoordinator,
+  hasSemanticSantaClawzStatusChanged,
+  semanticSantaClawzStatusDigest
+} from './santaclawzStatusRefresh.js';
 import { inferCapabilityFromPrompt, isMagicInternetPurchaseRequest, looksLikeCodeAuditRequest, buildActionPlanAsync, finalizeActionRun } from './actionRuntime.js';
 import { CONNECTOR_SPECS, getConnector, getConnectorHandoffData } from './connectors.js';
 import { rankExecutionAgentsForSession } from './executionAgents.js';
@@ -14824,6 +14829,25 @@ function materializeSantaClawzInlineArtifacts(sessionId, delivery = {}) {
   };
 }
 
+function santaClawzSourceDeliveryDigest(delivery = {}) {
+  return semanticSantaClawzStatusDigest({
+    summary: delivery?.summary || null,
+    inlineOutputs: Array.isArray(delivery?.inlineOutputs) ? delivery.inlineOutputs : [],
+    artifacts: (Array.isArray(delivery?.artifacts) ? delivery.artifacts : [])
+      .filter((artifact) => !String(artifact?.url || '').startsWith('/artifacts/'))
+  });
+}
+
+function materializeChangedSantaClawzDelivery(sessionId, existingDelivery = {}, incomingDelivery = {}) {
+  if (
+    santaClawzSourceDeliveryDigest(existingDelivery)
+    === santaClawzSourceDeliveryDigest(incomingDelivery)
+  ) {
+    return existingDelivery;
+  }
+  return materializeSantaClawzInlineArtifacts(sessionId, incomingDelivery);
+}
+
 async function fetchSantaClawzExecutionStateForDirectPayment(directPayment = {}) {
   let endpoint = String(
     directPayment.stateUrl ||
@@ -14945,6 +14969,7 @@ async function currentSantaClawzRuntimeContract(directPayment, requestedAgentId)
 }
 
 const santaClawzSamePayloadRetriesInFlight = new Set();
+const santaClawzStatusRefreshCoordinator = createSantaClawzStatusRefreshCoordinator();
 
 function isSantaClawzHireSubmissionEnabled() {
   return MAGIC_CITY_SANTACLAWZ_LIVE;
@@ -15397,7 +15422,7 @@ function returnSantaClawzCreditsForTerminalFailure(session, reason = 'santaclawz
   };
 }
 
-async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {}) {
+async function refreshSantaClawzPaidSessionStatusOnce(session) {
   if (session?.executionCancellation?.cancelledAt) {
     return {
       session,
@@ -15448,14 +15473,9 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
   const existingDelivery = sessionForStatus.santaclawzDirectPayment?.delivery || {};
   const existingOutputCount = Number(existingDelivery.inlineOutputs?.length || 0)
     + Number(existingDelivery.artifacts?.length || 0);
-  if (sessionForStatus.status === 'fulfilled' && existingOutputCount > 0 && !force) {
+  if (sessionForStatus.status === 'fulfilled' && existingOutputCount > 0) {
     return { session: sessionForStatus, refreshed: false };
   }
-  const lastStatusAt = Date.parse(sessionForStatus.santaclawzDirectPayment?.lastStatusAt || '');
-  if (!force && Number.isFinite(lastStatusAt) && Date.now() - lastStatusAt < 4000) {
-    return { session: sessionForStatus, refreshed: false };
-  }
-
   const source = getSantaClawzSourceStatus();
   try {
     const status = await requestSantaClawzJson(`/api/x402/payment-state?paymentPayloadDigestSha256=${encodeURIComponent(digest)}`, {
@@ -15476,8 +15496,9 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
     const combinedStatusPayload = executionState?.payload
       ? sanitizeMetadata({ ...status.payload, executionState: executionState.payload })
       : status.payload;
-    const delivery = materializeSantaClawzInlineArtifacts(
+    const delivery = materializeChangedSantaClawzDelivery(
       sessionForStatus.id,
+      existingDelivery,
       extractSantaClawzDelivery(combinedStatusPayload)
     );
     const expectedReturnRequestId = sessionForStatus.santaclawzDirectPayment?.submittedRequestId || '';
@@ -15498,7 +15519,6 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
       || sessionForStatus.santaclawzDirectPayment?.sponsor === 'magic_city_credits';
     const nextDirectPayment = sanitizeMetadata({
       ...(sessionForStatus.santaclawzDirectPayment || {}),
-      lastStatusAt: new Date().toISOString(),
       lastStatusError: null,
       paymentStateUrl: `${source.apiBase}/api/x402/payment-state?paymentPayloadDigestSha256=${encodeURIComponent(digest)}`,
       submittedRequestId,
@@ -15672,22 +15692,76 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
         ]
       });
     }
-    const updated = updateConnectorSession(sessionForStatus.id, withTaskPackage(sessionForStatus, sessionPatch));
+    const currentSemanticState = {
+      status: sessionForStatus.status,
+      santaclawzDirectPayment: sessionForStatus.santaclawzDirectPayment,
+      creditReservation: sessionForStatus.creditReservation,
+      fulfillment: sessionForStatus.fulfillment,
+      failedAt: sessionForStatus.failedAt,
+      fulfilledAt: sessionForStatus.fulfilledAt,
+      executionTrace: sessionForStatus.executionTrace
+    };
+    const nextSemanticState = {
+      status: sessionPatch.status ?? sessionForStatus.status,
+      santaclawzDirectPayment: sessionPatch.santaclawzDirectPayment,
+      creditReservation: sessionPatch.creditReservation ?? sessionForStatus.creditReservation,
+      fulfillment: sessionPatch.fulfillment ?? sessionForStatus.fulfillment,
+      failedAt: sessionPatch.failedAt ?? sessionForStatus.failedAt,
+      fulfilledAt: sessionPatch.fulfilledAt ?? sessionForStatus.fulfilledAt,
+      executionTrace: sessionPatch.executionTrace ?? sessionForStatus.executionTrace
+    };
+    const changed = hasSemanticSantaClawzStatusChanged(currentSemanticState, nextSemanticState);
+    const updated = changed
+      ? updateConnectorSession(sessionForStatus.id, withTaskPackage(sessionForStatus, sessionPatch))
+      : sessionForStatus;
     if (!summary.completed && !summary.paymentAccepted && !summary.terminalFailure) {
       scheduleSantaClawzCreditBackedSamePayloadRetry(updated || sessionForStatus);
     }
-    return { session: updated || sessionForStatus, refreshed: true, status, executionState, summary, delivery };
+    return {
+      session: updated || sessionForStatus,
+      refreshed: true,
+      persisted: changed,
+      status,
+      executionState,
+      summary,
+      delivery
+    };
   } catch (error) {
+    const nextError = error?.message || 'santaclawz_status_unavailable';
+    if (sessionForStatus.santaclawzDirectPayment?.lastStatusError === nextError) {
+      return { session: sessionForStatus, refreshed: false, persisted: false, error };
+    }
     const nextDirectPayment = sanitizeMetadata({
       ...(sessionForStatus.santaclawzDirectPayment || {}),
-      lastStatusAt: new Date().toISOString(),
-      lastStatusError: error?.message || 'santaclawz_status_unavailable'
+      lastStatusError: nextError
     });
     const updated = updateConnectorSession(sessionForStatus.id, withTaskPackage(sessionForStatus, {
       santaclawzDirectPayment: nextDirectPayment
     }));
-    return { session: updated || sessionForStatus, refreshed: false, error };
+    return { session: updated || sessionForStatus, refreshed: false, persisted: true, error };
   }
+}
+
+async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {}) {
+  const digest = String(session?.santaclawzDirectPayment?.paymentPayloadDigestSha256 || '').trim();
+  const key = digest && session?.id ? `${session.id}:${digest}` : '';
+  const result = await santaClawzStatusRefreshCoordinator.run(
+    key,
+    () => refreshSantaClawzPaidSessionStatusOnce(session),
+    { force }
+  );
+  if (result?.skipped) {
+    return {
+      session: getConnectorSession(session.id) || session,
+      refreshed: false,
+      persisted: false,
+      cached: true
+    };
+  }
+  if (['fulfilled', 'failed'].includes(String(result?.session?.status || '').toLowerCase())) {
+    santaClawzStatusRefreshCoordinator.clear(key);
+  }
+  return result;
 }
 
 async function issueSantaClawzEnrollmentTicket({ body = {}, authUser, origin }) {
@@ -16984,16 +17058,22 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const auth = getAuthenticatedContext(req);
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
-      await sweepConnectorSessionExecutionWatchdog({ sessionId });
+      const watchdogMutated = await sweepConnectorSessionExecutionWatchdog({ sessionId });
       let latestSession = getConnectorSession(sessionId) ?? session;
+      let santaClawzPersisted = false;
       if (MAGIC_CITY_SANTACLAWZ_MODE !== 'disabled' && latestSession.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
         const refreshed = await refreshSantaClawzPaidSessionStatus(latestSession);
         latestSession = refreshed.session || latestSession;
+        santaClawzPersisted = refreshed.persisted === true;
       }
-      const hydrated = latestSession.taskPackage
-        ? latestSession
-        : updateConnectorSession(latestSession.id, { taskPackage: buildExecutionTaskPackage(latestSession) });
-      return sendJson(res, 200, { session: hydrated });
+      const taskPackageHydrated = !latestSession.taskPackage;
+      const hydrated = taskPackageHydrated
+        ? updateConnectorSession(latestSession.id, { taskPackage: buildExecutionTaskPackage(latestSession) })
+        : latestSession;
+      const sendSessionResponse = watchdogMutated || santaClawzPersisted || taskPackageHydrated
+        ? sendJson
+        : sendAdvisoryJson;
+      return sendSessionResponse(res, 200, { session: hydrated });
     }
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/santaclawz-x402\/prepare$/.test(urlPath)) {
@@ -17811,8 +17891,9 @@ const server = http.createServer(async (req, res) => {
           statusWarning: 'santaclawz_integration_disabled'
         });
       }
-      const refreshed = await refreshSantaClawzPaidSessionStatus(session, { force: true });
-      return sendJson(res, 200, {
+      const refreshed = await refreshSantaClawzPaidSessionStatus(session);
+      const sendStatusResponse = refreshed.persisted ? sendJson : sendAdvisoryJson;
+      return sendStatusResponse(res, 200, {
         ok: !refreshed.error,
         upstreamStatus: refreshed.status?.status || null,
         session: refreshed.session || session,
