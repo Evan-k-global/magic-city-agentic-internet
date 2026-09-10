@@ -334,13 +334,17 @@ function stateEncryptionStatus() {
 
 function serializePostgresState(snapshot = JSON.stringify(state)) {
   if (!stateEncryptionKey) return snapshot;
+  const compressed = zlib.gzipSync(Buffer.from(snapshot, 'utf8'), {
+    level: zlib.constants.Z_BEST_SPEED
+  });
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', stateEncryptionKey, iv);
-  const ciphertext = Buffer.concat([cipher.update(snapshot, 'utf8'), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
   const tag = cipher.getAuthTag();
   return JSON.stringify({
-    schema: 'magic-city-encrypted-state-v1',
+    schema: 'magic-city-encrypted-state-v2',
     alg: 'aes-256-gcm',
+    compression: 'gzip',
     keyId: stateEncryptionStatus().keyId,
     iv: iv.toString('base64'),
     tag: tag.toString('base64'),
