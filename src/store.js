@@ -395,6 +395,11 @@ let postgresWriterLockClient = null;
 let postgresWriterLockAcquirePromise = null;
 let postgresPersistDirty = false;
 let postgresPersistScheduled = false;
+// Revisions let each response wait for its own captured snapshot boundary.
+let postgresPersistRequestedRevision = 0;
+let postgresPersistCommittedRevision = 0;
+let postgresPersistFailure = null;
+let postgresPersistWaiters = [];
 let filePersistTimer = null;
 let filePersistDirty = false;
 let filePersistLastError = null;
@@ -572,26 +577,62 @@ async function writePostgresSnapshot(snapshot = JSON.stringify(state)) {
   markPostgresWriteSuccess();
 }
 
+function settlePostgresPersistWaiters() {
+  const pending = [];
+  for (const waiter of postgresPersistWaiters) {
+    if (waiter.revision <= postgresPersistCommittedRevision) {
+      waiter.resolve();
+    } else if (postgresPersistFailure && waiter.revision <= postgresPersistFailure.revision) {
+      waiter.reject(postgresPersistFailure.error);
+    } else {
+      pending.push(waiter);
+    }
+  }
+  postgresPersistWaiters = pending;
+}
+
+function waitForPostgresRevision(revision) {
+  if (revision <= postgresPersistCommittedRevision) return Promise.resolve();
+  if (postgresPersistFailure && revision <= postgresPersistFailure.revision) {
+    return Promise.reject(postgresPersistFailure.error);
+  }
+  return new Promise((resolve, reject) => {
+    postgresPersistWaiters.push({ revision, resolve, reject });
+  });
+}
+
+function schedulePostgresPersist() {
+  if (postgresPersistScheduled || !postgresPersistDirty) return;
+  postgresPersistScheduled = true;
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const snapshotRevision = postgresPersistRequestedRevision;
+      const snapshot = JSON.stringify(state);
+      postgresPersistDirty = false;
+      try {
+        await writePostgresSnapshot(snapshot);
+        postgresPersistCommittedRevision = Math.max(postgresPersistCommittedRevision, snapshotRevision);
+        if (postgresPersistFailure?.revision <= postgresPersistCommittedRevision) {
+          postgresPersistFailure = null;
+        }
+      } catch (error) {
+        markPostgresWriteFailure(error);
+        postgresPersistFailure = { revision: snapshotRevision, error };
+      }
+      settlePostgresPersistWaiters();
+    })
+    .finally(() => {
+      postgresPersistScheduled = false;
+      if (postgresPersistDirty) schedulePostgresPersist();
+    });
+}
+
 function persistState() {
   if (pool && persistence.driver === 'postgres') {
+    postgresPersistRequestedRevision += 1;
     postgresPersistDirty = true;
-    if (postgresPersistScheduled) return;
-    postgresPersistScheduled = true;
-    persistQueue = persistQueue
-      .catch(() => undefined)
-      .then(async () => {
-        while (postgresPersistDirty) {
-          postgresPersistDirty = false;
-          await writePostgresSnapshot();
-        }
-      })
-      .catch((error) => {
-        markPostgresWriteFailure(error);
-      })
-      .finally(() => {
-        postgresPersistScheduled = false;
-        if (postgresPersistDirty) persistState();
-      });
+    schedulePostgresPersist();
     return;
   }
 
@@ -760,6 +801,12 @@ export function getPersistenceStatus() {
 }
 
 export async function flushPersistence() {
+  if (persistence.driver === 'postgres') {
+    const requiredRevision = postgresPersistRequestedRevision;
+    if (postgresPersistDirty) schedulePostgresPersist();
+    await waitForPostgresRevision(requiredRevision);
+    return getPersistenceStatus();
+  }
   if (ASYNC_FILE_PERSIST && filePersistDirty) {
     if (filePersistTimer) {
       clearTimeout(filePersistTimer);
@@ -768,9 +815,6 @@ export async function flushPersistence() {
     flushFilePersistAsync();
   }
   await persistQueue;
-  if (persistence.driver === 'postgres' && !persistence.healthy) {
-    throw new Error(`postgres_persistence_unhealthy:${persistence.lastWriteError || 'unknown'}`);
-  }
   return getPersistenceStatus();
 }
 

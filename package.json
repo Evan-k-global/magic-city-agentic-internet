@@ -67,6 +67,8 @@
     "smoke:santaclawz-paid-happy-path": "node scripts/smoke-santaclawz-paid-happy-path.mjs",
     "test:browser-mission-ui-parser": "node scripts/test-browser-mission-ui-parser.mjs",
     "test:action-approval-idempotency": "node scripts/test-action-approval-idempotency.mjs",
+    "test:action-approval-recovery-ui": "node scripts/test-action-approval-recovery-ui.mjs",
+    "test:persistence-response-boundary": "node scripts/test-persistence-response-boundary.mjs",
     "test:browser-final-review-policy": "node scripts/test-browser-final-review-policy.mjs",
     "test:browser-terminal-contract": "node scripts/test-browser-terminal-contract.mjs",
     "test:agent-handoff-ui-contract": "node scripts/test-agent-handoff-ui-contract.mjs",

@@ -21202,6 +21202,37 @@
         || message.includes('load failed');
     }
 
+    function actionApprovalRecoveryError(actionRunId, cause = null) {
+      const error = new Error('Connection interrupted while confirming approval. Check this same approval again.');
+      error.actionApprovalRecoverable = true;
+      error.actionRunId = actionRunId;
+      error.cause = cause;
+      return error;
+    }
+
+    function recoveredActionApprovalData(actionRun, connectorSession) {
+      return {
+        approved: true,
+        replayed: true,
+        approvalRecovered: true,
+        actionRun,
+        connectorSession,
+        assistant: {
+          content: actionRun.executionContent || 'Action approved. Execution is ready.',
+          providerMode: actionRun.executionMode || 'action-recovery',
+          generatedBy: actionRun.agentId || null,
+          providerId: actionRun.executionProviderId || actionRun.agentId || null,
+          receiptId: actionRun.receiptId || null,
+          handoff: actionRun.executionHandoff || actionRun.handoff || null
+        }
+      };
+    }
+
+    function approvedSessionAlreadyStarted(data = {}) {
+      if (!data.approvalRecovered) return false;
+      return ['queued', 'claimed', 'executing', 'fulfilled', 'failed'].includes(String(data.connectorSession?.status || ''));
+    }
+
     async function approveActionWithRecovery(actionRunId) {
       const path = `/actions/${encodeURIComponent(actionRunId)}/approve`;
       const request = () => api(path, { method: 'POST', body: JSON.stringify({}) });
@@ -21210,7 +21241,32 @@
       } catch (error) {
         if (!isAmbiguousActionApprovalError(error)) throw error;
         await new Promise((resolve) => window.setTimeout(resolve, 300));
-        return request();
+        let actionRun = null;
+        try {
+          const recovered = await api(`/actions/${encodeURIComponent(actionRunId)}`);
+          actionRun = recovered?.actionRun || null;
+        } catch (recoveryError) {
+          throw actionApprovalRecoveryError(actionRunId, recoveryError);
+        }
+        if (actionRun?.status === 'completed' && actionRun.connectorSessionId) {
+          try {
+            const recoveredSession = await api(`/connectors/sessions/${encodeURIComponent(actionRun.connectorSessionId)}`);
+            if (recoveredSession?.session?.id === actionRun.connectorSessionId) {
+              return recoveredActionApprovalData(actionRun, recoveredSession.session);
+            }
+          } catch (recoveryError) {
+            throw actionApprovalRecoveryError(actionRunId, recoveryError);
+          }
+        }
+        if (actionRun?.status === 'awaiting_approval') {
+          try {
+            return await request();
+          } catch (retryError) {
+            if (!isAmbiguousActionApprovalError(retryError)) throw retryError;
+            throw actionApprovalRecoveryError(actionRunId, retryError);
+          }
+        }
+        throw actionApprovalRecoveryError(actionRunId, error);
       }
     }
 
@@ -21240,7 +21296,7 @@
 		            triggerButton.textContent = 'Starting...';
 		          }
 			          const data = await approveActionWithRecovery(approveId);
-			          const autoRunAction = shouldAutoRunApprovedAction(data);
+				          const autoRunAction = shouldAutoRunApprovedAction(data) && !approvedSessionAlreadyStarted(data);
 			          if (magicInternetAction && !data.connectorSession?.id) {
 			            throw new Error('Magic Internet Agent did not return an execution session.');
 			          }
@@ -21281,11 +21337,17 @@
         }
         saveChatHistory();
       } catch (error) {
-        setAssistantBodyContent(messageEl.querySelector('.msg-body'), `Error: ${error.message}`);
+	        setAssistantBodyContent(
+	          messageEl.querySelector('.msg-body'),
+	          error?.actionApprovalRecoverable
+	            ? 'Connection interrupted while confirming approval. Check this same approval again; Magic City will not create a new task.'
+	            : `Error: ${error.message}`
+	        );
         buttons.forEach((button) => {
           button.disabled = false;
           button.textContent = buttonLabels.get(button) || button.textContent;
         });
+	        if (error?.actionApprovalRecoverable && triggerButton) triggerButton.textContent = 'Check approval';
       }
     });
 

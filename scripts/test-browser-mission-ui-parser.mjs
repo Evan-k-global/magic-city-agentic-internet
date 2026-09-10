@@ -54,7 +54,17 @@ assert.doesNotMatch(
 assert.match(html, /async function revealExecutionSheet\(sessionId(?:, \{ awaitRender = false \} = \{\})?\)/, 'new execution sessions must force their panel open');
 assert.match(html, /await revealExecutionSheet\(data\.connectorSession\.id\)/, 'approved browser actions must reveal their execution sheet');
 assert.match(html, /async function approveActionWithRecovery\(actionRunId\)/, 'ambiguous action approval failures must recover automatically');
-assert.match(html, /if \(!isAmbiguousActionApprovalError\(error\)\) throw error;[\s\S]*return request\(\);/, 'action approval recovery must retry only ambiguous network failures');
+assert.match(
+  html,
+  /if \(!isAmbiguousActionApprovalError\(error\)\) throw error;[\s\S]*api\(`\/actions\/\$\{encodeURIComponent\(actionRunId\)\}`\)[\s\S]*actionRun\?\.status === 'awaiting_approval'[\s\S]*return await request\(\)/,
+  'ambiguous approval recovery must inspect the same action and retry only while it still awaits approval'
+);
+assert.match(
+  html,
+  /actionRun\?\.status === 'completed' && actionRun\.connectorSessionId[\s\S]*api\(`\/connectors\/sessions\/\$\{encodeURIComponent\(actionRun\.connectorSessionId\)\}`\)/,
+  'completed approval recovery must fetch the original connector session'
+);
+assert.match(html, /approvedSessionAlreadyStarted\(data\)/, 'an already-running recovered session must not be restarted');
 assert.match(serverSource, /if \(actionRun\.status === 'completed'\)[\s\S]*replayed: true/, 'completed action approvals must replay their existing result');
 assert.match(serverSource, /connectorSessionId: connectorSession\?\.id \|\| null/, 'completed actions must retain their connector session for idempotent replay');
 assert.match(
