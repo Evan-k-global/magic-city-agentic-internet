@@ -28,8 +28,12 @@ const context = {
   requestAnimationFrame: (callback) => callback(),
   refreshExecutionPanelInPlace: () => true,
   isTerminalExecutionStatus: (status) => ['fulfilled', 'failed'].includes(String(status || '').toLowerCase()),
+  isExecutionSessionDurablyCancelled: () => false,
   isAwaitingExecutionConfirmation: () => false,
   sessionHasBrowserOrderSubmitted: () => false,
+  hasReadySantaClawzDelivery: () => false,
+  hasPendingSantaClawzDeliveryVerification: () => false,
+  getSantaClawzExecutionProgress: () => null,
   compactExecutionSentence: (value) => String(value || '').trim()
 };
 vm.createContext(context);
@@ -51,6 +55,17 @@ const queuedSession = {
   handoffData: { kind: 'browser' },
   extensionRunDispatch: { expiresAt: '2099-01-01T00:00:00.000Z' }
 };
+
+context.executionPendingSessions.add(sessionId);
+const connectingStatus = context.getExecutionStatusModel(queuedSession);
+assert.equal(connectingStatus.statusValue, 'executing');
+assert.equal(connectingStatus.label, 'Connecting Runner');
+const connectingRunState = context.describeExecutionRunState(queuedSession, connectingStatus);
+assert.equal(connectingRunState.title, 'Connecting Runner');
+assert.equal(connectingRunState.detail, 'Claiming this mission, then opening Amazon.');
+assert.equal(connectingRunState.badgeLabel, 'Claiming');
+context.executionPendingSessions.delete(sessionId);
+
 context.executionPendingSessions.add(sessionId);
 context.executionLocalErrors.set(sessionId, {
   code: 'extension_wake_rejected:claim_failed',
@@ -150,6 +165,16 @@ assert.match(
   html,
   /type: 'RUN_PENDING_SESSIONS',[\s\S]*extensionDispatchNonce/,
   'the website wake must pass the exact signed dispatch nonce for direct claim'
+);
+assert.match(
+  html,
+  /setExecutionRunControlsBusy\(true, isBrowserRun \? 'Connecting\.\.\.' : 'Starting'\)/,
+  'Magic Internet must label the pressed run control as connecting immediately'
+);
+assert.match(
+  html,
+  /panelMeta\.textContent = 'Claiming mission · Opening Amazon next'/,
+  'Magic Internet must present the next startup stage instead of duplicate generic labels'
 );
 
 console.log('execution startup UI state ok');

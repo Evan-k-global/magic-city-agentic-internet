@@ -15495,7 +15495,11 @@
       if (localWakeError) {
         return { statusValue: 'failed', label: 'Runner needed', cls: 'failed', phase: 1 };
       }
-      if (locallyPending) return { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
+      if (locallyPending) {
+        return String(session?.handoffData?.kind || '') === 'browser'
+          ? { statusValue: 'executing', label: 'Connecting Runner', cls: 'running', phase: 1 }
+          : { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
+      }
       if (localError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
         return { statusValue: 'failed', label: 'Start failed', cls: 'failed', phase: 1 };
       }
@@ -15672,6 +15676,13 @@
 	              badgeLabel: santaClawzProgress.badgeLabel
 	            };
 	      }
+      if (kind === 'browser' && statusModel.statusValue === 'executing' && statusModel.label === 'Connecting Runner') {
+        return {
+          title: 'Connecting Runner',
+          detail: 'Claiming this mission, then opening Amazon.',
+          badgeLabel: 'Claiming'
+        };
+      }
       if (statusModel.statusValue === 'failed') {
         if (kind === 'agent' && localExecutionError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
           return {
@@ -19432,6 +19443,20 @@
 	            button.removeAttribute?.('aria-busy');
 	          }
         });
+        if (busy && String(session?.handoffData?.kind || '') === 'browser') {
+          const runTitle = root?.querySelector('.execution-run-state > div > strong');
+          const runDetail = root?.querySelector('.execution-run-state > div > span');
+          const statusText = root?.querySelector('#executionStatusText');
+          const panelMeta = root?.querySelector('.execution-panel-meta');
+          if (runTitle) runTitle.textContent = 'Connecting Runner';
+          if (runDetail) runDetail.textContent = 'Claiming this mission, then opening Amazon.';
+          if (statusText) statusText.textContent = `Session ${session.id} · Connecting Runner`;
+          if (panelMeta) panelMeta.textContent = 'Claiming mission · Opening Amazon next';
+          root?.querySelectorAll('.execution-status-badge').forEach((badge) => {
+            badge.className = 'execution-status-badge running';
+            badge.textContent = 'Claiming';
+          });
+        }
       };
 
       const needsBrowserMissionRenewal = (candidate) => {
@@ -19453,7 +19478,7 @@
 	            throw new Error('This agent returned an invalid SantaClawz result package. Retry is disabled until the agent runtime is updated.');
 	          }
 	          clearExecutionStatusError(session.id);
-	          setExecutionRunControlsBusy(true, 'Starting');
+	          setExecutionRunControlsBusy(true, isBrowserRun ? 'Connecting...' : 'Starting');
 	          const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(session));
 	          const checkoutProfileNeeded = isBrowserRun && browserMissionNeedsCheckoutProfile(session, selections);
 	          if (checkoutProfileNeeded && getStoredVaultRecord()) {
