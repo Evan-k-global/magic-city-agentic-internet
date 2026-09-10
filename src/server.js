@@ -13076,6 +13076,10 @@ function recentCodeAuditConversationText(intentInput = {}, limit = 8) {
     .join('\n');
 }
 
+function hasPendingLiteralCodeAuditRequest(intentInput = {}) {
+  return isSantaClawzAuditOfferMessage(recentCodeAuditConversationText(intentInput));
+}
+
 function isCodeAuditConversationContinuation(value = '') {
   return Boolean(
     extractPublicJobUrlsFromText(value).some(isGithubJobUrl) ||
@@ -13129,7 +13133,9 @@ async function buildSantaClawzAgentFollowUp(intentInput = {}) {
   const currentUserMessage = String(intentInput.metadata?.prompt || intentInput.prompt || '');
   const directAuditRequest = isSantaClawzAuditOfferMessage(currentUserMessage);
   const codeAuditIntake = await buildCodeAuditChatIntake(intentInput);
-  const continuingAuditRequest = !directAuditRequest && Boolean(codeAuditIntake);
+  const continuingAuditRequest = !directAuditRequest
+    && hasPendingLiteralCodeAuditRequest(intentInput)
+    && Boolean(codeAuditIntake);
   if (!directAuditRequest && !continuingAuditRequest) return null;
   if (isMagicInternetPurchaseRequest(currentUserMessage)) return null;
   const source = getSantaClawzSourceStatus();

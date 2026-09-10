@@ -43,6 +43,7 @@ assert.match(server, /isMagicInternetPurchaseRequest\(currentUserMessage\)/);
 assert.match(server, /reason: continuingAuditRequest \? 'pending_code_audit_continuation' : 'literal_audit_keyword'/);
 assert.match(server, /autoOpenExecutionSheet: Boolean/);
 assert.match(server, /\.filter\(\(entry\) => entry\?\.role === 'user'\)/);
+assert.match(server, /hasPendingLiteralCodeAuditRequest\(intentInput\)/);
 assert.match(server, /isSantaClawzExecutionAgent\(agent\) && !isHiddenAgentCompletionCandidate\(agent\)/);
 assert.match(server, /function requireImmutableSantaClawzHireBody\(directPayment = \{\}\)/);
 assert.match(server, /\.\.\.requireImmutableSantaClawzHireBody\(directPayment\)/);

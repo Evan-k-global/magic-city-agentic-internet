@@ -36,7 +36,7 @@ const context = {
   MAGIC_CITY_SANTACLAWZ_LIVE: true,
   SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID: 'hosted-code-audit-agent--session_agent_0e86fd7829bd',
   isCodeAuditAgentChatRequest(value = '') {
-    return /code audit/i.test(String(value || ''));
+    return /code audit|code review|security review|bug hunt/i.test(String(value || ''));
   },
   isSantaClawzAuditOfferMessage(value = '') {
     return /\baudit\b/i.test(String(value || ''));
@@ -76,6 +76,7 @@ const context = {
 vm.createContext(context);
 vm.runInContext([
   'recentCodeAuditConversationText',
+  'hasPendingLiteralCodeAuditRequest',
   'isCodeAuditConversationContinuation',
   'buildCodeAuditChatIntake',
   'buildSantaClawzAgentFollowUp'
@@ -116,6 +117,17 @@ const assistantOnlyHistory = await context.buildSantaClawzAgentFollowUp({
   context: [{ role: 'assistant', content: 'I can offer a code audit.' }]
 });
 assert.equal(assistantOnlyHistory, null, 'assistant text alone must not authorize an audit continuation');
+
+const broadIntakeWithoutPendingAudit = await context.buildCodeAuditChatIntake({
+  prompt: `code review this ${githubUrl}`,
+  context: []
+});
+assert.equal(broadIntakeWithoutPendingAudit.githubUrl, githubUrl, 'the broad intake parser may still extract the repository');
+const broadRoutingWithoutPendingAudit = await context.buildSantaClawzAgentFollowUp({
+  prompt: `code review this ${githubUrl}`,
+  context: []
+});
+assert.equal(broadRoutingWithoutPendingAudit, null, 'broad review language must not create a pending literal-audit route');
 
 const recovered = await context.buildCodeAuditChatIntake({
   prompt: "it's not private",
