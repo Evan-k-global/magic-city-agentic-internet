@@ -628,7 +628,7 @@ function verifiedCartEvidenceFor(report = {}, candidate = null, session = {}, pl
     sessionId: session.id,
     planHash: plan.planHash,
     asin: candidateAsin || itemAsin,
-    title: candidate.title || item.title,
+    title: item.title || candidate.title,
     price: Number.isFinite(itemPrice) && itemPrice > 0 ? itemPrice : candidatePrice,
     quantity,
     verifiedAt: new Date().toISOString()

@@ -10,7 +10,7 @@ const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
 const INLINE_CART_RECONCILIATION_DELAY_MS = 200;
-const LEAN_RUNTIME_MODE = 'v0.5.1-inline-cart-checkpoint-recovery';
+const LEAN_RUNTIME_MODE = 'v0.5.2-inline-checkout-checkpoint-recovery';
 const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
@@ -61,13 +61,13 @@ function replaceExecutionResult(result, recovered) {
   };
 }
 
-async function reconcileCartCheckpoint(result) {
+async function reconcileCheckoutCheckpoint(result) {
   const interrupted = retryingControlPlaneExecution(result);
   if (!interrupted?.sessionId) return result;
   const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
   const actionId = String(stored.lastExecution?.actionId || '');
   const sessionId = String(interrupted.sessionId || '');
-  if (!/^(?:prepare|open)-cart(?:-\d+)?$/.test(actionId)
+  if (!/^(?:(?:prepare|open)-cart|continue-checkout)(?:-\d+)?$/.test(actionId)
     || String(stored.lastExecution?.sessionId || '') !== sessionId
     || String(stored.activeRun?.sessionId || '') !== sessionId) {
     return result;
@@ -256,7 +256,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
     void postProgress();
     progressTimer = setInterval(() => { void postProgress(); }, ACTIVE_MISSION_PROGRESS_INTERVAL_MS);
     dispatch(message, { origin })
-      .then(reconcileCartCheckpoint)
+      .then(reconcileCheckoutCheckpoint)
       .then((result) => port.postMessage({ type: 'RUNNER_RESULT', ok: true, result }))
       .catch((error) => port.postMessage({ type: 'RUNNER_RESULT', ok: false, error: error?.message || String(error) }))
       .finally(() => {

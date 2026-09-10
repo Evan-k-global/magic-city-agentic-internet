@@ -218,6 +218,18 @@ if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackgr
   if (connectionDropSmoke.error) fail(connectionDropSmoke.error.message);
   if (connectionDropSmoke.status !== 0) fail(`cart checkpoint connection-drop smoke exited with ${connectionDropSmoke.status}`);
 
+  const checkoutResponseLossSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+      MAGIC_CITY_BROWSER_SMOKE_FOCUS: 'checkout-checkpoint-response-loss'
+    },
+    stdio: 'inherit'
+  });
+  if (checkoutResponseLossSmoke.error) fail(checkoutResponseLossSmoke.error.message);
+  if (checkoutResponseLossSmoke.status !== 0) fail(`checkout checkpoint response-loss smoke exited with ${checkoutResponseLossSmoke.status}`);
+
   console.log(`native-runner extension release package smoke passed: ${zipPath}`);
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });

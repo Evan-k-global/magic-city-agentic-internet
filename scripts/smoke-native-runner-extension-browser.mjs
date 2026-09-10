@@ -682,9 +682,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<a href="#add-card">Add a credit or debit card</a>',
       '<a href="#gift-card">Use a gift card, voucher, or promo code</a>',
       '</div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="sessionStorage.setItem(\'magic-city-payment-confirm-clicks\', String(Number(sessionStorage.getItem(\'magic-city-payment-confirm-clicks\') || 0) + 1)); setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
       '<div style="height: 300px"></div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="sessionStorage.setItem(\'magic-city-payment-confirm-clicks\', String(Number(sessionStorage.getItem(\'magic-city-payment-confirm-clicks\') || 0) + 1)); setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
       '</section>',
       '<section aria-label="Delivery address">',
       '<h2>Delivering to Test User</h2>',
@@ -729,7 +729,12 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
   }
   if (pathname === '/checkout/pending-order' || pathname === '/checkout/duplicateOrder') {
     const sparseDuplicateOrder = pathname === '/checkout/duplicateOrder';
-    const pendingTitle = searchParams.get('variant') === 'cashew' ? 'Nature Valley Cashew Granola Bars' : 'Test Gadget';
+    const liveSparseDuplicateOrder = sparseDuplicateOrder && searchParams.get('live') === '1';
+    const pendingTitle = searchParams.get('variant') === 'cashew'
+      ? 'Nature Valley Cashew Granola Bars'
+      : liveSparseDuplicateOrder
+        ? 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz'
+        : 'Test Gadget';
     const pendingAsin = searchParams.get('variant') === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
     const pendingQuantity = Number(searchParams.get('quantity')) || null;
     const pendingUnitPrice = Number(searchParams.get('unitPrice')) || 3.5;
@@ -741,7 +746,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
         : "location.href='/checkout?confirmed=1';";
     return [
       '<main><h1>This is a pending order</h1>',
-      `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$${pendingUnitPrice.toFixed(2)}</p>${pendingQuantity ? `<p>Quantity: ${pendingQuantity}</p>` : ''}</section>`,
+      liveSparseDuplicateOrder
+        ? `<section class="a-section"><div class="a-fixed-left-grid"><img alt="" /><div class="a-fixed-left-grid-inner"><span class="a-size-base">${pendingTitle}</span><div><span class="a-price"><span aria-hidden="true">$${pendingUnitPrice.toFixed(2)}</span></span> <span>($0.33 / ounce)</span></div><span>Ships from and sold by Amazon.com</span></div></div></section>`
+        : `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$${pendingUnitPrice.toFixed(2)}</p>${pendingQuantity ? `<p>Quantity: ${pendingQuantity}</p>` : ''}</section>`,
       sparseDuplicateOrder ? '' : `<p>Order total: $${pendingOrderTotal.toFixed(2)}</p>`,
       '<p>Do you want to order these items again?</p>',
       '<div id="amazon-pending-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="confirmPendingOrderButtonId" type="submit" /></div>',
@@ -822,6 +829,8 @@ async function main() {
     let prepareCartCheckpointCommittedAtMs = 0;
     let dropPrepareCartCheckpointConnection = false;
     let prepareCartConnectionDroppedAtMs = 0;
+    let dropContinueCheckoutCheckpointResponse = false;
+    let continueCheckoutCheckpointCommittedAtMs = 0;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
@@ -959,18 +968,29 @@ async function main() {
           req.socket.destroy();
           return;
         }
-        if (dropPrepareCartCheckpointResponse && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
+        if (dropPrepareCartCheckpointResponse
+          && body.planActionStatus !== 'waiting'
+          && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
           dropPrepareCartCheckpointResponse = false;
           prepareCartCheckpointCommittedAtMs = Date.now();
           return json(res, 503, { error: 'test_committed_checkpoint_response_lost' });
         }
-        if (dropPrepareCartCheckpointConnection && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
+        if (dropPrepareCartCheckpointConnection
+          && body.planActionStatus !== 'waiting'
+          && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
           dropPrepareCartCheckpointConnection = false;
           prepareCartConnectionDroppedAtMs = Date.now();
           await context.setOffline(true);
           setTimeout(() => { void context.setOffline(false).catch(() => null); }, 120);
           req.socket.destroy();
           return;
+        }
+        if (dropContinueCheckoutCheckpointResponse
+          && body.planActionStatus !== 'waiting'
+          && /^continue-checkout(?:-\d+)?$/.test(expected.id)) {
+          dropContinueCheckoutCheckpointResponse = false;
+          continueCheckoutCheckpointCommittedAtMs = Date.now();
+          return json(res, 503, { error: 'test_committed_checkout_checkpoint_response_lost' });
         }
         return json(res, 200, { updated: true, session });
       }
@@ -1321,6 +1341,116 @@ async function main() {
       await wakePage.close();
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner cart checkpoint connection-drop smoke passed');
+      return;
+    }
+    if (smokeMode === 'checkout-checkpoint-response-loss') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      transientRunnerStatusFailures = 0;
+      slowInitialSearchResponse = false;
+      dropContinueCheckoutCheckpointResponse = true;
+      const continuationSessionId = 'browser-smoke-checkout-response-loss';
+      const checkoutPage = await context.newPage();
+      await checkoutPage.goto(`${baseUrl}/checkout/pay-confirm`);
+      const checkoutTab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+        tabs.find((candidate) => candidate.url === url) || null), checkoutPage.url());
+      if (!checkoutTab?.id) fail(`browser_extension_checkout_connection_drop_tab_missing:${checkoutPage.url()}`);
+      const continuationPlan = rehashExtensionPlan({
+        ...plan,
+        planId: `mplan_${continuationSessionId}`,
+        startUrl: checkoutPage.url(),
+        actions: [
+          { id: 'continue-checkout', type: 'click_intent', missionAction: 'browser_click', intent: 'checkout', optional: true },
+          { id: 'inspect-review', type: 'inspect', missionAction: 'read_public_page', expectedMilestone: 'final_review_ready' },
+          { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'checkout_connection_drop_smoke' }
+        ]
+      });
+      session = {
+        ...session,
+        id: continuationSessionId,
+        status: 'queued',
+        claimedByPluginId: null,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          capabilityId: 'browser-smoke-checkout-response-loss-capability',
+          subject: { sessionId: continuationSessionId }
+        },
+        extensionMissionPlan: continuationPlan,
+        extensionMissionPlanState: { planHash: continuationPlan.planHash, nextActionIndex: 0, completedActionIds: [] }
+      };
+      await seedSessionCheckoutProfile(continuationSessionId, {
+        ...defaultCheckoutProfile,
+        paymentCardLast4: '6383'
+      }, continuationPlan.planHash);
+      await popup.evaluate(async ({ sessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+        });
+      }, { sessionId: continuationSessionId, tabId: checkoutTab.id });
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        const progress = [];
+        const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+        port.onMessage.addListener((payload) => {
+          if (payload?.type === 'RUNNER_PROGRESS') progress.push(payload);
+          if (payload?.type === 'RUNNER_RESULT') resolve({ payload, progress });
+        });
+        port.onDisconnect.addListener(() => resolve({ disconnected: true, progress }));
+        port.postMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'browser-smoke-checkout-response-loss'
+        });
+      }), { extensionId, sessionId: continuationSessionId });
+      try {
+        await waitFor(() => Boolean(fulfillment), 10_000);
+      } catch {
+        const runnerState = await popup.evaluate(() => chrome.storage.local.get([
+          'lastError', 'lastExecution', 'activeSessionId', 'activeRun'
+        ]));
+        fail(`browser_extension_checkout_response_loss_timeout:${JSON.stringify({ checkpoints, runnerState, session })}`);
+      }
+      const wake = await withTimeout(wakePromise, 10_000, 'browser_extension_checkout_response_loss_wake_timeout');
+      const recoveryMs = Date.now() - continueCheckoutCheckpointCommittedAtMs;
+      const continuationCheckpointCount = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'continue-checkout'
+        && checkpoint.planActionStatus !== 'waiting').length;
+      const continuationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'continue-checkout'
+        && checkpoint.planActionStatus !== 'waiting');
+      const continuationClickCount = await checkoutPage.evaluate(() => Number(sessionStorage.getItem('magic-city-payment-confirm-clicks') || 0));
+      const sawReconnectingRunner = (wake.progress || []).some((entry) => (
+        entry?.activeRun?.progressState === 'reconnecting_control_plane'
+        && entry?.activeRun?.progressLabel === 'Reconnecting Runner'
+      ));
+      if (continueCheckoutCheckpointCommittedAtMs <= 0
+        || recoveryMs <= 0
+        || recoveryMs >= 8_000
+        || continuationCheckpointCount !== 1
+        || continuationClickCount !== 1
+        || !sawReconnectingRunner
+        || continuationCheckpoint?.browser?.checkoutSummary?.stage !== 'final_review'
+        || fulfillment?.result?.browserExecution?.stopState !== 'final_approval_required') {
+        fail(`browser_extension_checkout_response_loss_recovery_failed:${JSON.stringify({
+          continueCheckoutCheckpointCommittedAtMs,
+          recoveryMs,
+          continuationCheckpointCount,
+          continuationClickCount,
+          sawReconnectingRunner,
+          continuationCheckpoint,
+          fulfillment,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Lost committed continue-checkout response reconciles without replay', {
+        recoveryMs,
+        continuationCheckpointCount,
+        continuationClickCount
+      });
+      await wakePage.close();
+      await checkoutPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner checkout checkpoint response-loss smoke passed');
       return;
     }
     if (smokeMode === 'claim-rejection') {
@@ -2309,8 +2439,44 @@ async function main() {
     recordPurchaseScenario('Pending-order continuation reuses action-scoped no-replay receipts', { replayClickCount });
     await replayPage.close();
 
+    const livePendingPage = await context.newPage();
+    await livePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=2.97`);
+    const livePendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), livePendingPage.url());
+    const livePendingOutcome = await invokePendingAction(livePendingTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-live-sparse-plan:confirm-pending-order',
+      sessionId: 'pending-live-sparse-session',
+      planHash: 'pending-live-sparse-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-VALID', title: 'Nature Valley', price: 2.97 },
+      boundCartEvidence: {
+        sessionId: 'pending-live-sparse-session',
+        planHash: 'pending-live-sparse-plan',
+        asin: 'NATURE-VALLEY-VALID',
+        title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    await livePendingPage.waitForTimeout(300);
+    const livePendingClickCount = await livePendingPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!livePendingOutcome?.completed
+      || livePendingOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || livePendingOutcome?.pendingOrderMatchEvidence?.identitySource !== 'exact_title'
+      || livePendingOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || livePendingOutcome?.pendingOrderMatchEvidence?.priceSource !== 'identity_row'
+      || livePendingOutcome?.pendingOrderMatchEvidence?.quantityMatches !== true
+      || livePendingClickCount !== 1) {
+      fail(`browser_extension_live_sparse_pending_order_not_confirmed:${JSON.stringify({ livePendingOutcome, livePendingClickCount })}`);
+    }
+    recordPurchaseScenario('Live-shaped duplicateOrder page uses verified cart identity exactly once', {
+      identitySource: livePendingOutcome.pendingOrderMatchEvidence.identitySource,
+      priceSource: livePendingOutcome.pendingOrderMatchEvidence.priceSource,
+      clickCount: livePendingClickCount
+    });
+    await livePendingPage.close();
+
     const pendingMismatchPage = await context.newPage();
-    await pendingMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&variant=cashew`);
+    await pendingMismatchPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=cashew&unitPrice=3.50`);
     const mismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingMismatchPage.url());
     const mismatchOutcome = await invokePendingAction(mismatchTab.id, {
       ...replayAction,

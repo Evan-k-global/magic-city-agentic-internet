@@ -3840,7 +3840,6 @@
 
   function pendingOrderMatchEvidence(action = {}) {
     const rawText = pagePlainText(30000);
-    const normalizedText = normalizeMatchText(rawText);
     const marker = /\bthis is a pending order\b/i.test(rawText);
     const candidate = action.boundCandidate && typeof action.boundCandidate === 'object'
       ? action.boundCandidate
@@ -3858,19 +3857,30 @@
       'li'
     ].join(','))).filter(visible);
     const productLinks = Array.from(document.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]')).filter(visible);
-    const rowFor = (element) => element?.closest?.('[data-asin]:not([data-asin=""]), [data-item-index], [data-testid*="item" i], article, li') || element || null;
+    const semanticRowFor = (element) => element?.closest?.('[data-asin]:not([data-asin=""]), [data-item-index], [data-testid*="item" i], article, li') || null;
+    const evidenceRowFor = (element) => {
+      const semanticRow = semanticRowFor(element);
+      if (semanticRow) return semanticRow;
+      let current = element || null;
+      for (let depth = 0; current && depth < 6 && current !== document.body; depth += 1) {
+        const text = String(current.innerText || current.textContent || '');
+        if (depth > 0 && /\$\s*\d{1,6}(?:\.\d{2})?/.test(text)) return current;
+        current = current.parentElement;
+      }
+      return element || null;
+    };
     const asinElement = expectedAsin
       ? Array.from(document.querySelectorAll('[data-asin]:not([data-asin=""])')).find((element) => String(element.getAttribute('data-asin') || '').trim() === expectedAsin)
       : null;
     const asinLink = expectedAsin
       ? productLinks.find((link) => new RegExp(`/(?:dp|gp/product)/${expectedAsin}(?:[/?#]|$)`, 'i').test(String(link.href || '')))
       : null;
-    const asinRow = rowFor(asinElement || asinLink);
+    const asinRow = evidenceRowFor(asinElement || asinLink);
     const titleElement = expectedTitle
-      ? [...productLinks, ...Array.from(document.querySelectorAll('h1, h2, h3, [data-testid*="title" i]')).filter(visible)]
+      ? [...productLinks, ...Array.from(document.querySelectorAll('h1, h2, h3, [data-testid*="title" i], span.a-size-base, span.a-text-bold, p')).filter(visible)]
           .find((element) => normalizeMatchText(element.innerText || element.textContent || '') === expectedTitle)
       : null;
-    const exactTitleRow = rowFor(titleElement)
+    const exactTitleRow = evidenceRowFor(titleElement)
       || productRows.find((row) => normalizeMatchText(row.innerText || row.textContent || '') === expectedTitle);
     const identityRow = asinRow || exactTitleRow;
     const identityMatches = Boolean(identityRow);
