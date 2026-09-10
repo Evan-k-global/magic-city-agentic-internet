@@ -2085,7 +2085,8 @@
       margin-top: 2px;
       color: rgba(245, 250, 255, 0.94);
       font-size: 12px;
-      overflow-wrap: anywhere;
+      overflow-wrap: normal;
+      word-break: normal;
     }
 
     .execution-audit-actions {
@@ -2641,6 +2642,35 @@
       box-shadow:
         0 10px 24px rgba(23, 215, 255, 0.22),
         inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    }
+
+    .execution-agent-start {
+      min-height: 44px;
+      padding: 11px 18px;
+      border-radius: 12px;
+      font-weight: 900;
+      cursor: pointer;
+      transition: transform 90ms ease, box-shadow 120ms ease, filter 120ms ease, opacity 120ms ease;
+    }
+
+    .execution-agent-start:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow:
+        0 12px 26px rgba(23, 215, 255, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+    }
+
+    .execution-agent-start:active:not(:disabled) {
+      transform: translateY(2px);
+      box-shadow:
+        0 4px 12px rgba(23, 215, 255, 0.18),
+        inset 0 2px 3px rgba(0, 47, 61, 0.18);
+    }
+
+    .execution-agent-start.is-starting {
+      cursor: progress;
+      opacity: 0.82;
+      filter: saturate(0.78);
     }
 
     .execution-secondary {
@@ -15190,6 +15220,15 @@
 		      return ['completed', 'payment_failed', 'failed', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
 		    }
 
+		    function markExecutionStartButtonStarting(button) {
+		      if (!button) return false;
+		      button.disabled = true;
+		      button.textContent = 'Starting';
+		      button.classList?.add('is-starting');
+		      button.setAttribute?.('aria-busy', 'true');
+		      return true;
+		    }
+
 		    function hasActiveSantaClawzDirectPayment(session) {
 		      const directPayment = session?.santaclawzDirectPayment || null;
 		      if (!directPayment?.paymentPayloadDigestSha256) return false;
@@ -15296,11 +15335,12 @@
 	      const latestSummary = latestStep?.label || latestPhase.label;
 	      const runState = describeExecutionRunState(session, statusBadge, latestSummary, localExecutionError);
 	      const displayStatusLabel = runState.badgeLabel || statusBadge.label;
+	      const santaClawzProgress = getSantaClawzExecutionProgress(session);
 	      const terminalSummary = sessionHasBrowserOrderSubmitted(session)
 	        ? 'Amazon confirmed the order.'
 	        : hasReadySantaClawzDelivery(session)
 	          ? 'Audit report ready.'
-	          : latestSummary;
+	          : santaClawzProgress?.summary || latestSummary;
 	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	      const statusLine = getConciseExecutionStatusLine(session, statusBadge, fundingStatus, localExecutionError);
 	      const showActivityBar = shouldShowExecutionActivityBar(session, statusBadge);
@@ -15586,6 +15626,7 @@
       const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
       const santaClawzDeliveryReady = hasReadySantaClawzDelivery(session);
 	      const santaClawzVerificationPending = hasPendingSantaClawzDeliveryVerification(session);
+	      const santaClawzProgress = getSantaClawzExecutionProgress(session);
       const travelMode = kind === 'travel'
         ? resolveTravelModeValue(session.selections?.travelMode || session.paymentOrchestration?.travelMode || 'itinerary_build')
         : '';
@@ -15617,6 +15658,19 @@
 	          detail: 'Delivery verification is still pending. No additional hire or payment is needed.',
 	          badgeLabel: 'Verification pending'
 	        };
+	      }
+	      if (kind === 'agent' && santaClawzProgress && ['queued', 'claimed', 'executing'].includes(statusModel.statusValue)) {
+	        return statusModel.label === 'Starting'
+	          ? {
+	              title: 'Starting',
+	              detail: 'Sending the saved audit request to SantaClawz.',
+	              badgeLabel: 'Starting'
+	            }
+	          : {
+	              title: santaClawzProgress.title,
+	              detail: santaClawzProgress.detail,
+	              badgeLabel: santaClawzProgress.badgeLabel
+	            };
 	      }
       if (statusModel.statusValue === 'failed') {
         if (kind === 'agent' && localExecutionError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
@@ -15902,14 +15956,15 @@
         const latestStep = [...(Array.isArray(session.executionTrace) ? session.executionTrace : [])].reverse()[0] || null;
         const latestPhase = inferExecutionPhase(latestStep, session.fulfillment);
         const latestSummary = latestStep?.label || latestPhase.label;
-        const runState = describeExecutionRunState(session, statusBadge, latestSummary, localExecutionError);
-        const displayStatusLabel = runState.badgeLabel || statusBadge.label;
+	        const runState = describeExecutionRunState(session, statusBadge, latestSummary, localExecutionError);
+	        const displayStatusLabel = runState.badgeLabel || statusBadge.label;
 	        const santaClawzDeliveryReady = hasReadySantaClawzDelivery(session);
+	        const santaClawzProgress = getSantaClawzExecutionProgress(session);
 	        const terminalSummary = sessionHasBrowserOrderSubmitted(session)
 	          ? 'Amazon confirmed the order.'
 	          : santaClawzDeliveryReady
 	            ? 'Audit report ready.'
-	            : latestSummary;
+	            : santaClawzProgress?.summary || latestSummary;
 	        const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	        const isBrowserExecutionSheet = session.handoffData?.kind === 'browser';
 	        const isAgentExecutionSheet = session.handoffData?.kind === 'agent';
@@ -15988,7 +16043,7 @@
 	          : (browserCanRunNow ? browserQuickButtonHtml : '');
 	        const agentRunButtonHtml = santaClawzRetryBlocked
 	          ? '<button class="execution-secondary" type="button" disabled>Agent update required</button>'
-	          : `<button class="execution-primary" type="button" data-execution-fallback-run-session="${escapeExecutionValue(session.id)}">${localExecutionError ? 'Retry agent' : 'Run agent'}</button>`;
+	          : `<button class="execution-primary execution-agent-start" type="button" data-execution-fallback-run-session="${escapeExecutionValue(session.id)}">${localExecutionError ? 'Retry agent' : 'Run agent'}</button>`;
 	        const hireStepDescription = isBrowserExecutionSheet
 	          ? 'Runs until login, payment, captcha, or mismatch.'
 	          : compactExecutionSentence(getExecutionSelectedAgentDescription(session) || 'Review inputs, then run.', 120);
@@ -16112,6 +16167,8 @@
 	      });
       dock.querySelectorAll('[data-execution-fallback-run-session]').forEach((button) => {
         button.addEventListener('click', () => {
+	          if (!markExecutionStartButtonStarting(button)) return;
+	          executionPendingSessions.add(button.dataset.executionFallbackRunSession);
           void startAgentExecutionFromFallback(button.dataset.executionFallbackRunSession);
         });
       });
@@ -18213,9 +18270,14 @@
 	      if (typeof entry !== 'object') return null;
 	      const url = String(entry.url || entry.href || entry.link || entry.downloadUrl || entry.artifactUrl || entry.publicUrl || '').trim();
 	      const label = String(entry.label || entry.title || entry.name || entry.filename || entry.kind || entry.type || (url ? 'Agent output' : 'Agent note')).trim();
-	      const text = String(entry.summary || entry.text || entry.content || entry.markdown || entry.description || '').trim();
+	      const structured = [entry.json, entry.structuredJson, entry.structuredOutput, entry.data, entry.content]
+	        .find((value) => value && typeof value === 'object') || null;
+	      const textValue = entry.summary || entry.text || entry.markdown || entry.description
+	        || (typeof entry.content === 'string' ? entry.content : '')
+	        || (structured ? JSON.stringify(structured) : '');
+	      const text = String(textValue || '').trim();
 	      if (!url && !text) return null;
-	      return { label, url, text };
+	      return { label, url, text, structured };
 	    }
 
 	    function collectSantaClawzDeliveryItemsFromValue(value, items = [], seen = new Set(), depth = 0) {
@@ -18350,10 +18412,17 @@
 
 	    function getSantaClawzAuditPayload(items = []) {
 	      for (const item of items) {
+	        if (item?.structured && typeof item.structured === 'object') return item.structured;
 	        const parsed = parseSantaClawzInlineJson(item?.text || '');
 	        if (parsed) return parsed;
 	      }
 	      return null;
+	    }
+
+	    function normalizeSantaClawzAuditStatus(value = '') {
+	      const normalized = String(value || '').trim().toLowerCase().replace(/_/g, ' ');
+	      if (['completed', 'complete', 'success', 'succeeded'].includes(normalized)) return 'complete';
+	      return normalized || 'available';
 	    }
 
 	    function getSantaClawzAuditMarkdown(items = []) {
@@ -18418,6 +18487,46 @@
 	      return getSantaClawzDeliveryVerificationState(session).accepted;
 	    }
 
+	    function getSantaClawzExecutionProgress(session) {
+	      const hasSantaClawz = session?.externalExecutionHandoff?.source === 'santaclawz'
+	        || Boolean(session?.santaclawzDirectPayment);
+	      if (!hasSantaClawz) return null;
+	      const directPayment = session.santaclawzDirectPayment || {};
+	      const summary = directPayment.summary || {};
+	      const paymentState = directPayment.paymentState || {};
+	      const executionState = directPayment.executionState || {};
+	      const operational = executionState.operationalStatus || paymentState.operationalStatus || {};
+	      const delivery = getSantaClawzDeliveryVerificationState(session);
+	      const agentStatus = String(
+	        summary.agentExecutionStatus
+	        || operational.agentExecutionStatus
+	        || executionState.status
+	        || paymentState.agentExecutionStatus
+	        || ''
+	      ).trim().toLowerCase();
+	      const relayStatus = String(summary.relayDeliveryStatus || operational.relayDeliveryStatus || paymentState.relayDeliveryStatus || '').trim().toLowerCase();
+	      const paymentStatus = String(summary.paymentStatus || operational.paymentStatus || paymentState.paymentStatus || directPayment.status || '').trim().toLowerCase();
+	      if (delivery.accepted) {
+	        return { title: 'Audit complete', detail: 'The Markdown report and structured JSON are ready.', badgeLabel: 'Done', summary: 'Audit complete · files ready' };
+	      }
+	      if (delivery.pending) {
+	        return { title: 'Verifying report', detail: 'SantaClawz returned the report. Magic City is verifying its delivery package.', badgeLabel: 'Verifying', summary: 'Report received · verifying delivery' };
+	      }
+	      if (delivery.rejected || /fail|reject|error|cancel/.test(agentStatus)) {
+	        return { title: 'Audit needs attention', detail: 'SantaClawz returned a failure or an invalid delivery package.', badgeLabel: 'Needs attention', summary: 'SantaClawz return needs attention' };
+	      }
+	      if (/complete|success|succeed|deliver/.test(agentStatus)) {
+	        return { title: 'Finalizing report', detail: 'The audit finished in SantaClawz. Magic City is collecting and verifying the files.', badgeLabel: 'Finalizing', summary: 'Audit finished · collecting files' };
+	      }
+	      if (/running|executing|working|processing|in.progress/.test(agentStatus)) {
+	        return { title: 'Auditing repository', detail: 'SantaClawz is reviewing the submitted repository.', badgeLabel: 'Working', summary: 'SantaClawz is auditing the repository' };
+	      }
+	      if (/forward|deliver|accepted/.test(relayStatus) || /submitted|paid|settled|accepted/.test(paymentStatus)) {
+	        return { title: 'Waiting for audit', detail: 'The paid request reached SantaClawz and is waiting for agent output.', badgeLabel: 'Working', summary: 'Request accepted · waiting for audit' };
+	      }
+	      return { title: 'SantaClawz ready', detail: 'Review the inputs, then start the audit.', badgeLabel: 'Ready', summary: 'SantaClawz agent ready' };
+	    }
+
 	    function openSantaClawzAuditOutput(sessionId = '', format = 'markdown') {
 	      const session = executionSessionCache.get(String(sessionId || ''));
 	      if (!session) return false;
@@ -18454,22 +18563,22 @@
 	      const markdown = getSantaClawzAuditMarkdown(items);
 	      const markdownArtifact = items.find((item) => item?.url && /(?:markdown|\.md(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
 	      const jsonArtifact = items.find((item) => item?.url && /(?:json|\.json(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
-	      const status = getSantaClawzAuditValue(payload, ['audit_status', 'status']) || (markdown ? 'completed' : 'available');
+	      const status = normalizeSantaClawzAuditStatus(getSantaClawzAuditValue(payload, ['audit_status', 'status']) || (markdown ? 'completed' : 'available'));
 	      const highestSeverity = getSantaClawzAuditHighestSeverity(payload, markdown);
 	      const findingCount = getSantaClawzAuditFindingCount(payload, markdown);
 	      const deferredCount = getSantaClawzAuditValue(payload, ['deferred_count', 'deferred_findings']);
 	      const summary = getSantaClawzAuditSummary(payload, markdown);
 	      const facts = [
-	        ['Status', String(status).replace(/_/g, ' ')],
+	        ['Status', status],
 	        ['Highest severity', String(highestSeverity).replace(/_/g, ' ')],
 	        ['Findings', findingCount === '' ? 'See report' : String(findingCount)],
 	        deferredCount !== '' ? ['Deferred', String(deferredCount)] : null
 	      ].filter(Boolean);
 	      const outputControls = [
 	        markdownArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(markdownArtifact.url)}" target="_blank" rel="noopener noreferrer">Open Markdown report</a>` : '',
-	        !markdownArtifact?.url && markdown ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="markdown" data-session-id="${escapeExecutionValue(session.id)}">Open report</button>` : '',
+	        !markdownArtifact?.url && markdown ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="markdown" data-session-id="${escapeExecutionValue(session.id)}">Open Markdown report</button>` : '',
 	        jsonArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(jsonArtifact.url)}" target="_blank" rel="noopener noreferrer">Open JSON data</a>` : '',
-	        !jsonArtifact?.url && payload ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="json" data-session-id="${escapeExecutionValue(session.id)}">Open JSON</button>` : ''
+	        !jsonArtifact?.url && payload ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="json" data-session-id="${escapeExecutionValue(session.id)}">Open JSON report</button>` : ''
 	      ].filter(Boolean).join('');
 	      return `
 	        <div class="execution-audit-report">
@@ -18493,6 +18602,7 @@
 	      const codeAuditPanel = renderSantaClawzCodeAuditPanel(session, items);
 	      const outputReady = hasReadySantaClawzDelivery(session);
 	      const verificationPending = hasPendingSantaClawzDeliveryVerification(session);
+	      const progress = getSantaClawzExecutionProgress(session);
 	      const directPayment = session.santaclawzDirectPayment || {};
 	      const status = directPayment.status || session.status || 'ready';
 		      const paymentSummary = directPayment.summary || {};
@@ -18505,25 +18615,13 @@
 		        || session?.fulfillment?.result?.error
 		        || 'SantaClawz did not return an accepted result package.';
 		      const statusLabel = describeSantaClawzDirectPaymentStatus(status);
-		      const submittedAt = directPayment.submittedAt || directPayment.preparedAt || session.executionRequestedAt || '';
-		      const elapsedSeconds = submittedAt ? Math.max(0, Math.round((Date.now() - new Date(submittedAt).getTime()) / 1000)) : null;
+		      const lastUpdateAt = directPayment.lastStatusAt || directPayment.updatedAt || session.updatedAt || '';
+		      const lastUpdateSeconds = lastUpdateAt ? Math.max(0, Math.round((Date.now() - new Date(lastUpdateAt).getTime()) / 1000)) : null;
 		      const requestId = directPayment.submittedRequestId || directPayment.x402RequestId || directPayment.paymentRequirementSummary?.requestId || '';
 		      const submittedToSantaClawz = Boolean(directPayment.paymentPayloadDigestSha256 || directPayment.submittedRequestId || directPayment.paymentStateUrl || directPayment.stateUrl);
-		      const activelyPolling = !terminalFailure && !outputReady && Boolean(
-		        session?.id
-		        && (
-		          executionPendingSessions.has(session.id)
-		          || executionProtocolPollingSessions.has(session.id)
-		          || shouldPollExecutionSession(session)
-		        )
-		      );
-		      const elapsedBadge = outputReady || elapsedSeconds == null
+		      const elapsedBadge = outputReady || lastUpdateSeconds == null
 		        ? ''
-		        : activelyPolling
-		          ? `polling ${elapsedSeconds}s`
-		          : submittedToSantaClawz
-		            ? `last update ${elapsedSeconds}s`
-		            : `ready ${elapsedSeconds}s`;
+		        : `updated ${lastUpdateSeconds}s ago`;
 		      const retryBlocked = directPayment?.summary?.retryBlocked === true || directPayment?.summary?.returnRejected === true;
 		      const waitingText = verificationPending
 		        ? 'Report available. Delivery verification is pending.'
@@ -18531,11 +18629,11 @@
 		        ? (retryBlocked
 		          ? 'The agent runtime returned a protocol-invalid package. No Base USDC settled; credits returned.'
 		          : 'No valid output was delivered. Credits returned.')
-		        : items.length
-		        ? 'Output ready.'
-		        : submittedToSantaClawz
-		          ? 'Waiting for output.'
-		          : 'Not sent yet.';
+		        : progress?.detail || (items.length
+		          ? 'Output ready.'
+		          : submittedToSantaClawz
+		            ? 'Waiting for output.'
+		            : 'Not sent yet.');
 		      const stateLinks = [
 		        directPayment.paymentStateUrl ? `<a class="execution-result-link" href="${escapeExecutionValue(directPayment.paymentStateUrl)}" target="_blank" rel="noopener noreferrer">Payment</a>` : '',
 		        directPayment.stateUrl ? `<a class="execution-result-link" href="${escapeExecutionValue(directPayment.stateUrl)}" target="_blank" rel="noopener noreferrer">Run</a>` : '',
@@ -18546,7 +18644,7 @@
 	          <div class="trace-label">SantaClawz delivery</div>
 	          <div class="trace-meta">
 	            <div class="execution-proof-row">
-		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : verificationPending ? 'Verification pending' : items.length ? 'Output ready' : statusLabel)}</span>
+		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : verificationPending ? 'Verification pending' : progress?.badgeLabel || statusLabel)}</span>
 		              ${requestId ? `<span class="execution-proof-badge">request ${escapeExecutionValue(String(requestId).slice(0, 18))}</span>` : ''}
 		              ${elapsedBadge ? `<span class="execution-proof-badge">${escapeExecutionValue(elapsedBadge)}</span>` : ''}
 		            </div>
@@ -19151,7 +19249,7 @@
         ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
         : actionNeedsFunds
           ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(actionFundingLabel)}</button>`
-          : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || executionPaused || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionPaused ? 'Paused in checkout' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
+	          : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || executionPaused || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionPaused ? 'Paused in checkout' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
 	      const providerActionLabel = squareCheckoutUrl
         ? 'Open direct Square checkout'
         : kind === 'travel'
@@ -19184,7 +19282,7 @@
 	          ? `<button class="execution-primary" id="executionSantaClawzPayBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Preparing wallet approval...' : directX402ButtonLabel}</button>`
 	          : isBrowserLane
 	            ? browserActionButtonHtml
-		            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`}
+		            : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`}
         ${agentViewUrl ? `<a class="execution-secondary" href="${escapeExecutionValue(agentViewUrl)}" target="_blank" rel="noopener noreferrer">View Agent</a>` : ''}
         ${session.handoffData?.kind === 'food' ? `<button class="execution-secondary" id="executionDiscoverBtn" type="button" ${executionBusy ? 'disabled' : ''}>Find live local restaurants</button>` : ''}
         ${showTopup ? `<button class="execution-secondary" id="executionTopupBtn" data-execution-topup="true" type="button" ${executionBusy ? 'disabled' : ''}>${topupButtonLabel}</button>` : ''}
@@ -19325,8 +19423,14 @@
       const setExecutionRunControlsBusy = (busy, label = 'Execution running...') => {
         const root = getExecutionSheetScrollElement(session.id);
         root?.querySelectorAll('[data-execution-run-agent="true"]').forEach((button) => {
-          button.disabled = busy;
-          if (busy) button.textContent = label;
+	          if (busy) {
+	            markExecutionStartButtonStarting(button);
+	            button.textContent = label;
+	          } else {
+	            button.disabled = false;
+	            button.classList?.remove('is-starting');
+	            button.removeAttribute?.('aria-busy');
+	          }
         });
       };
 
@@ -19349,7 +19453,7 @@
 	            throw new Error('This agent returned an invalid SantaClawz result package. Retry is disabled until the agent runtime is updated.');
 	          }
 	          clearExecutionStatusError(session.id);
-	          setExecutionRunControlsBusy(true, 'Starting...');
+	          setExecutionRunControlsBusy(true, 'Starting');
 	          const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(session));
 	          const checkoutProfileNeeded = isBrowserRun && browserMissionNeedsCheckoutProfile(session, selections);
 	          if (checkoutProfileNeeded && getStoredVaultRecord()) {

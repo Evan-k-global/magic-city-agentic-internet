@@ -124,6 +124,7 @@ vm.createContext(context);
 vm.runInContext([
   extractFunctionSource('compactExecutionSentence'),
   extractFunctionSource('escapeExecutionValue'),
+  extractFunctionSource('markExecutionStartButtonStarting'),
   extractFunctionSource('normalizeSantaClawzDeliveryItem'),
   extractFunctionSource('collectSantaClawzDeliveryItemsFromValue'),
   extractFunctionSource('collectSantaClawzDeliveryItems'),
@@ -136,10 +137,12 @@ vm.runInContext([
   extractFunctionSource('getSantaClawzAuditHighestSeverity'),
   extractFunctionSource('getSantaClawzAuditFindingCount'),
   extractFunctionSource('getSantaClawzAuditSummary'),
+  extractFunctionSource('normalizeSantaClawzAuditStatus'),
   extractFunctionSource('isExecutionSessionDurablyCancelled'),
   extractFunctionSource('getSantaClawzDeliveryVerificationState'),
   extractFunctionSource('hasPendingSantaClawzDeliveryVerification'),
   extractFunctionSource('hasReadySantaClawzDelivery'),
+  extractFunctionSource('getSantaClawzExecutionProgress'),
   extractFunctionSource('openSantaClawzAuditOutput'),
   extractFunctionSource('renderSantaClawzCodeAuditPanel'),
   extractFunctionSource('getExecutionStatusModel'),
@@ -163,6 +166,8 @@ const helpers = vm.runInContext(`({
   shouldApplyPolledExecutionSession,
   refreshExecutionSessionForPolling,
   renderSantaClawzCodeAuditPanel,
+  getSantaClawzExecutionProgress,
+  markExecutionStartButtonStarting,
   openSantaClawzAuditOutput,
   renderExecutionResult
 })`, context);
@@ -204,7 +209,7 @@ assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(cancelledSession),
 assert.equal(helpers.shouldPollExecutionSession(cancelledSession), false);
 assert.equal(helpers.getExecutionStatusModel(cancelledSession).label, 'Cancelled');
 assert.equal(helpers.describeExecutionRunState(cancelledSession, helpers.getExecutionStatusModel(cancelledSession)).title, 'Cancelled');
-assert.match(helpers.renderSantaClawzCodeAuditPanel(cancelledSession, helpers.collectSantaClawzDeliveryItems(cancelledSession)), /Open report/);
+assert.match(helpers.renderSantaClawzCodeAuditPanel(cancelledSession, helpers.collectSantaClawzDeliveryItems(cancelledSession)), /Open Markdown report/);
 const preCancellationResponse = structuredClone(watchdogFailedSession);
 preCancellationResponse.updatedAt = cancelledSession.updatedAt;
 assert.equal(helpers.shouldApplyPolledExecutionSession(cancelledSession, preCancellationResponse), false);
@@ -242,8 +247,12 @@ assert.equal(context.executionSessionCache.get(pollingBase.id).status, 'fulfille
 const panel = helpers.renderSantaClawzCodeAuditPanel(session, items);
 assert.match(panel, /Highest severity[\s\S]*high/i);
 assert.match(panel, /Findings[\s\S]*6/);
+assert.match(panel, /Status[\s\S]*complete/i);
+assert.doesNotMatch(panel, />completed</i);
 assert.match(panel, /data-santaclawz-audit-output="markdown"/);
 assert.match(panel, /data-santaclawz-audit-output="json"/);
+assert.match(panel, /Open Markdown report/);
+assert.match(panel, /Open JSON report/);
 assert.doesNotMatch(panel, /Additional Model Notes/);
 assert.doesNotMatch(panel, /Protocol Surfaces Detected/);
 assert.doesNotMatch(panel, /<details|<pre/i);
@@ -252,6 +261,39 @@ assert.equal(helpers.openSantaClawzAuditOutput(session.id, 'markdown'), true);
 assert.equal(helpers.openSantaClawzAuditOutput(session.id, 'json'), true);
 assert.deepEqual(openedUrls, ['blob:output-1', 'blob:output-2']);
 assert.equal(createdUrls.length, 2);
+
+const structuredSession = structuredClone(session);
+structuredSession.santaclawzDirectPayment.delivery.inlineOutputs = [
+  { name: 'audit.md', text: markdown },
+  { name: 'audit.json', content: payload }
+];
+const structuredPanel = helpers.renderSantaClawzCodeAuditPanel(
+  structuredSession,
+  helpers.collectSantaClawzDeliveryItems(structuredSession)
+);
+assert.match(structuredPanel, /Open JSON report/, 'object-valued structured output must remain available as JSON');
+
+const activeSession = structuredClone(session);
+activeSession.santaclawzDirectPayment.executionState = { status: 'running' };
+activeSession.santaclawzDirectPayment.delivery = { inlineOutputs: [], artifacts: [] };
+assert.equal(helpers.getSantaClawzExecutionProgress(activeSession).title, 'Auditing repository');
+const finishedUpstreamSession = structuredClone(activeSession);
+finishedUpstreamSession.santaclawzDirectPayment.executionState.status = 'completed';
+assert.equal(helpers.getSantaClawzExecutionProgress(finishedUpstreamSession).title, 'Finalizing report');
+
+const startButtonState = {
+  disabled: false,
+  textContent: 'Run agent',
+  classes: new Set(),
+  attributes: new Map(),
+  classList: { add(value) { startButtonState.classes.add(value); } },
+  setAttribute(name, value) { startButtonState.attributes.set(name, value); }
+};
+assert.equal(helpers.markExecutionStartButtonStarting(startButtonState), true);
+assert.equal(startButtonState.disabled, true);
+assert.equal(startButtonState.textContent, 'Starting');
+assert.equal(startButtonState.classes.has('is-starting'), true);
+assert.equal(startButtonState.attributes.get('aria-busy'), 'true');
 
 const executionResult = helpers.renderExecutionResult(session, { includeProtocolPanel: false });
 assert.match(executionResult, /compact audit panel/);
@@ -273,9 +315,13 @@ const layout = await page.locator('.execution-audit-report').evaluate((element) 
 assert.ok(layout.height < 260, `compact audit panel should remain short, got ${layout.height}px`);
 assert.ok(layout.scrollWidth <= layout.clientWidth, 'compact audit panel must not overflow horizontally');
 assert.equal(await page.locator('[data-santaclawz-audit-output]').count(), 2);
+assert.equal((await page.locator('.execution-audit-fact strong').first().textContent()).trim(), 'complete');
 if (process.env.MAGIC_CITY_UI_SCREENSHOT) {
   await page.screenshot({ path: process.env.MAGIC_CITY_UI_SCREENSHOT });
 }
 await browser.close();
+
+assert.match(html, /execution-agent-start:active:not\(:disabled\)/);
+assert.match(html, /markExecutionStartButtonStarting\(button\)[\s\S]{0,160}startAgentExecutionFromFallback/);
 
 console.log('santaclawz compact output UI regression passed');
