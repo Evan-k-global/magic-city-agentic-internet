@@ -150,6 +150,7 @@ import {
   getNativeRunnerDevice,
   getNativeRunnerDeviceByTokenHash,
   updateNativeRunnerDevice,
+  updateNativeRunnerDeviceEphemeral,
   listNativeRunnerDevices,
   createNativeRunnerPairingSession,
   getNativeRunnerPairingSession,
@@ -781,6 +782,18 @@ async function sendJson(res, code, payload) {
     'pragma': 'no-cache',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer'
+  });
+  res.end(JSON.stringify(payload, null, 2));
+}
+
+function sendAdvisoryJson(res, code, payload) {
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    pragma: 'no-cache',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'x-magic-city-durability': 'advisory'
   });
   res.end(JSON.stringify(payload, null, 2));
 }
@@ -7380,7 +7393,7 @@ function resolveDefaultBrowserExecutionAgentForAuthUser(authUser = null) {
   return readiness.ready ? RUNNER_EXTENSION_PLUGIN_ID : HOSTED_BROWSER_WORKER_PLUGIN_ID;
 }
 
-function authorizeNativeRunnerPluginRequest(req, { body = null, session = null, pluginId = '' } = {}) {
+function authorizeNativeRunnerPluginRequest(req, { body = null, session = null, pluginId = '', advisory = false } = {}) {
   const device = assertActiveNativeRunnerBearer(req);
   if (!device) return null;
   const effectivePluginId = String(pluginId || body?.pluginId || '').trim();
@@ -7412,9 +7425,14 @@ function authorizeNativeRunnerPluginRequest(req, { body = null, session = null, 
     });
     throw createHttpError('native_runner_session_not_found', 404);
   }
-  const updated = touchNativeRunnerDevice(device, {
-    lastPluginId: effectivePluginId || device.pluginId || NATIVE_RUNNER_PLUGIN_ID
-  });
+  const updated = advisory
+    ? updateNativeRunnerDeviceEphemeral(device.id, {
+        lastSeenAt: new Date().toISOString(),
+        lastPluginId: effectivePluginId || device.pluginId || NATIVE_RUNNER_PLUGIN_ID
+      })
+    : touchNativeRunnerDevice(device, {
+        lastPluginId: effectivePluginId || device.pluginId || NATIVE_RUNNER_PLUGIN_ID
+      });
   return updated;
 }
 
@@ -20013,27 +20031,19 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const body = await readBody(req);
       requireFields(body, ['pluginId']);
-      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      requirePluginApiKeyOrNativeRunner(req, {
+        body,
+        session,
+        pluginId: body.pluginId,
+        advisory: true
+      });
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'runner_status_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
       if (!['queued', 'confirmed', 'claimed', 'executing'].includes(String(session.status || '').toLowerCase())) {
         return sendJson(res, 409, { error: 'execution_not_active', session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId) });
       }
-      if (pluginAuth.type === 'native_runner') {
-        touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice, {
-          lastSeenAt: new Date().toISOString()
-        });
-        recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {
-          action: 'runner_status',
-          status: 'success',
-          source: 'native_runner',
-          sessionId,
-          pluginId: body.pluginId,
-          capability: 'inspect'
-        });
-      }
-      return sendJson(res, 200, {
+      return sendAdvisoryJson(res, 200, {
         active: true,
         session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId)
       });

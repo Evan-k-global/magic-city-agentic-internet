@@ -9,7 +9,7 @@ const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
-const LEAN_RUNTIME_MODE = 'v0.4.35-latency-instrumentation';
+const LEAN_RUNTIME_MODE = 'v0.4.36-liveness-fast-path';
 const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',

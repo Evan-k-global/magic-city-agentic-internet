@@ -1267,6 +1267,17 @@ export function updateNativeRunnerDevice(id, patch = {}) {
   return state.nativeRunnerDevices[idx];
 }
 
+export function updateNativeRunnerDeviceEphemeral(id, patch = {}) {
+  const idx = state.nativeRunnerDevices.findIndex((row) => row.id === id);
+  if (idx < 0) return null;
+  state.nativeRunnerDevices[idx] = {
+    ...state.nativeRunnerDevices[idx],
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  return state.nativeRunnerDevices[idx];
+}
+
 export function listNativeRunnerDevices(limit = 100) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
   return state.nativeRunnerDevices.slice(-safeLimit).reverse();

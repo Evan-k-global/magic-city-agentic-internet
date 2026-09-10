@@ -1355,8 +1355,11 @@ async function main() {
       || reconcilePlan.resumeCheckoutReconcile !== true
       || reconcilePlan.resumeCheckoutAutoSubmit !== true
       || reconcilePlan.startUrl !== 'https://www.amazon.com/checkout/p/p-reconcile/address?pipelineType=Chewbacca'
-      || reconcilePlan.actions?.map((action) => action.type).join(',') !== 'navigate,fill_checkout_profile,click_intent,fill_checkout_profile,inspect,final_submit,inspect,pause'
+      || reconcilePlan.actions?.map((action) => action.type).join(',') !== 'navigate,fill_checkout_profile,click_intent,fill_checkout_profile,inspect,final_submit,final_submit,inspect,pause'
       || reconcilePlan.actions?.[0]?.preserveExistingCheckout !== true
+      || reconcilePlan.actions?.[6]?.pendingOrderContinuation !== true
+      || reconcilePlan.actions?.[6]?.priorFinalSubmitActionId !== 'submit-final-order'
+      || reconcilePlan.actions?.[6]?.chainAuthorizationActionId !== 'submit-final-order'
       || reconcilePlan.limits?.stopBeforeFinalSubmit !== false
       || reconcilePlan.actions?.some((action) => action.type === 'prepare_cart')) {
       throw new Error(`checkout_reconcile_auto_submit_plan_invalid:${reconcileClaim.response.status}:${JSON.stringify(reconcilePlan)}`);

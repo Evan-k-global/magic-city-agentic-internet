@@ -3303,6 +3303,7 @@ async function runSession(rawSession) {
     scheduleRunnerResume(8_000);
     if (!startupTiming.claimStartedAt) startupTiming.claimStartedAt = new Date().toISOString();
     session = await claimSession(rawSession);
+    let authorityVerifiedAt = Date.now();
     startupTiming.claimAcceptedAt = new Date().toISOString();
     startupTiming.claimDurationMs = Math.max(0, Date.parse(startupTiming.claimAcceptedAt) - Date.parse(startupTiming.claimStartedAt));
     if (!resumingPersistedRun) {
@@ -3363,6 +3364,7 @@ async function runSession(rawSession) {
     if (String(session.status || '').toLowerCase() !== 'executing') {
       startupTiming.startupCheckpointStartedAt = new Date().toISOString();
       session = await checkpointRunnerStartup(session, plan, nextAction, startupTiming);
+      authorityVerifiedAt = Date.now();
       startupTiming.startupCheckpointAcceptedAt = new Date().toISOString();
       startupTiming.startupCheckpointDurationMs = Math.max(
         0,
@@ -3418,7 +3420,6 @@ async function runSession(rawSession) {
         actionIndex: Number(interruptedRun.actionIndex)
       } : {})
     });
-    let authorityVerifiedAt = Date.now();
     const assertActive = async ({ force = false, localOnly = false } = {}) => {
       assertLocalMissionAuthority(session);
       if (localOnly || (!force && Date.now() - authorityVerifiedAt < RUNNER_STATUS_LEASE_MS)) return session;
@@ -3944,6 +3945,7 @@ async function runSession(rawSession) {
           } : {})
         }
       });
+      authorityVerifiedAt = Date.now();
       // The authenticated checkpoint immediately before the signed
       // final-submit action renews a short, one-action local lease. This
       // avoids a slow but healthy checkout expiring an authority timestamp
