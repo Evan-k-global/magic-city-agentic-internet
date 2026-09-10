@@ -208,19 +208,35 @@ function copyTestExtension(directory, externalOrigin = '', options = {}) {
   return destination;
 }
 
-function waitFor(check, timeoutMs = 20_000) {
+async function waitFor(check, timeoutMs = 20_000) {
   const startedAt = Date.now();
-  return new Promise((resolve, reject) => {
-    const timer = setInterval(() => {
-      if (check()) {
-        clearInterval(timer);
-        resolve();
-      } else if (Date.now() - startedAt >= timeoutMs) {
-        clearInterval(timer);
-        reject(new Error('browser_extension_smoke_timeout'));
-      }
-    }, 100);
-  });
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('browser_extension_smoke_timeout');
+}
+
+function withTimeout(promise, timeoutMs, errorCode) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(errorCode)), timeoutMs))
+  ]);
+}
+
+function runtimeMessageWithTimeout(page, message, timeoutMs = 3_000) {
+  return page.evaluate(({ payload, timeout }) => new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    setTimeout(() => finish({ timeout: true }), timeout);
+    chrome.runtime.sendMessage(payload, (response) => {
+      finish({ response, error: chrome.runtime.lastError?.message || '' });
+    });
+  }), { payload: message, timeout: timeoutMs });
 }
 
 function storefront(pathname, searchParams = new URLSearchParams()) {
@@ -799,6 +815,8 @@ async function main() {
     let runnerStatusRequestCount = 0;
     let delayLeaseExpiryCheckpoint = false;
     let dropInspectReviewCheckpointResponse = false;
+    let inspectReviewCheckpointCommitted = false;
+    let releaseDroppedInspectReviewResponse = null;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
@@ -921,6 +939,8 @@ async function main() {
             : state
         };
         if (dropInspectReviewCheckpointResponse && expected.id === 'inspect-before-final-submit') {
+          inspectReviewCheckpointCommitted = true;
+          await new Promise((resolve) => { releaseDroppedInspectReviewResponse = resolve; });
           dropInspectReviewCheckpointResponse = false;
           req.socket.destroy();
           return;
@@ -1535,29 +1555,47 @@ async function main() {
         ...defaultCheckoutProfile,
         paymentCardLast4: '6383'
       }, leaseExpiryPlan.planHash);
-      const leaseRun = await popup.evaluate((sessionId) => new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
-      }), session.id);
-      if (!leaseRun?.ok) fail(`browser_extension_final_submit_lease_start_failed:${leaseRun?.error || 'no_response'}`);
+      const leaseRunPromise = runtimeMessageWithTimeout(
+        popup,
+        { type: 'RUN_PENDING_SESSIONS', sessionId: session.id }
+      );
       if (shouldRecoverLostCheckpoint) {
+        void leaseRunPromise.catch(() => null);
         await waitFor(() => session.extensionMissionPlanState.nextActionIndex === 2
-          && dropInspectReviewCheckpointResponse === false, 10_000);
-        await waitFor(async () => {
-          const state = await popup.evaluate(() => new Promise((resolve) => {
-            chrome.storage.local.get(['lastExecution', 'activeRun'], resolve);
-          }));
-          return state.lastExecution?.status === 'retrying_control_plane'
-            && state.activeRun?.finalSubmitAuthorityLease == null;
-        }, 5_000);
+          && inspectReviewCheckpointCommitted, 10_000);
+        try {
+          const state = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['activeRun'], resolve);
+          })), 3_000, 'browser_extension_lost_checkpoint_storage_timeout');
+          if (state.activeRun?.sessionId !== session.id || state.activeRun?.finalSubmitAuthorityLease != null) {
+            throw new Error('lost_checkpoint_active_run_not_scoped');
+          }
+        } catch (error) {
+          const state = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
+          })), 3_000, 'browser_extension_lost_checkpoint_diagnostics_timeout');
+          fail(`browser_extension_lost_checkpoint_not_interruptible:${JSON.stringify({ state, sessionState: session.extensionMissionPlanState, error: error.message })}`);
+        }
         const cdp = await context.newCDPSession(popup);
         await cdp.send('ServiceWorker.enable');
-        await cdp.send('ServiceWorker.stopAllWorkers');
+        await withTimeout(
+          cdp.send('ServiceWorker.stopAllWorkers'),
+          10_000,
+          'browser_extension_lost_checkpoint_worker_stop_timeout'
+        );
+        releaseDroppedInspectReviewResponse?.();
         await new Promise((resolve) => setTimeout(resolve, 250));
-        const resumed = await popup.evaluate((sessionId) => new Promise((resolve) => {
-          chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
-        }), session.id);
-        if (!resumed?.ok || resumed?.result?.status === 'already_running') {
+        const resumed = await runtimeMessageWithTimeout(
+          popup,
+          { type: 'RUN_PENDING_SESSIONS', sessionId: session.id }
+        );
+        if (resumed?.response && (!resumed.response.ok || resumed.response.result?.status === 'already_running')) {
           fail(`browser_extension_lost_checkpoint_resume_failed:${JSON.stringify(resumed)}`);
+        }
+      } else {
+        const leaseRun = await leaseRunPromise;
+        if (leaseRun?.response && !leaseRun.response.ok) {
+          fail(`browser_extension_final_submit_lease_start_failed:${leaseRun?.error || leaseRun?.response?.error || 'no_response'}`);
         }
       }
       try {
@@ -1566,15 +1604,16 @@ async function main() {
             return checkpoints.some((checkpoint) => checkpoint.planActionId === 'submit-final-order'
               && checkpoint.browser?.runnerStep?.finalSubmitReceipt?.phase === 'click_dispatched');
           }
-          const state = await popup.evaluate(() => new Promise((resolve) => {
+          const state = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
             chrome.storage.local.get(['lastError', 'activeRun'], resolve);
-          }));
-          return String(state.lastError || '').startsWith('final_submit_authority_lease_expired') && !state.activeRun;
+          })), 3_000, 'browser_extension_final_submit_lease_storage_timeout');
+          return fulfillment?.result?.browserExecution?.stopState === 'final_submit_authorization_rejected'
+            && !state.activeRun;
         }, 15_000);
       } catch {
-        const runnerState = await popup.evaluate(() => new Promise((resolve) => {
+        const runnerState = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
           chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun', 'activeMissionTabs'], resolve);
-        }));
+        })), 3_000, 'browser_extension_final_submit_lease_diagnostics_timeout');
         fail(`browser_extension_final_submit_lease_timeout:${JSON.stringify({
           checkpoints: checkpoints.map((checkpoint) => ({
             actionId: checkpoint.planActionId,
@@ -1595,14 +1634,15 @@ async function main() {
         orderSubmitted: document.body.dataset.orderSubmitted || '',
         receipts: JSON.parse(sessionStorage.getItem('magic_city_browser_action_receipts_v1') || '[]')
       }));
-      const runnerEvidence = await popup.evaluate(() => new Promise((resolve) => {
+      const runnerEvidence = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
         chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
-      }));
+      })), 3_000, 'browser_extension_final_submit_lease_evidence_timeout');
       const finalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
       const checkpointReceipts = finalCheckpoint?.browser?.browserActionReceipts || [];
       if (shouldExpireAfterCheckpoint) {
         if (fulfillment?.status !== 'failed'
           || fulfillment?.result?.browserExecution?.stopState !== 'final_submit_authorization_rejected'
+          || !String(fulfillment?.result?.browserExecution?.stopEvidence || '').includes('final_submit_authority_lease_expired')
           || browserEvidence.nativeClick
           || browserEvidence.orderSubmitted
           || browserEvidence.receipts.some((receipt) => receipt?.kind === 'final_order')

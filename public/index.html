@@ -15180,6 +15180,12 @@
 		      return ['fulfilled', 'failed'].includes(String(status || '').toLowerCase());
 		    }
 
+		    function isExecutionSessionDurablyCancelled(session) {
+		      const cancellation = session?.executionCancellation || {};
+		      return Boolean(cancellation.cancelledAt || cancellation.canceledAt)
+		        || ['cancelled', 'canceled'].includes(String(session?.status || '').toLowerCase());
+		    }
+
 		    function isTerminalSantaClawzDirectPaymentStatus(status = '') {
 		      return ['completed', 'payment_failed', 'failed', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
 		    }
@@ -15198,13 +15204,17 @@
 		      const directPayment = session.santaclawzDirectPayment || {};
 		      const summary = directPayment.summary || {};
 		      const items = collectSantaClawzDeliveryItems(session);
-		      const rejected = summary.returnRejected === true
-		        || (summary.terminalFailure === true && summary.returnVerificationPending !== true);
 		      const validationReason = String(summary.returnValidation?.reason || '').trim().toLowerCase();
 		      const validationRejected = summary.returnValidation?.ok === false
 		        && summary.returnValidation?.pending !== true
 		        && validationReason !== 'santaclawz_return_missing'
 		        && validationReason !== 'santaclawz_return_temporarily_unavailable';
+		      const rejected = validationRejected
+		        || summary.returnRejected === true
+		        || (summary.terminalFailure === true && summary.returnVerificationPending !== true);
+		      if (isExecutionSessionDurablyCancelled(session)) {
+		        return { available: items.length > 0, accepted: false, pending: false, rejected: false, cancelled: true, items };
+		      }
 		      const accepted = !rejected
 		        && !validationRejected
 		        && (
@@ -15248,6 +15258,7 @@
       if (!session) return false;
       if (executionDismissedSessions.has(session.id) || executionCancellingSessions.has(session.id)) return false;
 		      const status = String(session.status || '').toLowerCase();
+		      if (isExecutionSessionDurablyCancelled(session)) return false;
 		      if (hasPendingSantaClawzDeliveryVerification(session)) return true;
 		      if (['queued', 'claimed', 'executing'].includes(status)) return true;
 		      if (isTerminalExecutionStatus(status)) return false;
@@ -15328,6 +15339,8 @@
 
 		    function shouldApplyPolledExecutionSession(previousSession, nextSession) {
 		      if (!previousSession || !nextSession) return Boolean(nextSession);
+		      if (isExecutionSessionDurablyCancelled(previousSession)
+		        && !isExecutionSessionDurablyCancelled(nextSession)) return false;
 		      const previousUpdatedAt = Date.parse(String(previousSession.updatedAt || ''));
 		      const nextUpdatedAt = Date.parse(String(nextSession.updatedAt || ''));
 		      if (Number.isFinite(previousUpdatedAt) && Number.isFinite(nextUpdatedAt) && nextUpdatedAt < previousUpdatedAt) {
@@ -15343,11 +15356,13 @@
 	      if (executionPollingRequestsInFlight.has(sessionId)) return { mode: 'coalesced' };
 	      executionPollingRequestsInFlight.add(sessionId);
 	      try {
-	      const previousSession = executionSessionCache.get(sessionId) || null;
-	      const previousBucket = executionPollingRenderBucket(previousSession);
+		      const requestSession = executionSessionCache.get(sessionId) || null;
 	      const { session } = await api(`/connectors/sessions/${sessionId}`);
-	      if (!session || executionCancellingSessions.has(session.id) || executionDismissedSessions.has(session.id)) return;
-	      if (!shouldApplyPolledExecutionSession(previousSession, session)) return { mode: 'stale-response' };
+	      if (!session || String(session.id || '') !== String(sessionId)) return { mode: 'session-mismatch' };
+	      if (executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return;
+	      const latestSession = executionSessionCache.get(sessionId) || requestSession;
+	      if (!shouldApplyPolledExecutionSession(latestSession, session)) return { mode: 'stale-response' };
+	      const previousBucket = executionPollingRenderBucket(latestSession);
 	      const draft = getExecutionDraft(sessionId);
 	      if (draft) {
 	        session.selections = { ...(session.selections || {}), ...(draft.selections || {}) };
@@ -15425,6 +15440,9 @@
       const localError = session?.id ? executionLocalErrors.get(session.id) : null;
       const localWakeError = executionLocalErrorApplies(session, localError)
         && /^extension_wake_(failed|rejected):/.test(String(localError?.code || ''));
+      if (isExecutionSessionDurablyCancelled(session)) {
+        return { statusValue: 'cancelled', label: 'Cancelled', cls: 'failed', phase: 2 };
+      }
       if (sessionHasBrowserOrderSubmitted(session)) {
         return { statusValue: 'fulfilled', label: 'Order placed', cls: 'completed', phase: 2 };
       }
@@ -15571,6 +15589,13 @@
       const travelMode = kind === 'travel'
         ? resolveTravelModeValue(session.selections?.travelMode || session.paymentOrchestration?.travelMode || 'itinerary_build')
         : '';
+      if (isExecutionSessionDurablyCancelled(session)) {
+        return {
+          title: 'Cancelled',
+          detail: 'This run was cancelled. Any report already returned remains available.',
+          badgeLabel: 'Cancelled'
+        };
+      }
       if (kind === 'browser' && browserOrderSubmitted) {
         return {
           title: 'Order submitted',

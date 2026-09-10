@@ -1,13 +1,35 @@
 import crypto from 'node:crypto';
 
-const VOLATILE_STATUS_KEY = /(?:^|_)(?:age|freshness|heartbeat|poll|timestamp)(?:_|$)|(?:at|at_iso|atiso)$/i;
+const VOLATILE_STATUS_KEYS = new Set([
+  'checkedat',
+  'checkedatiso',
+  'generatedat',
+  'generatedatiso',
+  'heartbeatat',
+  'heartbeatatiso',
+  'lastcheckedat',
+  'lastheartbeatat',
+  'lastheartbeatatiso',
+  'laststatusat',
+  'polledat',
+  'pollstartedat',
+  'runtimeStatusUpdatedAtIso'.toLowerCase(),
+  'stateprojectionupdatedat',
+  'stateprojectionupdatedatiso',
+  'updatedat',
+  'updatedatiso'
+]);
+
+function isVolatileStatusKey(key) {
+  return VOLATILE_STATUS_KEYS.has(String(key || '').replace(/[_-]/g, '').toLowerCase());
+}
 
 function normalizeSemanticValue(value) {
   if (Array.isArray(value)) return value.map((entry) => normalizeSemanticValue(entry));
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value)
-        .filter(([key, nested]) => nested !== undefined && !VOLATILE_STATUS_KEY.test(String(key)))
+        .filter(([key, nested]) => nested !== undefined && !isVolatileStatusKey(key))
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([key, nested]) => [key, normalizeSemanticValue(nested)])
     );

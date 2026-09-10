@@ -6,7 +6,8 @@ import { chromium } from 'playwright';
 const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 
 function extractFunctionSource(name) {
-  const start = html.indexOf(`function ${name}(`);
+  const asyncStart = html.indexOf(`async function ${name}(`);
+  const start = asyncStart >= 0 ? asyncStart : html.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing inline function ${name}`);
   const remainder = html.slice(start + 1);
   const nextFunction = remainder.search(/\n\s*function\s+[A-Za-z0-9_$]+\s*\(/);
@@ -96,6 +97,9 @@ const context = {
   executionSessionCache: new Map([[session.id, session]]),
   executionPendingSessions: new Set([session.id]),
   executionProtocolPollingSessions: new Set([session.id]),
+  executionPollingRequestsInFlight: new Set(),
+  executionDismissedSessions: new Set(),
+  executionCancellingSessions: new Set(),
   executionLocalErrors: new Map(),
   isTerminalExecutionStatus: (status) => ['fulfilled', 'failed'].includes(String(status || '').toLowerCase()),
   isAwaitingExecutionConfirmation: () => false,
@@ -107,7 +111,14 @@ const context = {
   escapeHtml: (value) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
   renderExecutionVerification: () => '',
   renderSantaClawzDirectPaymentPanel: () => '',
-  renderSantaClawzDeliveryPanel: () => '<div>compact audit panel</div>'
+  renderSantaClawzDeliveryPanel: () => '<div>compact audit panel</div>',
+  getExecutionDraft: () => null,
+  syncExecutionProtocolPollingSession: () => false,
+  clearExecutionRunnerProgress: () => {},
+  clearSelectedAgentExecution: () => {},
+  refreshExecutionPanelInPlace: () => true,
+  renderExecutionSheet: async () => {},
+  ensureExecutionPolling: () => {}
 };
 vm.createContext(context);
 vm.runInContext([
@@ -125,6 +136,7 @@ vm.runInContext([
   extractFunctionSource('getSantaClawzAuditHighestSeverity'),
   extractFunctionSource('getSantaClawzAuditFindingCount'),
   extractFunctionSource('getSantaClawzAuditSummary'),
+  extractFunctionSource('isExecutionSessionDurablyCancelled'),
   extractFunctionSource('getSantaClawzDeliveryVerificationState'),
   extractFunctionSource('hasPendingSantaClawzDeliveryVerification'),
   extractFunctionSource('hasReadySantaClawzDelivery'),
@@ -133,7 +145,10 @@ vm.runInContext([
   extractFunctionSource('getExecutionStatusModel'),
   extractFunctionSource('shouldShowExecutionActivityBar'),
   extractFunctionSource('describeExecutionRunState'),
+  extractFunctionSource('shouldPollExecutionSession'),
+  extractFunctionSource('executionPollingRenderBucket'),
   extractFunctionSource('shouldApplyPolledExecutionSession'),
+  extractFunctionSource('refreshExecutionSessionForPolling'),
   extractFunctionSource('renderExecutionResult')
 ].join('\n'), context);
 const helpers = vm.runInContext(`({
@@ -144,7 +159,9 @@ const helpers = vm.runInContext(`({
   getExecutionStatusModel,
   shouldShowExecutionActivityBar,
   describeExecutionRunState,
+  shouldPollExecutionSession,
   shouldApplyPolledExecutionSession,
+  refreshExecutionSessionForPolling,
   renderSantaClawzCodeAuditPanel,
   openSantaClawzAuditOutput,
   renderExecutionResult
@@ -180,6 +197,47 @@ const staleAcceptedSession = structuredClone(acceptedSession);
 staleAcceptedSession.updatedAt = '2026-09-10T06:46:00.000Z';
 assert.equal(helpers.shouldApplyPolledExecutionSession(acceptedSession, staleAcceptedSession), false);
 assert.equal(helpers.shouldApplyPolledExecutionSession(watchdogFailedSession, acceptedSession), true);
+
+const cancelledSession = structuredClone(watchdogFailedSession);
+cancelledSession.executionCancellation = { cancelledAt: '2026-09-10T06:47:30.000Z' };
+assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(cancelledSession), false);
+assert.equal(helpers.shouldPollExecutionSession(cancelledSession), false);
+assert.equal(helpers.getExecutionStatusModel(cancelledSession).label, 'Cancelled');
+assert.equal(helpers.describeExecutionRunState(cancelledSession, helpers.getExecutionStatusModel(cancelledSession)).title, 'Cancelled');
+assert.match(helpers.renderSantaClawzCodeAuditPanel(cancelledSession, helpers.collectSantaClawzDeliveryItems(cancelledSession)), /Open report/);
+const preCancellationResponse = structuredClone(watchdogFailedSession);
+preCancellationResponse.updatedAt = cancelledSession.updatedAt;
+assert.equal(helpers.shouldApplyPolledExecutionSession(cancelledSession, preCancellationResponse), false);
+
+const rejectedSession = structuredClone(watchdogFailedSession);
+rejectedSession.santaclawzDirectPayment.summary.returnValidation = {
+  ok: false,
+  reason: 'artifact_hash_mismatch',
+  pending: false,
+  retryable: false
+};
+assert.equal(helpers.getSantaClawzDeliveryVerificationState(rejectedSession).rejected, true);
+assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(rejectedSession), false);
+assert.equal(helpers.shouldPollExecutionSession(rejectedSession), false);
+
+let resolvePollingRequest;
+context.api = () => new Promise((resolve) => { resolvePollingRequest = resolve; });
+const pollingBase = structuredClone(session);
+pollingBase.id = 'cs-poll-race';
+pollingBase.status = 'executing';
+pollingBase.updatedAt = '2026-09-10T06:47:00.000Z';
+context.executionSessionCache.set(pollingBase.id, pollingBase);
+const delayedRefresh = helpers.refreshExecutionSessionForPolling(pollingBase.id);
+await new Promise((resolve) => setImmediate(resolve));
+const newerFulfilled = structuredClone(acceptedSession);
+newerFulfilled.id = pollingBase.id;
+newerFulfilled.updatedAt = '2026-09-10T06:49:00.000Z';
+context.executionSessionCache.set(pollingBase.id, newerFulfilled);
+const staleResponse = structuredClone(pollingBase);
+staleResponse.updatedAt = '2026-09-10T06:48:00.000Z';
+resolvePollingRequest({ session: staleResponse });
+assert.equal((await delayedRefresh).mode, 'stale-response');
+assert.equal(context.executionSessionCache.get(pollingBase.id).status, 'fulfilled');
 
 const panel = helpers.renderSantaClawzCodeAuditPanel(session, items);
 assert.match(panel, /Highest severity[\s\S]*high/i);

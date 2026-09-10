@@ -58,6 +58,26 @@ timestampOnlyUpdate.santaclawzDirectPayment.paymentState.ledger.forEach((entry) 
 timestampOnlyUpdate.santaclawzDirectPayment.executionState.stateProjectionUpdatedAtIso = '2026-09-10T06:41:00.000Z';
 assert.equal(hasSemanticSantaClawzStatusChanged(productionShapedState, timestampOnlyUpdate), false);
 
+const heartbeatOnlyUpdate = structuredClone(timestampOnlyUpdate);
+heartbeatOnlyUpdate.santaclawzDirectPayment.heartbeatAt = '2026-09-10T06:42:00.000Z';
+assert.equal(hasSemanticSantaClawzStatusChanged(timestampOnlyUpdate, heartbeatOnlyUpdate), false);
+
+const artifactFormatChange = structuredClone(timestampOnlyUpdate);
+artifactFormatChange.santaclawzDirectPayment.delivery.artifacts[0].format = 'json';
+assert.equal(hasSemanticSantaClawzStatusChanged(timestampOnlyUpdate, artifactFormatChange), true);
+
+const artifactContentChange = structuredClone(timestampOnlyUpdate);
+artifactContentChange.santaclawzDirectPayment.delivery.inlineOutputs[0] = '# Audit\n\nChanged result.';
+assert.equal(hasSemanticSantaClawzStatusChanged(timestampOnlyUpdate, artifactContentChange), true);
+
+const proofChange = structuredClone(timestampOnlyUpdate);
+proofChange.santaclawzDirectPayment.summary.returnValidation.proofHash = 'b'.repeat(64);
+assert.equal(hasSemanticSantaClawzStatusChanged(timestampOnlyUpdate, proofChange), true);
+
+const expiryChange = structuredClone(timestampOnlyUpdate);
+expiryChange.santaclawzDirectPayment.expiresAt = '2026-09-10T07:40:00.000Z';
+assert.equal(hasSemanticSantaClawzStatusChanged(timestampOnlyUpdate, expiryChange), true);
+
 const settlementTransition = structuredClone(timestampOnlyUpdate);
 settlementTransition.creditReservation.status = 'settled';
 assert.equal(hasSemanticSantaClawzStatusChanged(productionShapedState, settlementTransition), true);
