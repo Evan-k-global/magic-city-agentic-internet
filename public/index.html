@@ -15200,8 +15200,11 @@
 		      const items = collectSantaClawzDeliveryItems(session);
 		      const rejected = summary.returnRejected === true
 		        || (summary.terminalFailure === true && summary.returnVerificationPending !== true);
+		      const validationReason = String(summary.returnValidation?.reason || '').trim().toLowerCase();
 		      const validationRejected = summary.returnValidation?.ok === false
-		        && summary.returnValidation?.pending !== true;
+		        && summary.returnValidation?.pending !== true
+		        && validationReason !== 'santaclawz_return_missing'
+		        && validationReason !== 'santaclawz_return_temporarily_unavailable';
 		      const accepted = !rejected
 		        && !validationRejected
 		        && (

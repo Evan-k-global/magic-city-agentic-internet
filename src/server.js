@@ -15758,7 +15758,9 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
       cached: true
     };
   }
-  if (['fulfilled', 'failed'].includes(String(result?.session?.status || '').toLowerCase())) {
+  const resultStatus = String(result?.session?.status || '').toLowerCase();
+  const terminalFailure = result?.session?.santaclawzDirectPayment?.summary?.terminalFailure === true;
+  if (resultStatus === 'fulfilled' || terminalFailure) {
     santaClawzStatusRefreshCoordinator.clear(key);
   }
   return result;

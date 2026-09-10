@@ -53,6 +53,17 @@ const session = {
   santaclawzDirectPayment: {
     status: 'submitted',
     paymentPayloadDigestSha256: 'a'.repeat(64),
+    summary: {
+      completed: false,
+      terminalFailure: false,
+      returnRejected: false,
+      returnValidation: {
+        ok: false,
+        reason: 'santaclawz_return_missing',
+        pending: false,
+        retryable: false
+      }
+    },
     delivery: {
       inlineOutputs: [
         { label: 'Inline Markdown', content: markdown },
