@@ -1801,6 +1801,37 @@ async function assertRunnerSessionActive(session) {
   return data.session || session;
 }
 
+function persistedFinalSubmitCursorMatches(session = {}, plan = {}, action = {}) {
+  const planState = session.extensionMissionPlanState || {};
+  const actionIndex = Number(planState.nextActionIndex);
+  if (planState.planHash !== plan.planHash || !Number.isInteger(actionIndex) || actionIndex < 0) return false;
+  const persistedAction = plan.actions?.[actionIndex];
+  if (persistedAction?.type !== 'final_submit' || persistedAction.id !== action.id) return false;
+  const previousAction = plan.actions?.[actionIndex - 1] || null;
+  if (!previousAction) return false;
+  const completedActionIds = new Set(Array.isArray(planState.completedActionIds) ? planState.completedActionIds : []);
+  if (!completedActionIds.has(previousAction.id)) return false;
+  if (previousAction.expectedMilestone) {
+    const milestones = new Set(Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : []);
+    if (!milestones.has(previousAction.expectedMilestone)) return false;
+  }
+  return true;
+}
+
+async function recoverMissingFinalSubmitAuthorityLease(session, plan, action) {
+  const refreshedSession = await assertRunnerSessionActive(session);
+  const refreshedPlan = await validatePlanForSession(refreshedSession);
+  if (refreshedPlan.planHash !== plan.planHash
+    || !persistedFinalSubmitCursorMatches(refreshedSession, refreshedPlan, action)) {
+    return { session: refreshedSession, lease: null };
+  }
+  assertLocalMissionAuthority(refreshedSession);
+  return {
+    session: refreshedSession,
+    lease: issueFinalSubmitAuthorityLease(refreshedSession, refreshedPlan, action)
+  };
+}
+
 async function assertFinalSubmitChainAuthorization(session, plan, action) {
   const config = await getConfig();
   let lastError = null;
@@ -3519,6 +3550,15 @@ async function runSession(rawSession) {
       // capability must still be current and the runner must have observed a
       // live session within one short lease window before dispatch.
       if (action.type === 'final_submit' && !recoveredFinalOrderAlreadyConfirmed) {
+	        if (!finalSubmitAuthorityLease) {
+	          const recoveredAuthority = await recoverMissingFinalSubmitAuthorityLease(session, plan, action);
+	          session = recoveredAuthority.session;
+	          finalSubmitAuthorityLease = recoveredAuthority.lease;
+	          if (finalSubmitAuthorityLease) {
+	            authorityVerifiedAt = Date.now();
+	            await saveActiveRun({ finalSubmitAuthorityLease });
+	          }
+	        }
         assertFinalSubmitLocalAuthority(session, finalSubmitAuthorityLease, plan, action);
         if (session.finalSubmitChainAuthorization) {
           session = await assertFinalSubmitChainAuthorization(session, plan, action);

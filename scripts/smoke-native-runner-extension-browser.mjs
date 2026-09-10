@@ -796,7 +796,9 @@ async function main() {
     // while status reporting is temporarily unavailable at final review.
     let blockRunnerStatusForFinalDispatch = false;
     let blockedFinalRunnerStatusCalls = 0;
+    let runnerStatusRequestCount = 0;
     let delayLeaseExpiryCheckpoint = false;
+    let dropInspectReviewCheckpointResponse = false;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
@@ -862,6 +864,7 @@ async function main() {
         return json(res, 404, { error: 'test_claim_session_not_found' });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/runner-status')) {
+        runnerStatusRequestCount += 1;
         session = renewTestCapability(session);
         const nextAction = session?.extensionMissionPlan?.actions?.[session?.extensionMissionPlanState?.nextActionIndex || 0];
         if (blockRunnerStatusForFinalDispatch && nextAction?.id === 'submit-final-order') {
@@ -917,6 +920,11 @@ async function main() {
               }
             : state
         };
+        if (dropInspectReviewCheckpointResponse && expected.id === 'inspect-before-final-submit') {
+          dropInspectReviewCheckpointResponse = false;
+          req.socket.destroy();
+          return;
+        }
         return json(res, 200, { updated: true, session });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/fulfill')) {
@@ -981,7 +989,7 @@ async function main() {
     const extensionDir = copyTestExtension(tmpDir, baseUrl, {
       // Test the actual MV3/browser boundary with a short copied lease rather
       // than exporting production internals or waiting forty-five seconds.
-      finalSubmitLeaseMs: /^final-submit-lease-(?:renewal|expiry)$/.test(smokeMode) ? 1_000 : null,
+      finalSubmitLeaseMs: /^final-submit-lease-(?:renewal|expiry|lost-checkpoint)$/.test(smokeMode) ? 1_000 : null,
       finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null
     });
     const profileDir = path.join(tmpDir, 'profile');
@@ -1456,8 +1464,9 @@ async function main() {
       console.log('native-runner focused recovery smoke passed');
       return;
     }
-    if (/^final-submit-lease-(?:renewal|expiry)$/.test(smokeMode)) {
+    if (/^final-submit-lease-(?:renewal|expiry|lost-checkpoint)$/.test(smokeMode)) {
       const shouldExpireAfterCheckpoint = smokeMode === 'final-submit-lease-expiry';
+      const shouldRecoverLostCheckpoint = smokeMode === 'final-submit-lease-lost-checkpoint';
       // Drive the real worker through navigation, a normal inspection
       // checkpoint, and then the irreversible final-submit action. The
       // renewal case lets the original copied one-second lease expire while
@@ -1479,7 +1488,9 @@ async function main() {
       };
       checkpoints.length = 0;
       fulfillment = null;
-      delayLeaseExpiryCheckpoint = !shouldExpireAfterCheckpoint;
+      delayLeaseExpiryCheckpoint = !shouldExpireAfterCheckpoint && !shouldRecoverLostCheckpoint;
+      dropInspectReviewCheckpointResponse = shouldRecoverLostCheckpoint;
+      if (shouldRecoverLostCheckpoint) transientRunnerStatusFailures = 0;
       const leaseExpiryPlan = rehashExtensionPlan({
         ...plan,
         planId: 'mplan_browser-smoke-final-submit-lease',
@@ -1494,7 +1505,7 @@ async function main() {
           {
             ...plan.actions.find((action) => action.id === 'inspect-review'),
             id: 'inspect-before-final-submit',
-            expectedMilestone: undefined
+            ...(shouldRecoverLostCheckpoint ? {} : { expectedMilestone: undefined })
           },
           {
             ...plan.actions.find((action) => action.id === 'submit-final-order'),
@@ -1528,18 +1539,40 @@ async function main() {
         chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
       }), session.id);
       if (!leaseRun?.ok) fail(`browser_extension_final_submit_lease_start_failed:${leaseRun?.error || 'no_response'}`);
+      if (shouldRecoverLostCheckpoint) {
+        await waitFor(() => session.extensionMissionPlanState.nextActionIndex === 2
+          && dropInspectReviewCheckpointResponse === false, 10_000);
+        await waitFor(async () => {
+          const state = await popup.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['lastExecution', 'activeRun'], resolve);
+          }));
+          return state.lastExecution?.status === 'retrying_control_plane'
+            && state.activeRun?.finalSubmitAuthorityLease == null;
+        }, 5_000);
+        const cdp = await context.newCDPSession(popup);
+        await cdp.send('ServiceWorker.enable');
+        await cdp.send('ServiceWorker.stopAllWorkers');
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const resumed = await popup.evaluate((sessionId) => new Promise((resolve) => {
+          chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+        }), session.id);
+        if (!resumed?.ok || resumed?.result?.status === 'already_running') {
+          fail(`browser_extension_lost_checkpoint_resume_failed:${JSON.stringify(resumed)}`);
+        }
+      }
       try {
         await waitFor(async () => {
-          const state = await worker.evaluate(() => new Promise((resolve) => {
+          if (!shouldExpireAfterCheckpoint) {
+            return checkpoints.some((checkpoint) => checkpoint.planActionId === 'submit-final-order'
+              && checkpoint.browser?.runnerStep?.finalSubmitReceipt?.phase === 'click_dispatched');
+          }
+          const state = await popup.evaluate(() => new Promise((resolve) => {
             chrome.storage.local.get(['lastError', 'activeRun'], resolve);
           }));
-          return shouldExpireAfterCheckpoint
-            ? String(state.lastError || '').startsWith('final_submit_authority_lease_expired') && !state.activeRun
-            : checkpoints.some((checkpoint) => checkpoint.planActionId === 'submit-final-order'
-              && checkpoint.browser?.runnerStep?.finalSubmitReceipt?.phase === 'click_dispatched');
+          return String(state.lastError || '').startsWith('final_submit_authority_lease_expired') && !state.activeRun;
         }, 15_000);
       } catch {
-        const runnerState = await worker.evaluate(() => new Promise((resolve) => {
+        const runnerState = await popup.evaluate(() => new Promise((resolve) => {
           chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun', 'activeMissionTabs'], resolve);
         }));
         fail(`browser_extension_final_submit_lease_timeout:${JSON.stringify({
@@ -1562,7 +1595,7 @@ async function main() {
         orderSubmitted: document.body.dataset.orderSubmitted || '',
         receipts: JSON.parse(sessionStorage.getItem('magic_city_browser_action_receipts_v1') || '[]')
       }));
-      const runnerEvidence = await worker.evaluate(() => new Promise((resolve) => {
+      const runnerEvidence = await popup.evaluate(() => new Promise((resolve) => {
         chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
       }));
       const finalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
@@ -1589,12 +1622,16 @@ async function main() {
           fulfillment,
           runnerEvidence,
           browserEvidence,
-          checkpoint: finalCheckpoint || null
+          checkpoint: finalCheckpoint || null,
+          sessionState: session.extensionMissionPlanState,
+          runnerStatusCalls: runnerStatusRequestCount
         })}`);
       }
       recordPurchaseScenario(
         shouldExpireAfterCheckpoint
           ? 'Expired final-submit lease blocks the native Amazon click and receipts'
+          : shouldRecoverLostCheckpoint
+            ? 'Lost review-checkpoint response recovers one exact final-submit lease after worker restart'
           : 'Fresh signed review checkpoint renews the exact final-submit lease once',
         shouldExpireAfterCheckpoint
           ? {
