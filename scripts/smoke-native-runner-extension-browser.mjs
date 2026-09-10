@@ -820,6 +820,8 @@ async function main() {
     let releaseDroppedInspectReviewResponse = null;
     let dropPrepareCartCheckpointResponse = false;
     let prepareCartCheckpointCommittedAtMs = 0;
+    let dropPrepareCartCheckpointConnection = false;
+    let prepareCartConnectionDroppedAtMs = 0;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
@@ -905,6 +907,15 @@ async function main() {
         const plan = session.extensionMissionPlan;
         const state = session.extensionMissionPlanState;
         const expected = plan.actions[state.nextActionIndex];
+        const latestCheckpoint = checkpoints.at(-1);
+        const exactReplay = Boolean(
+          latestCheckpoint
+          && latestCheckpoint.planHash === body.planHash
+          && latestCheckpoint.planActionId === body.planActionId
+          && latestCheckpoint.planActionStatus === body.planActionStatus
+          && latestCheckpoint.runnerTiming?.checkpointRequestedAt === body.runnerTiming?.checkpointRequestedAt
+        );
+        if (exactReplay) return json(res, 200, { updated: true, replayed: true, session });
         if (!expected || expected.id !== body.planActionId || expected.missionAction !== body.missionAction) {
           return json(res, 409, { error: 'test_plan_step_out_of_order' });
         }
@@ -952,6 +963,14 @@ async function main() {
           dropPrepareCartCheckpointResponse = false;
           prepareCartCheckpointCommittedAtMs = Date.now();
           return json(res, 503, { error: 'test_committed_checkpoint_response_lost' });
+        }
+        if (dropPrepareCartCheckpointConnection && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
+          dropPrepareCartCheckpointConnection = false;
+          prepareCartConnectionDroppedAtMs = Date.now();
+          await context.setOffline(true);
+          setTimeout(() => { void context.setOffline(false).catch(() => null); }, 120);
+          req.socket.destroy();
+          return;
         }
         return json(res, 200, { updated: true, session });
       }
@@ -1236,6 +1255,72 @@ async function main() {
       await cartPage.close();
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner already-open cart smoke passed');
+      return;
+    }
+    if (smokeMode === 'cart-checkpoint-connection-drop') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      transientRunnerStatusFailures = 0;
+      slowInitialSearchResponse = false;
+      dropPrepareCartCheckpointConnection = true;
+      stopAfterAlreadyOpenCartCheckpoint = true;
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        const progress = [];
+        const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+        port.onMessage.addListener((payload) => {
+          if (payload?.type === 'RUNNER_PROGRESS') progress.push(payload);
+          if (payload?.type === 'RUNNER_RESULT') resolve({ payload, progress });
+        });
+        port.onDisconnect.addListener(() => resolve({ disconnected: true, progress }));
+        port.postMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'browser-smoke-cart-connection-drop'
+        });
+      }), { extensionId, sessionId: session.id });
+      try {
+        await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-cart'
+          && checkpoint.planActionStatus !== 'waiting'), 10_000);
+      } catch {
+        const runnerState = await popup.evaluate(() => chrome.storage.local.get([
+          'lastError', 'lastExecution', 'activeSessionId', 'activeRun'
+        ]));
+        fail(`browser_extension_cart_connection_drop_timeout:${JSON.stringify({ checkpoints, runnerState, session })}`);
+      }
+      const wake = await withTimeout(wakePromise, 10_000, 'browser_extension_cart_connection_drop_wake_timeout');
+      const nextCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-cart'
+        && checkpoint.planActionStatus !== 'waiting');
+      const recoveryMs = Number(nextCheckpoint?.testReceivedAtMs || 0) - prepareCartConnectionDroppedAtMs;
+      const prepareCartCheckpointCount = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'prepare-cart').length;
+      const sawReconnectingRunner = (wake.progress || []).some((entry) => (
+        entry?.activeRun?.progressState === 'reconnecting_control_plane'
+        && entry?.activeRun?.progressLabel === 'Reconnecting Runner'
+      ));
+      if (prepareCartConnectionDroppedAtMs <= 0
+        || recoveryMs <= 0
+        || recoveryMs >= 8_000
+        || prepareCartCheckpointCount !== 1
+        || !sawReconnectingRunner
+        || nextCheckpoint?.browser?.runnerStep?.controlStrategy !== 'amazon_cart_already_open') {
+        fail(`browser_extension_cart_connection_drop_recovery_failed:${JSON.stringify({
+          prepareCartConnectionDroppedAtMs,
+          recoveryMs,
+          prepareCartCheckpointCount,
+          sawReconnectingRunner,
+          nextCheckpoint,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Literal cart checkpoint connection drop reconciles without replay', {
+        recoveryMs,
+        prepareCartCheckpointCount,
+        strategy: nextCheckpoint.browser.runnerStep.controlStrategy
+      });
+      await wakePage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner cart checkpoint connection-drop smoke passed');
       return;
     }
     if (smokeMode === 'claim-rejection') {

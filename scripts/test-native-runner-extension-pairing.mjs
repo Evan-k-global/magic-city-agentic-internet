@@ -612,30 +612,57 @@ async function main() {
     if (badPlanStep.response.status !== 409) {
       throw new Error(`extension_out_of_order_plan_step_not_rejected:${badPlanStep.response.status}:${JSON.stringify(badPlanStep.data)}`);
     }
+    const openedCheckpointBody = {
+      pluginId: 'magic-city-runner-extension',
+      label: 'Opened Amazon',
+      missionAction: 'browser_open',
+      targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars',
+      planHash: extensionPlan.planHash,
+      planActionId: 'open-site',
+      planActionStatus: 'completed',
+      browser: { url: 'https://www.amazon.com/s?k=nature+valley+granola+bars', title: 'Amazon search' },
+      runnerTiming: {
+        workerStartedAt: '2026-09-10T17:00:00.000Z',
+        checkpointRequestedAt: '2026-09-10T17:00:01.000Z'
+      },
+      proofOfPossession: buildPopProof({
+        keyPair: holderKey,
+        session: permissionCheckpoint.data.session,
+        action: 'browser_open',
+        targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars'
+      })
+    };
     const openedCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
       method: 'POST',
       bearer: token,
       runnerSurface: 'chrome-extension',
       runnerProtocol: 'declarative-v1',
-      body: {
-        pluginId: 'magic-city-runner-extension',
-        label: 'Opened Amazon',
-        missionAction: 'browser_open',
-        targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars',
-        planHash: extensionPlan.planHash,
-        planActionId: 'open-site',
-        planActionStatus: 'completed',
-        browser: { url: 'https://www.amazon.com/s?k=nature+valley+granola+bars', title: 'Amazon search' },
-        proofOfPossession: buildPopProof({
-          keyPair: holderKey,
-          session: permissionCheckpoint.data.session,
-          action: 'browser_open',
-          targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars'
-        })
-      }
+      body: openedCheckpointBody
     });
     if (!openedCheckpoint.response.ok || openedCheckpoint.data.session?.extensionMissionPlanState?.nextActionIndex !== 1) {
       throw new Error(`extension_open_plan_step_failed:${openedCheckpoint.response.status}:${JSON.stringify(openedCheckpoint.data)}`);
+    }
+    const replayedOpenedCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: openedCheckpointBody
+    });
+    if (!replayedOpenedCheckpoint.response.ok
+      || replayedOpenedCheckpoint.data.replayed !== true
+      || replayedOpenedCheckpoint.data.session?.extensionMissionPlanState?.nextActionIndex !== 1) {
+      throw new Error(`extension_exact_checkpoint_replay_not_recovered:${replayedOpenedCheckpoint.response.status}:${JSON.stringify(replayedOpenedCheckpoint.data)}`);
+    }
+    const alteredCheckpointReplay = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: { ...openedCheckpointBody, label: 'Altered replay must fail' }
+    });
+    if (alteredCheckpointReplay.response.status !== 409) {
+      throw new Error(`extension_altered_checkpoint_replay_not_rejected:${alteredCheckpointReplay.response.status}:${JSON.stringify(alteredCheckpointReplay.data)}`);
     }
     const nextPlanAction = extensionPlan.actions?.[1];
     if (!nextPlanAction?.id || !nextPlanAction?.missionAction) {

@@ -7155,6 +7155,33 @@ function enforceExtensionMissionPlanStep(session, body = {}, missionAction = '')
   };
 }
 
+function extensionCheckpointRequestHash(body = {}, { browser = null, runnerTiming = null, missionAction = '' } = {}) {
+  if (!String(runnerTiming?.checkpointRequestedAt || '').trim()) return null;
+  return hashHex(stableJsonStringify(sanitizeMetadata({
+    pluginId: body.pluginId,
+    label: body.label,
+    detail: body.detail || null,
+    state: body.state || 'running',
+    missionAction,
+    targetUrl: body.targetUrl || null,
+    browser,
+    runnerTiming,
+    planHash: body.planHash || null,
+    planActionId: body.planActionId || null,
+    planActionStatus: body.planActionStatus || 'completed',
+    milestoneProtocol: body.milestoneProtocol || null,
+    verifiedMilestones: Array.isArray(body.verifiedMilestones) ? body.verifiedMilestones : [],
+    userApproved: body.userApproved === true,
+    proofOfPossession: body.proofOfPossession || body.pop || null
+  })));
+}
+
+function isExactExtensionCheckpointReplay(session = {}, requestHash = '') {
+  if (!requestHash) return false;
+  const latest = Array.isArray(session.executionTrace) ? session.executionTrace.at(-1) : null;
+  return Boolean(latest?.extensionPlan && latest.checkpointRequestHash === requestHash);
+}
+
 function formatConnectorSessionForExtension(session = null) {
   if (!session) return null;
   const selections = pickExtensionBrowserSelections(session.finalSelections || session.selections || {});
@@ -20194,6 +20221,17 @@ const server = http.createServer(async (req, res) => {
         : null;
       const missionAction = String(body.missionAction || body.action || '').trim()
         || (browser?.url || browser?.currentUrl ? 'read_public_page' : 'inspect');
+      const checkpointRequestHash = isChromeExtensionDeclarativeRunnerRequest(req)
+        ? extensionCheckpointRequestHash(body, { browser, runnerTiming, missionAction })
+        : null;
+      if (isExactExtensionCheckpointReplay(session, checkpointRequestHash)) {
+        nativeRunnerRequestTiming?.mark('responseReady', { checkpointLabel: String(body.label), replayed: true });
+        return sendJson(res, 200, {
+          updated: true,
+          replayed: true,
+          session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId)
+        });
+      }
       const extensionPlan = isChromeExtensionDeclarativeRunnerRequest(req)
         ? enforceExtensionMissionPlanStep(session, body, missionAction)
         : null;
@@ -20239,6 +20277,7 @@ const server = http.createServer(async (req, res) => {
         state: checkpointState,
         browser,
         runnerTiming,
+        ...(checkpointRequestHash ? { checkpointRequestHash } : {}),
         extensionPlan: extensionPlan?.binding || null,
         createdAt: checkpointCreatedAt
       });

@@ -206,6 +206,18 @@ if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackgr
   if (smoke.error) fail(smoke.error.message);
   if (smoke.status !== 0) fail(`browser smoke exited with ${smoke.status}`);
 
+  const connectionDropSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+      MAGIC_CITY_BROWSER_SMOKE_FOCUS: 'cart-checkpoint-connection-drop'
+    },
+    stdio: 'inherit'
+  });
+  if (connectionDropSmoke.error) fail(connectionDropSmoke.error.message);
+  if (connectionDropSmoke.status !== 0) fail(`cart checkpoint connection-drop smoke exited with ${connectionDropSmoke.status}`);
+
   console.log(`native-runner extension release package smoke passed: ${zipPath}`);
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });
