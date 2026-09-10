@@ -18652,7 +18652,7 @@
 			            ${stateLinks ? `<div class="execution-proof-links">${stateLinks}</div>` : ''}
 			            ${terminalFailure
 			              ? `<div class="execution-output-wait">${escapeExecutionValue(failureMessage)}</div>`
-			              : codeAuditPanel || (items.length ? renderExecutionDeliveryItems(items) : '<div class="execution-output-wait">Preparing delivery links...</div>')}
+			              : codeAuditPanel || (items.length ? renderExecutionDeliveryItems(items) : '')}
 		          </div>
 		        </div>
 		      `;
@@ -18825,7 +18825,7 @@
 	        return `${directX402Panel}${santaClawzDeliveryPanel}${verification}<div class="execution-muted">Failed.${failedReason ? `<br />${escapeExecutionValue(compactExecutionSentence(failedReason, 110))}` : ''}</div>`;
       }
 	      if (['queued', 'claimed', 'executing'].includes(String(session.status || ''))) {
-	        return `${directX402Panel}${santaClawzDeliveryPanel}${hasReadySantaClawzDelivery(session) || hasPendingSantaClawzDeliveryVerification(session) ? '' : `<div class="execution-output-wait">${directX402Panel || santaClawzDeliveryPanel ? 'Polling delivery.' : 'Running.'}</div>`}`;
+	        return `${directX402Panel}${santaClawzDeliveryPanel}${directX402Panel || santaClawzDeliveryPanel ? '' : '<div class="execution-output-wait">Running.</div>'}`;
 	      }
 	      return `${directX402Panel}${santaClawzDeliveryPanel}<div class="execution-muted">No output yet.</div>`;
 	    }

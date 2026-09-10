@@ -298,6 +298,9 @@ assert.equal(startButtonState.attributes.get('aria-busy'), 'true');
 const executionResult = helpers.renderExecutionResult(session, { includeProtocolPanel: false });
 assert.match(executionResult, /compact audit panel/);
 assert.doesNotMatch(executionResult, /Polling delivery|Running\./);
+const activeExecutionResult = helpers.renderExecutionResult(activeSession, { includeProtocolPanel: false });
+assert.match(activeExecutionResult, /compact audit panel/);
+assert.doesNotMatch(activeExecutionResult, /Polling delivery|Preparing delivery links/);
 
 assert.match(html, /const canCancelExecution = !isTerminalExecutionStatus\(session\.status\) && !santaClawzDeliveryReady/);
 assert.match(html, /showSantaClawzCreditBackedRun = santaClawzCreditBackedActive && !santaClawzDeliveryReady/);
