@@ -15218,10 +15218,10 @@
 		      return ['completed', 'payment_failed', 'failed', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
 		    }
 
-		    function markExecutionStartButtonStarting(button) {
+		    function markExecutionStartButtonStarting(button, label = 'Starting') {
 		      if (!button) return false;
 		      button.disabled = true;
-		      button.textContent = 'Starting';
+		      button.textContent = label;
 		      button.classList?.add('is-starting');
 		      button.setAttribute?.('aria-busy', 'true');
 		      return true;
@@ -15338,6 +15338,8 @@
 	        ? 'Amazon confirmed the order.'
 	        : hasReadySantaClawzDelivery(session)
 	          ? 'Audit report ready.'
+	          : executionPendingSessions.has(session.id) && isSantaClawzExecutionSession(session)
+	            ? 'Checking readiness and payment terms'
 	          : santaClawzProgress?.summary || latestSummary;
 	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	      const statusLine = getConciseExecutionStatusLine(session, statusBadge, fundingStatus, localExecutionError);
@@ -15494,9 +15496,13 @@
         return { statusValue: 'failed', label: 'Runner needed', cls: 'failed', phase: 1 };
       }
       if (locallyPending) {
-        return String(session?.handoffData?.kind || '') === 'browser'
-          ? { statusValue: 'executing', label: 'Connecting Runner', cls: 'running', phase: 1 }
-          : { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
+        if (String(session?.handoffData?.kind || '') === 'browser') {
+          return { statusValue: 'executing', label: 'Connecting Runner', cls: 'running', phase: 1 };
+        }
+        if (isSantaClawzExecutionSession(session)) {
+          return { statusValue: 'executing', label: 'Connecting', cls: 'running', phase: 1 };
+        }
+        return { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
       }
       if (localError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
         return { statusValue: 'failed', label: 'Start failed', cls: 'failed', phase: 1 };
@@ -15661,6 +15667,13 @@
 	          badgeLabel: 'Verification pending'
 	        };
 	      }
+      if (kind === 'agent' && statusModel.statusValue === 'executing' && statusModel.label === 'Connecting') {
+        return {
+          title: 'Preparing audit',
+          detail: 'Checking SantaClawz readiness and payment terms.',
+          badgeLabel: 'Connecting'
+        };
+      }
 	      if (kind === 'agent' && santaClawzProgress && ['queued', 'claimed', 'executing'].includes(statusModel.statusValue)) {
 	        return statusModel.label === 'Starting'
 	          ? {
@@ -15973,6 +15986,8 @@
 	          ? 'Amazon confirmed the order.'
 	          : santaClawzDeliveryReady
 	            ? 'Audit report ready.'
+	            : executionPendingSessions.has(session.id) && isSantaClawzExecutionSession(session)
+	              ? 'Checking readiness and payment terms'
 	            : santaClawzProgress?.summary || latestSummary;
 	        const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	        const isBrowserExecutionSheet = session.handoffData?.kind === 'browser';
@@ -16170,9 +16185,12 @@
 	      });
       dock.querySelectorAll('[data-execution-fallback-run-session]').forEach((button) => {
         button.addEventListener('click', () => {
-	          if (!markExecutionStartButtonStarting(button)) return;
-	          executionPendingSessions.add(button.dataset.executionFallbackRunSession);
-          void startAgentExecutionFromFallback(button.dataset.executionFallbackRunSession);
+	          const sessionId = button.dataset.executionFallbackRunSession;
+	          const pendingSession = executionSessionCache.get(sessionId);
+	          const buttonLabel = isSantaClawzExecutionSession(pendingSession) ? 'Connecting...' : 'Starting';
+	          if (!markExecutionStartButtonStarting(button, buttonLabel)) return;
+	          executionPendingSessions.add(sessionId);
+          void startAgentExecutionFromFallback(sessionId);
         });
       });
       if (dock.dataset.santaClawzAuditOutputBound !== 'true') {

@@ -124,6 +124,7 @@ vm.createContext(context);
 vm.runInContext([
   extractFunctionSource('compactExecutionSentence'),
   extractFunctionSource('escapeExecutionValue'),
+  extractFunctionSource('isSantaClawzExecutionSession'),
   extractFunctionSource('markExecutionStartButtonStarting'),
   extractFunctionSource('normalizeSantaClawzDeliveryItem'),
   extractFunctionSource('collectSantaClawzDeliveryItemsFromValue'),
@@ -178,6 +179,23 @@ assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(session), true);
 const status = helpers.getExecutionStatusModel(session);
 assert.equal(status.statusValue, 'verification_pending');
 assert.equal(status.label, 'Report available');
+
+const pendingAuditSession = {
+  id: 'cs-audit-connecting',
+  status: 'ready',
+  handoffData: {
+    kind: 'agent',
+    selectedAgent: { pluginId: 'santaclawz:code-audit', metadata: { source: 'santaclawz' } }
+  }
+};
+context.executionPendingSessions.add(pendingAuditSession.id);
+const pendingStatus = helpers.getExecutionStatusModel(pendingAuditSession);
+assert.equal(pendingStatus.statusValue, 'executing');
+assert.equal(pendingStatus.label, 'Connecting');
+const pendingRunState = helpers.describeExecutionRunState(pendingAuditSession, pendingStatus);
+assert.equal(pendingRunState.title, 'Preparing audit');
+assert.equal(pendingRunState.detail, 'Checking SantaClawz readiness and payment terms.');
+assert.equal(pendingRunState.badgeLabel, 'Connecting');
 assert.equal(helpers.shouldShowExecutionActivityBar(session, status), false);
 assert.equal(helpers.describeExecutionRunState(session, status).title, 'Report available');
 
@@ -295,6 +313,15 @@ assert.equal(startButtonState.textContent, 'Starting');
 assert.equal(startButtonState.classes.has('is-starting'), true);
 assert.equal(startButtonState.attributes.get('aria-busy'), 'true');
 
+const connectingButtonState = {
+  disabled: false,
+  textContent: 'Run agent',
+  classList: { add() {} },
+  setAttribute() {}
+};
+assert.equal(helpers.markExecutionStartButtonStarting(connectingButtonState, 'Connecting...'), true);
+assert.equal(connectingButtonState.textContent, 'Connecting...');
+
 const executionResult = helpers.renderExecutionResult(session, { includeProtocolPanel: false });
 assert.match(executionResult, /compact audit panel/);
 assert.doesNotMatch(executionResult, /Polling delivery|Running\./);
@@ -325,6 +352,8 @@ if (process.env.MAGIC_CITY_UI_SCREENSHOT) {
 await browser.close();
 
 assert.match(html, /execution-agent-start:active:not\(:disabled\)/);
-assert.match(html, /markExecutionStartButtonStarting\(button\)[\s\S]{0,160}startAgentExecutionFromFallback/);
+assert.match(html, /markExecutionStartButtonStarting\(button, buttonLabel\)[\s\S]{0,240}startAgentExecutionFromFallback/);
+assert.match(html, /buttonLabel = isSantaClawzExecutionSession\(pendingSession\) \? 'Connecting\.\.\.' : 'Starting'/);
+assert.match(html, /Checking readiness and payment terms/);
 
 console.log('santaclawz compact output UI regression passed');
