@@ -19,12 +19,18 @@ function extractFunctionSource(name) {
   throw new Error(`unterminated inline function ${name}`);
 }
 
+let executionRenderCount = 0;
 const context = {
   RUNNER_EXTENSION_PLUGIN_ID: 'magic-city-runner-extension',
   executionLocalErrors: new Map(),
   executionLocalRunnerProgress: new Map(),
   executionSessionCache: new Map(),
   executionPendingSessions: new Set(),
+  executionCollapsedSessions: new Set(),
+  activeExecutionSessionId: null,
+  renderExecutionDock: () => {
+    executionRenderCount += 1;
+  },
   requestAnimationFrame: (callback) => callback(),
   refreshExecutionPanelInPlace: () => true,
   isTerminalExecutionStatus: (status) => ['fulfilled', 'failed'].includes(String(status || '').toLowerCase()),
@@ -44,7 +50,8 @@ vm.runInContext([
   extractFunctionSource('runnerProgressLabel'),
   extractFunctionSource('rememberExecutionRunnerProgress'),
   extractFunctionSource('getExecutionStatusModel'),
-  extractFunctionSource('describeExecutionRunState')
+  extractFunctionSource('describeExecutionRunState'),
+  extractFunctionSource('openExecutionPanel')
 ].join('\n'), context);
 
 const sessionId = 'cs-ui-startup-rejection';
@@ -65,6 +72,12 @@ assert.equal(connectingRunState.title, 'Connecting Runner');
 assert.equal(connectingRunState.detail, 'Claiming this mission, then opening Amazon.');
 assert.equal(connectingRunState.badgeLabel, 'Claiming');
 context.executionPendingSessions.delete(sessionId);
+
+context.executionCollapsedSessions.add(sessionId);
+context.openExecutionPanel(sessionId);
+assert.equal(context.activeExecutionSessionId, sessionId);
+assert.equal(context.executionCollapsedSessions.has(sessionId), false);
+assert.equal(executionRenderCount, 1);
 
 context.executionPendingSessions.add(sessionId);
 context.executionLocalErrors.set(sessionId, {
@@ -175,6 +188,16 @@ assert.match(
   html,
   /panelMeta\.textContent = 'Claiming mission · Opening Amazon next'/,
   'Magic Internet must present the next startup stage instead of duplicate generic labels'
+);
+assert.match(
+  html,
+  /\$\{expanded \? `data-execution-toggle="\$\{session\.id\}"` : `data-execution-open="\$\{session\.id\}"`\}/,
+  'the collapsed execution header must use the explicit reopen action'
+);
+assert.match(
+  html,
+  /\$\{expanded \? '&raquo;' : '&laquo;'\}/,
+  'the execution header must use opposite chevrons for collapse and reopen'
 );
 
 console.log('execution startup UI state ok');
