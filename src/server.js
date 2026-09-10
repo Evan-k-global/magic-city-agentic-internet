@@ -14110,9 +14110,9 @@ async function requestSantaClawzRuntimeContractPart(externalId, part, { timeoutM
         includeApiKey: false
       });
     } catch (error) {
-      if (!isSantaClawzRequestTimeout(error)) throw error;
+      if (!isSantaClawzRetryableRuntimeReadFailure(error)) throw error;
       if (attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, santaClawzRuntimeReadRetryDelayMs(error)));
         continue;
       }
       const timeoutError = createHttpError(
@@ -14817,6 +14817,70 @@ function isSantaClawzRequestTimeout(error) {
   return name === 'aborterror' || message.includes('aborted') || message.includes('aborterror');
 }
 
+function isSantaClawzRetryableRuntimeReadFailure(error) {
+  if (isSantaClawzRequestTimeout(error)) return true;
+  const statusCode = Number(error?.statusCode || 0);
+  const payload = error?.payload && typeof error.payload === 'object' ? error.payload : {};
+  const code = String(payload.code || '').trim().toLowerCase();
+  const message = String(payload.error || payload.message || error?.message || '').trim().toLowerCase();
+  return [502, 503, 504].includes(statusCode)
+    && payload.retryable === true
+    && (
+      code === 'x402_plan_temporarily_unavailable'
+      || message === 'x402_plan_cold_read_timeout'
+      || message === 'x402_plan_heartbeat_read_timeout'
+      || message === 'x402_plan_buyer_safety_read_timeout'
+    );
+}
+
+function isSantaClawzRuntimeContractReadFailure(error) {
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  return isSantaClawzRetryableRuntimeReadFailure(error)
+    || message === 'santaclawz_runtime_ready_timeout'
+    || message === 'santaclawz_runtime_x402_plan_timeout';
+}
+
+function santaClawzRuntimeReadRetryDelayMs(error) {
+  const requested = Number(error?.payload?.recommendedPollAfterMs);
+  if (!Number.isFinite(requested)) return 250;
+  return Math.max(100, Math.min(5000, Math.trunc(requested)));
+}
+
+function retainedSantaClawzRuntimeContract(directPayment, requestedAgentId, nowMs = Date.now()) {
+  const runtimeContract = directPayment?.runtimeContract;
+  const preparedAgentId = externalSantaClawzAgentId(directPayment?.agentId || '');
+  const expectedAgentId = externalSantaClawzAgentId(requestedAgentId || '');
+  const checkedAtMs = Date.parse(String(runtimeContract?.checkedAt || ''));
+  const staleAtMs = Date.parse(String(runtimeContract?.staleAt || ''));
+  if (
+    !runtimeContract?.expected
+    || !runtimeContract?.readyDigestSha256
+    || !runtimeContract?.planDigestSha256
+    || !preparedAgentId
+    || preparedAgentId !== expectedAgentId
+    || !Number.isFinite(checkedAtMs)
+    || !Number.isFinite(staleAtMs)
+    || checkedAtMs > nowMs
+    || staleAtMs <= nowMs
+  ) {
+    return null;
+  }
+  return {
+    ok: true,
+    agentId: preparedAgentId,
+    checkedAt: new Date(checkedAtMs).toISOString(),
+    staleAt: new Date(staleAtMs).toISOString(),
+    expected: runtimeContract.expected,
+    readyDigestSha256: runtimeContract.readyDigestSha256,
+    planDigestSha256: runtimeContract.planDigestSha256
+  };
+}
+
+async function currentSantaClawzRuntimeContract(directPayment, requestedAgentId) {
+  return retainedSantaClawzRuntimeContract(directPayment, requestedAgentId)
+    || fetchSantaClawzRuntimeContract(requestedAgentId);
+}
+
 const santaClawzSamePayloadRetriesInFlight = new Set();
 
 function isSantaClawzHireSubmissionEnabled() {
@@ -14863,7 +14927,7 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
     try {
       if (!isSantaClawzHireSubmissionEnabled()) return;
       const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
-      const runtimeContract = await fetchSantaClawzRuntimeContract(approvedAgentId);
+      const runtimeContract = await currentSantaClawzRuntimeContract(directPayment, approvedAgentId);
       const requirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, runtimeContract);
       if (!requirementValidation.ok) {
         throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
@@ -16979,7 +17043,8 @@ const server = http.createServer(async (req, res) => {
             sessionForSubmit,
             'santaclawz_preflight_failed_before_payment'
           );
-          const failureMessage = isSantaClawzRequestTimeout(error)
+          const runtimeReadFailure = isSantaClawzRuntimeContractReadFailure(error);
+          const failureMessage = runtimeReadFailure
             ? 'SantaClawz preflight timed out before payment. Reserved credits were returned; retry is safe.'
             : `SantaClawz preflight failed before payment: ${error?.message || 'preflight_failed'}`;
           updateConnectorSession(sessionId, withTaskPackage(sessionForSubmit, {
@@ -16995,13 +17060,13 @@ const server = http.createServer(async (req, res) => {
                 nextHumanAction: 'Retry the same agent. No SantaClawz payment was submitted.',
                 artifacts: [],
                 extraResult: {
-                  error: isSantaClawzRequestTimeout(error) ? 'santaclawz_preflight_timeout' : 'santaclawz_preflight_failed',
+                  error: runtimeReadFailure ? 'santaclawz_preflight_timeout' : 'santaclawz_preflight_failed',
                   latestFailureReason: failureMessage
                 }
               })
             }
           }));
-          error.statusCode = isSantaClawzRequestTimeout(error) ? 503 : (error.statusCode || 502);
+          error.statusCode = runtimeReadFailure ? 503 : (error.statusCode || 502);
           throw error;
         }
         directPayment = prepared.directPayment;
@@ -17019,7 +17084,7 @@ const server = http.createServer(async (req, res) => {
       }
       const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
       requireImmutableSantaClawzHireBody(directPayment);
-      const currentRuntimeContract = await fetchSantaClawzRuntimeContract(approvedAgentId);
+      const currentRuntimeContract = await currentSantaClawzRuntimeContract(directPayment, approvedAgentId);
       const currentRequirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, currentRuntimeContract);
       if (!currentRequirementValidation.ok) {
         throw createHttpError(currentRequirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
@@ -17404,7 +17469,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: 'santaclawz_payment_not_prepared', session: getConnectorSession(sessionId) || session });
       }
       assertApprovedSantaClawzAgent(directPayment.agentId);
-      const currentRuntimeContract = await fetchSantaClawzRuntimeContract(directPayment.agentId);
+      const currentRuntimeContract = await currentSantaClawzRuntimeContract(directPayment, directPayment.agentId);
       const currentRequirementValidation = validateSantaClawzPaymentRequirement(directPayment.paymentRequirement, currentRuntimeContract);
       if (!currentRequirementValidation.ok) {
         throw createHttpError(currentRequirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
@@ -18978,7 +19043,6 @@ const server = http.createServer(async (req, res) => {
         if (santaClawzConciergeAvailable) {
           throw createHttpError('santaclawz_concierge_disabled', 409);
         }
-        await fetchSantaClawzRuntimeContract(approvedAgentId);
         await assertSantaClawzJobContextReadyForSession({
           ...sessionWithPrivateInputs,
           selections,
