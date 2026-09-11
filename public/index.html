@@ -4269,6 +4269,24 @@
 	      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 	    }
 
+	    .wallet-topup-field > .wallet-payment-pill {
+	      min-height: 42px;
+	      display: flex;
+	      align-items: center;
+	      padding: 8px 12px;
+	      border: 1px solid rgba(109, 230, 255, 0.24);
+	      border-radius: 14px;
+	      color: rgba(244, 250, 255, 0.95);
+	      background:
+	        linear-gradient(135deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.028)),
+	        rgba(4, 8, 16, 0.82);
+	      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+	      font-size: 13px;
+	      font-weight: 700;
+	      line-height: 1.1;
+	      text-transform: none;
+	    }
+
 	    .wallet-topup-row #controlsTopupBtn {
 	      grid-column: 1 / -1;
 	      width: 100%;
@@ -5566,32 +5584,17 @@
               <span>Credits</span>
               <input id="controlsTopupCreditsInput" type="number" min="50" step="50" value="2500" aria-label="Credits to add" />
             </label>
-            <label class="wallet-topup-field wallet-topup-payment">
-              <span>Pay with</span>
-              <span class="wallet-select-shell">
-                <select id="controlsFundingRail" aria-label="Credit funding method">
-                  <option value="stripe">Stripe</option>
-                  <option value="onchain">Stablecoin</option>
-                </select>
-              </span>
-            </label>
+            <div class="wallet-topup-field wallet-topup-payment">
+              <span class="wallet-payment-pill">Pay with Stripe</span>
+              <input id="controlsFundingRail" type="hidden" value="stripe" />
+            </div>
             <button class="action action-soft" id="controlsTopupBtn">Add credits</button>
           </div>
           <div id="controlsTopupHint" class="wallet-policy-line">Choose credits and payment method.</div>
           <div id="controlsCreditsMsg" class="muted"></div>
           <div id="stripeTopupSuccess" class="wallet-success-note" hidden></div>
-          <div class="wallet-agent-payment-default" data-santaclawz-feature>
-            <label class="wallet-topup-field">
-              <span>SantaClawz default</span>
-              <span class="wallet-select-shell">
-                <select id="santaclawzPaymentPreference" aria-label="Default SantaClawz agent payment method">
-                  <option value="credits">Credits</option>
-                  <option value="crypto">Crypto</option>
-                </select>
-              </span>
-            </label>
-          </div>
-          <div class="wallet-compact-row">
+          <input id="santaclawzPaymentPreference" type="hidden" value="credits" />
+          <div class="wallet-compact-row" hidden>
             <div>
               <div class="wallet-compact-label">Wallet</div>
               <div id="evmWalletStatus" class="muted">Checking wallet…</div>
@@ -5629,8 +5632,8 @@
               <div class="settings-badges" id="evmWalletRuntimeBadges"></div>
               <div class="connector-activity-list" id="evmPaymentAuthorizationList"></div>
             </div>
-            <div class="vault-subsection-title">Base wallet checks</div>
-            <div class="connector-account-body">
+            <div class="vault-subsection-title" hidden>Base wallet checks</div>
+            <div class="connector-account-body" hidden>
               <div class="connector-policy-grid" id="evmWalletPolicyGrid">
                 <label class="connector-policy-card" id="evmPolicyCardSettlement">
                   <input type="checkbox" id="evmPolicySettlementSignatures" checked />
@@ -10388,11 +10391,7 @@
     }
 
     function getSantaClawzPaymentPreference() {
-      try {
-        return normalizeSantaClawzPaymentPreference(localStorage.getItem(getScopedStorageKey(SANTACLAWZ_PAYMENT_PREFERENCE_KEY)));
-      } catch {
-        return 'credits';
-      }
+      return 'credits';
     }
 
     function applySantaClawzPaymentPreferenceUi(value = getSantaClawzPaymentPreference()) {

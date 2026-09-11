@@ -62,6 +62,7 @@
     "test:santaclawz-read-only-retry": "node scripts/test-santaclawz-read-only-retry.mjs",
     "test:santaclawz-start-recovery-ui": "node scripts/test-santaclawz-start-recovery-ui.mjs",
     "test:santaclawz-output-ui": "node scripts/test-santaclawz-output-ui.mjs",
+    "test:settings-credit-funding-ui": "node scripts/test-settings-credit-funding-ui.mjs",
     "test:santaclawz-status-refresh": "node scripts/test-santaclawz-status-refresh.mjs",
     "test:credit-settlement-refund": "node scripts/test-credit-settlement-refund.mjs",
     "test:santaclawz-agent-eligibility": "node scripts/test-santaclawz-agent-eligibility.mjs",
