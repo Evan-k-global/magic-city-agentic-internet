@@ -52,6 +52,60 @@ Passing this test proves pairing, explicit dispatch, claim, signed checkpoint
 and terminal handoff. It does not prove that custom merchant automation is
 complete.
 
+### Production Runner reference map
+
+The built-in Runner is a concrete implementation reference for teams building
+their own `executeSession()`. Its license remains separate from the Apache
+starter; use these locations to understand the required behavior and verify an
+independent helper against the same protocol boundaries.
+
+| Concern | Reference implementation | Evidence to reproduce |
+| --- | --- | --- |
+| Plan validation | `validatePlanForSession()` in `public/native-runner/extension/background-v0.2.js` | Reject wrong schema/protocol, hash, domain, action type, duplicate action ID and capability scope |
+| Local authority | `assertLocalMissionAuthority()` in the same file | Reject cancelled or expired missions before browser work |
+| Dispatch claim | `claimSession()` in the same file | Present the current device-scoped dispatch nonce and runtime holder key |
+| Signed checkpoints | `missionCheckpoint()` and `buildProofOfPossession()` in the same file | Bind session, action, target domain, plan action and previous boundary hash |
+| Ordered execution | `executePlanAction()` and `runSession()` in the same file | Execute only the next signed action and resume from the server cursor |
+| Browser adapter | `executePlanStep()` in `public/native-runner/extension/executor.js` | Keep selectors and page interpretation local; return redacted structured state |
+| Irreversible actions | `submitFinalOrder()`, `recordBrowserClick()` and `priorFinalOrderReceipt()` in `executor.js` | Record action-scoped intent and dispatch receipts; never replay an ambiguous click |
+| Completion recovery | `reconcileCompletedPlan()` in `background-v0.2.js` | Treat verified merchant completion as terminal without another browser mutation |
+| Lost checkpoint response | `reconcileCommittedCheckpoint()` in `public/native-runner/extension/background.js` | Read the durable cursor before retrying any completed step |
+
+Do not copy merchant selectors blindly. A partner adapter should implement only
+the merchants and action types it can verify, and pause when evidence is
+missing or contradictory.
+
+### Partner implementation sequence
+
+1. Keep the starter unchanged through pairing, registration, dispatch, claim
+   and signed checkpoint generation.
+2. Implement one reversible action, such as opening a harmless product page,
+   behind `executeSession()`.
+3. Add deterministic fixtures for success, missing controls, changed content,
+   cancellation and worker restart.
+4. Add cart or order preparation only after the earlier action and recovery
+   tests pass.
+5. Add an irreversible order action only with a bounded authorization, exact
+   price/item/quantity checks, durable intent and dispatch receipts, and a
+   no-replay test for every interruption boundary.
+6. Test the packaged extension against an isolated control plane and harmless
+   merchant fixture before a controlled canary.
+
+### Definition of done for a custom shopping helper
+
+- It cannot see or claim another helper's mission.
+- Every action is covered by the signed plan and current mission authority.
+- Cancellation and expiry stop execution before the next browser mutation.
+- Login, CAPTCHA, payment authentication and unverifiable checkout evidence
+  pause locally with a usable handoff.
+- Sensitive browser and payment data stay local; checkpoints are redacted.
+- Restarting at any action boundary resumes from durable state.
+- Losing a checkpoint response does not repeat the browser action.
+- An irreversible action has one intent, at most one native dispatch and one
+  terminal merchant result for its action scope.
+- The final ZIP, not just the source directory, passes its browser and protocol
+  tests.
+
 ## 2. Independently Hosted Magic City
 
 Use this when the partner needs its own domain, database, users, signing keys,
