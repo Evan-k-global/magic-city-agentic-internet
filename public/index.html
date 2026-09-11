@@ -15846,19 +15846,21 @@
       const txHash = verification?.txHash || '';
       const chainAuthorization = session.finalSubmitChainAuthorization || null;
       const chainAuthorizationReady = chainAuthorization?.status === 'anchored';
+      const authorizationTxHash = chainAuthorization?.txHash || '';
+      const authorizationExplorerUrl = chainAuthorization?.explorerUrl || '';
       const chainStatusCheckFailed = !chainAuthorization && zekoNetworkStatus?.statusCheck === 'failed';
       const chainAuthorizationBypassed = (chainAuthorization?.status === 'unavailable' && chainAuthorization?.bypassAllowed === true)
         || (!chainAuthorization && !chainStatusCheckFailed && zekoNetworkStatus?.available === false);
       const chainAuthorizationLabel = chainAuthorizationReady
-        ? 'Zeko authorization ready'
+        ? 'Zeko authorization anchored'
         : chainAuthorizationBypassed
-          ? 'Zeko Sepolia unavailable - continuing'
+          ? 'Zeko unavailable - local authorization active'
           : chainStatusCheckFailed
             ? 'Zeko status check failed'
           : chainAuthorization?.status === 'preparing'
-            ? 'Preparing Zeko authorization'
+            ? 'Zeko authorization pending'
             : chainAuthorization?.status === 'failed'
-              ? 'Zeko authorization needs review'
+              ? 'Zeko anchor needs review'
               : '';
       const offchainProof = String(verification?.submitMode || '').toLowerCase() === 'record'
         || String(verification?.network || '').toLowerCase() === 'offchain';
@@ -15879,6 +15881,7 @@
             ${receiptUrl ? `<a href="${receiptUrl}" target="_blank" rel="noopener noreferrer">Receipt</a>` : ''}
             ${anchorUrl ? `<a href="${anchorUrl}" target="_blank" rel="noopener noreferrer">${offchainProof ? 'Proof record' : 'Anchor'}</a>` : ''}
             ${txHash && txExplorerUrl ? `<a href="${escapeExecutionValue(txExplorerUrl)}" target="_blank" rel="noopener noreferrer">Zeko tx</a>` : ''}
+            ${authorizationTxHash && authorizationExplorerUrl ? `<a href="${escapeExecutionValue(authorizationExplorerUrl)}" target="_blank" rel="noopener noreferrer">Authorization tx</a>` : ''}
           </div>
           ${!txHash ? `<div class="execution-inline-note">${offchainProof ? `Off-chain proof retained locally.${escapeExecutionValue(offchainTarget)}` : 'Zeko anchor after receipt.'}</div>` : ''}
           ${chainAuthorizationBypassed ? `<div class="execution-inline-note">Zeko Sepolia is unavailable. Checkout continues under the signed one-order authorization.</div>` : ''}

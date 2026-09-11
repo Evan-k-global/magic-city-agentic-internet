@@ -54,7 +54,6 @@ const ANCHOR_RECIPIENT = process.env.ZEKO_ANCHOR_RECIPIENT || '';
 const MISSION_AUTH_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY || '';
 const MISSION_AUTH_REGISTRY_PRIVATE_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY || '';
 const MBA_MISSION_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || process.env.MISSION_REGISTRY_PUBLIC_KEY || MBA_MISSION_REGISTRY_ADDRESS;
-const ZEKO_PROOF_CACHE_DIR = String(process.env.ZEKO_PROOF_CACHE_DIR || '').trim();
 const PRE_BROADCAST_RETRY_LIMIT = Math.max(
   1,
   Math.min(Number(process.env.ZEKO_PRE_BROADCAST_RETRY_LIMIT || 2) || 2, 3)
@@ -98,10 +97,6 @@ function withTimeout(promise, timeoutMs, buildError) {
   ]).finally(() => {
     if (timeout) clearTimeout(timeout);
   });
-}
-
-function resolveProofCache(Cache) {
-  return ZEKO_PROOF_CACHE_DIR ? Cache.FileSystem(ZEKO_PROOF_CACHE_DIR) : Cache.FileSystemDefault;
 }
 
 function sendJson(res, code, payload) {
@@ -315,6 +310,57 @@ async function readMbaRegistryOnChain() {
   }
 }
 
+async function readMissionAuthRegistryOnChain() {
+  if (!MISSION_AUTH_REGISTRY_PUBLIC_KEY) {
+    return { reachable: false, error: 'mission_auth_registry_not_configured' };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  timeout.unref?.();
+  try {
+    const response = await fetch(ZEKO_GRAPHQL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: 'query MissionAuthRegistry($pk: PublicKey!) { account(publicKey: $pk) { publicKey zkappState verificationKey { hash } } }',
+        variables: { pk: MISSION_AUTH_REGISTRY_PUBLIC_KEY }
+      })
+    });
+    const payload = await response.json();
+    const account = payload?.data?.account;
+    const state = Array.isArray(account?.zkappState) ? account.zkappState : [];
+    if (!response.ok || payload?.errors?.length || !account?.publicKey || !account?.verificationKey?.hash || state.length < 3) {
+      throw new Error('mission_auth_registry_chain_state_unavailable');
+    }
+    return {
+      reachable: true,
+      latestStatementHash: String(state[0] || '0'),
+      latestPayloadDigest: String(state[1] || '0'),
+      anchoredCount: String(state[2] || '0'),
+      verificationKeyHash: String(account.verificationKey.hash)
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function missionAuthRelayerReadiness() {
+  const chain = await readMissionAuthRegistryOnChain();
+  return {
+    ready: Boolean(RELAYER_PRIVATE_KEY && MISSION_AUTH_REGISTRY_PRIVATE_KEY && chain.reachable),
+    registryAddress: MISSION_AUTH_REGISTRY_PUBLIC_KEY || null,
+    capabilities: ['mission_auth_registry', 'authorization_commitment', 'signed_state_update'],
+    credentialsConfigured: Boolean(RELAYER_PRIVATE_KEY && MISSION_AUTH_REGISTRY_PRIVATE_KEY),
+    chain
+  };
+}
+
 async function mbaRelayerReadiness() {
   const persistence = getMbaMissionRegistryPersistenceStatus();
   const config = getMbaMissionRegistryConfig();
@@ -365,6 +411,7 @@ async function mbaRelayerReadiness() {
 }
 
 function buildTxPlan(anchorPayload, payloadHash) {
+  const authorizationOnly = anchorPayload?.schema === 'magic-city-final-submit-chain-anchor-v1';
   return {
     strategy: 'anchor-commitment',
     networkId: ZEKO_NETWORK_ID,
@@ -373,7 +420,9 @@ function buildTxPlan(anchorPayload, payloadHash) {
     payloadHash,
     statementHash: anchorPayload.statementHash,
     memo: `magic-city:${String(anchorPayload.intentId || anchorPayload.receiptId || payloadHash).slice(0, 28)}`,
-    note: 'This is a nonce-safe Zeko submission plan scaffold. Wire it to a zkApp or fee-payer transaction path next.'
+    note: authorizationOnly
+      ? 'Submit the authorization commitment to MagicCityMissionAuthRegistry under the registry signature.'
+      : 'Submit the proof commitment through the configured MissionRegistry path.'
   };
 }
 
@@ -489,7 +538,6 @@ async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
     PrivateKey,
     PublicKey,
     Bool,
-    Cache,
     Field,
     Poseidon,
     Transaction,
@@ -506,11 +554,6 @@ async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
     archive: ZEKO_ARCHIVE
   });
   Mina.setActiveInstance(network);
-
-  executionStage = 'registry_proof_compile';
-  console.info('[zeko-relayer] registry_proof_compile_started');
-  await MagicCityMissionAuthRegistry.compile({ cache: resolveProofCache(Cache) });
-  console.info('[zeko-relayer] registry_proof_compile_completed');
 
   const relayer = PrivateKey.fromBase58(RELAYER_PRIVATE_KEY);
   const registryKey = PrivateKey.fromBase58(MISSION_AUTH_REGISTRY_PRIVATE_KEY);
@@ -628,6 +671,29 @@ async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
     throw err;
   }
 
+  executionStage = 'registry_confirmation';
+  const confirmationDeadline = Date.now() + 90_000;
+  let confirmedState = null;
+  while (Date.now() < confirmationDeadline) {
+    const observed = await readMissionAuthRegistryOnChain();
+    if (observed.reachable
+      && observed.latestStatementHash === statementHash.toString()
+      && observed.latestPayloadDigest === payloadDigest.toString()) {
+      confirmedState = observed;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
+  if (!confirmedState) {
+    const err = new Error('mission_auth_registry_confirmation_timeout');
+    err.statusCode = 504;
+    err.executionStage = executionStage;
+    err.submissionUncertain = true;
+    err.safeToRetry = false;
+    err.txHash = txHash;
+    throw err;
+  }
+
   return {
     txHash,
     mode: 'mission_auth_registry',
@@ -635,6 +701,9 @@ async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
     relayerPublicKey: relayerPublicKey.toBase58(),
     statementHash: statementHash.toString(),
     payloadDigest: payloadDigest.toString(),
+    anchoredCount: confirmedState.anchoredCount,
+    verificationKeyHash: confirmedState.verificationKeyHash,
+    confirmedAt: new Date().toISOString(),
     nonce: relayerNonce
   };
 }
@@ -647,10 +716,17 @@ async function runSubmitOnce(submissionId) {
     throw err;
   }
   try {
-    const sent = MODE === 'mba_mission_registry'
-      ? await withMbaMissionRegistryMutationLock(MBA_MISSION_REGISTRY_PUBLIC_KEY, () =>
-        submitMbaMissionRegistryAnchor(submission.anchorPayload, submission.payloadHash))
-      : await submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash);
+    const authorizationOnly = submission.anchorPayload?.schema === 'magic-city-final-submit-chain-anchor-v1';
+    const registryLockKey = authorizationOnly
+      ? MISSION_AUTH_REGISTRY_PUBLIC_KEY
+      : MBA_MISSION_REGISTRY_PUBLIC_KEY;
+    const sent = await withMbaMissionRegistryMutationLock(registryLockKey, () => (
+      authorizationOnly
+        ? submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash)
+        : MODE === 'mba_mission_registry'
+          ? submitMbaMissionRegistryAnchor(submission.anchorPayload, submission.payloadHash)
+          : submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash)
+    ));
     const updated = await updateSubmission(submission.id, {
       status: sent.txHash ? 'submitted' : 'pending',
       txHash: sent.txHash,
@@ -938,6 +1014,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && url.pathname === '/health') {
       const mba = MODE === 'mba_mission_registry' ? await mbaRelayerReadiness() : null;
+      const missionAuth = await missionAuthRelayerReadiness();
       return sendJson(res, 200, {
         status: 'ok',
         service: MODE === 'mba_mission_registry' ? 'magic-city-mba-relayer' : 'zeko-relayer',
@@ -948,7 +1025,8 @@ const server = http.createServer(async (req, res) => {
         archive: ZEKO_ARCHIVE,
         registryConfigured: Boolean(MISSION_AUTH_REGISTRY_PUBLIC_KEY || MISSION_AUTH_REGISTRY_PRIVATE_KEY),
         persistence: getZekoRelayerPersistenceStatus(),
-        mba
+        mba,
+        missionAuth
       });
     }
 

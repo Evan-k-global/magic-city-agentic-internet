@@ -5,9 +5,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PrivateKey } from 'o1js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const registryAddress = 'B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe';
+const missionAuthRegistryKey = PrivateKey.random();
+const missionAuthRegistryAddress = missionAuthRegistryKey.toPublicKey().toBase58();
+const relayerKey = PrivateKey.random();
 const bootstrapRoot = '28831116683740239225579803815979923155620183932789174387615564682385525427460';
 const localSubmitterStatePath = path.join(
   fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-mba-relayer-idempotency-')),
@@ -93,8 +97,10 @@ let chainRegistryRoot = bootstrapRoot;
 let chainRegistrySequence = '1';
 const graphqlPort = await getAvailablePort();
 const graphql = http.createServer(async (req, res) => {
-  for await (const _chunk of req) {
+  const chunks = [];
+  for await (const chunk of req) {
     // Consume the request body before replying.
+    chunks.push(chunk);
   }
   if (!chainAvailable) {
     res.writeHead(502, { 'content-type': 'application/json' });
@@ -102,14 +108,24 @@ const graphql = http.createServer(async (req, res) => {
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({
-    data: {
-      account: {
+  const request = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  const requestedPublicKey = request?.variables?.pk;
+  const account = requestedPublicKey === missionAuthRegistryAddress
+    ? {
+        publicKey: missionAuthRegistryAddress,
+        nonce: '0',
+        zkappState: ['11', '22', '3', '0', '0', '0', '0', '0'],
+        verificationKey: { hash: 'mission-auth-verification-key' }
+      }
+    : {
         publicKey: registryAddress,
         nonce: '2',
         zkappState: ['0', '0', '0', '0', chainRegistryRoot, chainRegistrySequence, '0', '0'],
         verificationKey: { hash: 'test-verification-key' }
-      }
+      };
+  res.end(JSON.stringify({
+    data: {
+      account
     }
   }));
 });
@@ -129,11 +145,13 @@ const env = {
   ZEKO_GRAPHQL: `http://127.0.0.1:${graphqlPort}/graphql`,
   ZEKO_ARCHIVE: `http://127.0.0.1:${graphqlPort}/graphql`,
   ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY: registryAddress,
+  ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY: missionAuthRegistryAddress,
+  ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY: missionAuthRegistryKey.toBase58(),
   DATABASE_URL: '',
   MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE: 'false',
   ZEKO_MBA_MISSION_AUTHORITY_PRIVATE_KEY: '',
   MISSION_AUTHORITY_ZEKO_PRIVATE_KEY: '',
-  ZEKO_RELAYER_PRIVATE_KEY: '',
+  ZEKO_RELAYER_PRIVATE_KEY: relayerKey.toBase58(),
   ZEKO_MISSION_AUTH_RELAYER_PRIVATE_KEY: '',
   SUBMITTER_PRIVATE_KEY: ''
 };
@@ -156,6 +174,12 @@ try {
   assert.equal(healthy.mba.chain.sequence, '1');
   assert.equal(healthy.mba.mirror.matchesOnchain, true);
   assert.equal(healthy.mba.ready, false, 'private keys are absent in this health-only fixture');
+  assert.equal(healthy.missionAuth.ready, true);
+  assert.equal(healthy.missionAuth.registryAddress, missionAuthRegistryAddress);
+  assert.equal(healthy.missionAuth.chain.reachable, true);
+  assert.equal(healthy.missionAuth.chain.latestStatementHash, '11');
+  assert.equal(healthy.missionAuth.chain.latestPayloadDigest, '22');
+  assert.equal(healthy.missionAuth.chain.anchoredCount, '3');
 
   const unauthenticatedSubmit = await fetch(`http://127.0.0.1:${relayerPort}/submit`, {
     method: 'POST',
@@ -187,6 +211,8 @@ try {
   assert.equal(outage.status, 'ok');
   assert.equal(outage.mba.chain.reachable, false);
   assert.equal(outage.mba.ready, false);
+  assert.equal(outage.missionAuth.chain.reachable, false);
+  assert.equal(outage.missionAuth.ready, false);
   assert.equal(relayer.exitCode, null, `relayer stopped during Zeko outage: ${stderr}`);
 } finally {
   if (relayer.exitCode === null) {

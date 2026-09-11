@@ -164,6 +164,45 @@ export async function getMbaRelayerReadiness() {
   }
 }
 
+export async function getMissionAuthorizationRelayerReadiness() {
+  const healthUrl = mbaRelayerHealthUrl();
+  if (!healthUrl || !ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY) {
+    return { ready: false, status: 'not_configured', healthUrl: healthUrl || null };
+  }
+  const { controller, timeout } = makeTimeoutSignal(2_000);
+  try {
+    const response = await fetch(healthUrl, { signal: controller.signal });
+    const health = await response.json();
+    const capabilities = Array.isArray(health?.missionAuth?.capabilities) ? health.missionAuth.capabilities : [];
+    const ready = Boolean(
+      response.ok
+      && health?.status === 'ok'
+      && health?.missionAuth?.ready === true
+      && health?.missionAuth?.registryAddress === ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY
+      && health?.missionAuth?.chain?.reachable === true
+      && capabilities.includes('mission_auth_registry')
+      && capabilities.includes('authorization_commitment')
+    );
+    return {
+      ready,
+      status: ready ? 'ready' : 'not_ready',
+      healthUrl,
+      registryAddress: health?.missionAuth?.registryAddress || null,
+      capabilities,
+      chain: health?.missionAuth?.chain || null
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      status: 'unreachable',
+      healthUrl,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function zekoExplorerTxUrl(txHash) {
   const trimmed = String(txHash || '').trim();
   if (!trimmed) return null;
@@ -436,13 +475,14 @@ export async function submitAnchorPayload(anchorPayload) {
       throw err;
     }
 
-    const mbaRegistry = ZEKO_RELAYER_MODE === 'mba_mission_registry'
-      ? (parsed?.result?.mode === 'mba_mission_registry' ? parsed.result : null)
-      : null;
+    const mbaRegistry = parsed?.result?.mode === 'mba_mission_registry' ? parsed.result : null;
+    const missionAuthRegistry = parsed?.result?.mode === 'mission_auth_registry' ? parsed.result : null;
+    const registryResult = missionAuthRegistry || mbaRegistry;
 
     return {
       mode: 'relay',
       status: parsed?.status || 'submitted',
+      submissionId: parsed?.id ?? null,
       payloadHash,
       relayer: {
         url: relayerUrl,
@@ -453,10 +493,17 @@ export async function submitAnchorPayload(anchorPayload) {
         response: parsed
       },
       txHash: parsed?.txHash ?? null,
-      registryAddress: mbaRegistry?.registryAddress ?? null,
+      registryMode: registryResult?.mode ?? null,
+      registryAddress: missionAuthRegistry?.registryPublicKey ?? mbaRegistry?.registryAddress ?? null,
       previousRegistryRoot: mbaRegistry?.previousRegistryRoot ?? null,
       registryRoot: mbaRegistry?.registryRoot ?? null,
-      registrySequence: mbaRegistry?.sequence ?? null,
+      registrySequence: missionAuthRegistry?.anchoredCount ?? mbaRegistry?.sequence ?? null,
+      capabilityCommitment: mbaRegistry?.capabilityCommitment ?? null,
+      approvalCommitment: missionAuthRegistry?.statementHash ?? mbaRegistry?.approvalCommitment ?? null,
+      registryKey: mbaRegistry?.registryKey ?? null,
+      payloadDigest: missionAuthRegistry?.payloadDigest ?? null,
+      verificationKeyHash: missionAuthRegistry?.verificationKeyHash ?? null,
+      confirmedAt: missionAuthRegistry?.confirmedAt ?? null,
       networkId: ZEKO_NETWORK_ID
     };
   }

@@ -51,6 +51,8 @@
     "test:mba-relayer-health": "node scripts/test-mba-relayer-health.mjs",
     "provision:mba-relayer-db-role": "node scripts/provision-mba-relayer-db-role.mjs",
     "test:mba-mission-registry-bootstrap": "node scripts/test-mba-mission-registry-bootstrap.mjs",
+    "test:mission-auth-registry-signature": "node scripts/test-mission-auth-registry-signature.mjs",
+    "test:mission-authorization-background-anchor": "node scripts/test-mission-authorization-background-anchor.mjs",
     "test:magic-internet-extraction": "node scripts/test-magic-internet-agent-extraction.mjs",
     "test:santaclawz-paid-flow-wiring": "node scripts/test-santaclawz-paid-flow-wiring.mjs",
     "test:santaclawz-integration-policy": "node scripts/test-santaclawz-integration-policy.mjs",
