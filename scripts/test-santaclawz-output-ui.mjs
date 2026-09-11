@@ -216,6 +216,28 @@ acceptedSession.santaclawzDirectPayment.summary = {
 assert.equal(helpers.hasReadySantaClawzDelivery(acceptedSession), true);
 assert.equal(helpers.getExecutionStatusModel(acceptedSession).label, 'Done');
 
+const partialAcceptedSession = structuredClone(acceptedSession);
+partialAcceptedSession.santaclawzDirectPayment.summary.returnValidation.verificationSource = 'santaclawz_authenticated_lifecycle';
+partialAcceptedSession.santaclawzDirectPayment.delivery = {
+  inlineOutputs: ['code-audit-summary.md', markdown],
+  artifacts: [],
+  verification: {
+    source: 'santaclawz_authenticated_lifecycle',
+    partialDelivery: true,
+    suppressedOutputs: [{ name: 'code-audit-result.json', reason: 'received_bytes_hash_mismatch' }]
+  }
+};
+assert.equal(helpers.getSantaClawzExecutionProgress(partialAcceptedSession).title, 'Audit complete');
+assert.match(helpers.getSantaClawzExecutionProgress(partialAcceptedSession).detail, /Markdown report is ready/);
+assert.equal(helpers.shouldPollExecutionSession(partialAcceptedSession), false);
+assert.doesNotMatch(
+  helpers.renderSantaClawzCodeAuditPanel(
+    partialAcceptedSession,
+    helpers.collectSantaClawzDeliveryItems(partialAcceptedSession)
+  ),
+  /Open JSON/
+);
+
 const staleAcceptedSession = structuredClone(acceptedSession);
 staleAcceptedSession.updatedAt = '2026-09-10T06:46:00.000Z';
 assert.equal(helpers.shouldApplyPolledExecutionSession(acceptedSession, staleAcceptedSession), false);
@@ -355,5 +377,6 @@ assert.match(html, /execution-agent-start:active:not\(:disabled\)/);
 assert.match(html, /markExecutionStartButtonStarting\(button, buttonLabel\)[\s\S]{0,240}startAgentExecutionFromFallback/);
 assert.match(html, /buttonLabel = isSantaClawzExecutionSession\(pendingSession\) \? 'Connecting\.\.\.' : 'Starting'/);
 assert.match(html, /Checking readiness and payment terms/);
+assert.match(html, /Verified by SantaClawz/);
 
 console.log('santaclawz compact output UI regression passed');

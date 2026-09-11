@@ -15004,6 +15004,26 @@ function materializeSantaClawzInlineArtifacts(sessionId, delivery = {}) {
   };
 }
 
+function restrictSantaClawzDeliveryToVerifiedOutputs(delivery = {}, verifiedReturn = null) {
+  if (verifiedReturn?.mode !== 'authenticated_terminal_lifecycle') return delivery;
+  const verifiedOutputs = Array.isArray(verifiedReturn.verifiedBuyerOutputs)
+    ? verifiedReturn.verifiedBuyerOutputs
+    : [];
+  const inlineOutputs = verifiedOutputs.flatMap((output) => [output.name, output.text]);
+  return {
+    ...delivery,
+    summary: verifiedOutputs.find((output) => /\.md$/i.test(output.name))?.text || delivery.summary || null,
+    inlineOutputs,
+    verification: {
+      source: 'santaclawz_authenticated_lifecycle',
+      requestId: verifiedReturn.requestId,
+      accessMode: verifiedReturn.accessMode,
+      partialDelivery: verifiedReturn.partialDelivery === true,
+      suppressedOutputs: verifiedReturn.suppressedBuyerOutputs || []
+    }
+  };
+}
+
 function santaClawzSourceDeliveryDigest(delivery = {}) {
   return semanticSantaClawzStatusDigest({
     summary: delivery?.summary || null,
@@ -15052,6 +15072,27 @@ async function fetchSantaClawzExecutionStateForDirectPayment(directPayment = {})
       url: endpoint
     };
   }
+}
+
+function resolveSantaClawzAuthenticatedStateUrl(directPayment = {}, submittedRequestId = '', source = getSantaClawzSourceStatus()) {
+  const candidates = [
+    directPayment?.response?.stateUrl,
+    directPayment?.response?.paidExecution?.stateUrl,
+    directPayment?.stateUrl,
+    directPayment?.executionState?.stateUrl
+  ].map((entry) => String(entry || '').trim()).filter(Boolean);
+  const authenticated = candidates.find((entry) => {
+    try {
+      return Boolean(new URL(buildSantaClawzEndpointUrl(entry, source)).searchParams.get('token'));
+    } catch {
+      return false;
+    }
+  });
+  if (authenticated) return authenticated;
+  if (candidates.length) return candidates[0];
+  return submittedRequestId
+    ? `${source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
+    : null;
 }
 
 function resolveSantaClawzExecutionRequestId(payload = {}, fallback = '') {
@@ -15433,7 +15474,10 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
           schemaVersion: 'santaclawz-return/1.0',
           requestId: returnValidation.requestId,
           packageHash: returnValidation.packageHash,
-          deliverableCount: returnValidation.deliverables.length
+          deliverableCount: returnValidation.deliverables.length,
+          verificationSource: returnValidation.mode === 'authenticated_terminal_lifecycle'
+            ? 'santaclawz_authenticated_lifecycle'
+            : 'magic_city_verified_return'
         }
       : {
           ok: false,
@@ -15660,9 +15704,11 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
       status.payload,
       sessionForStatus.santaclawzDirectPayment?.submittedRequestId || ''
     );
-    const stateUrl = submittedRequestId
-      ? `${source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
-      : sessionForStatus.santaclawzDirectPayment?.stateUrl || null;
+    const stateUrl = resolveSantaClawzAuthenticatedStateUrl(
+      sessionForStatus.santaclawzDirectPayment || {},
+      submittedRequestId,
+      source
+    );
     const executionState = await fetchSantaClawzExecutionStateForDirectPayment({
       ...(sessionForStatus.santaclawzDirectPayment || {}),
       submittedRequestId,
@@ -15671,17 +15717,20 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
     const combinedStatusPayload = executionState?.payload
       ? sanitizeMetadata({ ...status.payload, executionState: executionState.payload })
       : status.payload;
-    const delivery = materializeChangedSantaClawzDelivery(
-      sessionForStatus.id,
-      existingDelivery,
-      extractSantaClawzDelivery(combinedStatusPayload)
-    );
     const expectedReturnRequestId = sessionForStatus.santaclawzDirectPayment?.submittedRequestId || '';
     const verifiedReturn = await verifySantaClawzCompletedReturn(combinedStatusPayload, {
       expectedRequestId: expectedReturnRequestId,
       expectedInputDigestSha256: sessionForStatus.santaclawzDirectPayment?.hireRequestDigestSha256 || '',
       resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
     });
+    const delivery = materializeChangedSantaClawzDelivery(
+      sessionForStatus.id,
+      existingDelivery,
+      restrictSantaClawzDeliveryToVerifiedOutputs(
+        extractSantaClawzDelivery(combinedStatusPayload),
+        verifiedReturn
+      )
+    );
     const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload, {
       expectedRequestId: expectedReturnRequestId,
       verifiedReturn
@@ -15735,46 +15784,12 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
       }
     }
     if (creditBackedPayment && summary.completed && sessionForStatus.creditReservation?.status === 'released') {
-      const recoveryIntentId = `santaclawz-reconcile:${sessionForStatus.id}:${digest}`;
-      const requiredCredits = Number(
-        sessionForStatus.creditReservation?.requiredCredits
-        || sessionForStatus.paymentOrchestration?.requiredCredits
-        || 0
-      );
-      const lock = lockUserCreditsForIntent(
-        sessionForStatus.requesterHash,
-        toUnits(requiredCredits),
-        recoveryIntentId,
-        { eventKey: `santaclawz-reconcile-lock:${digest}`, sourceSessionId: sessionForStatus.id }
-      );
-      const settled = lock.ok
-        ? settleLockedCredits(
-            recoveryIntentId,
-            `santaclawz:${externalSantaClawzAgentId(nextDirectPayment.agentId || sessionForStatus.preferredExecutionAgentId || '')}`,
-            PROTOCOL_FEE_BPS
-          )
-        : { ok: false, reason: lock.reason };
-      if (settled.ok) {
-        sessionPatch.creditReservation = {
-          ...(sessionForStatus.creditReservation || {}),
-          status: 'settled',
-          settledAt: settled.lock.updatedAt,
-          settlementMode: 'late_x402_reconciliation',
-          recoveryIntentId,
-          revenueCapturedCredits: fromUnits(settled.lock.platformCaptured || 0),
-          burnedCredits: fromUnits(settled.lock.creditsBurned || 0),
-          platformTreasury: formatPlatformTreasuryForApi(settled.treasury),
-          account: formatUserAccountForApi(settled.account),
-          holdReason: null
-        };
-      } else {
-        sessionPatch.creditReservation = {
-          ...(sessionForStatus.creditReservation || {}),
-          status: 'reconciliation_required',
-          reconciliationReason: settled.reason || 'late_x402_credit_reconciliation_failed',
-          recoveryIntentId
-        };
-      }
+      sessionPatch.creditReservation = {
+        ...(sessionForStatus.creditReservation || {}),
+        status: 'released',
+        settlementMode: sessionForStatus.creditReservation?.settlementMode || 'completed_after_refund_no_recharge',
+        holdReason: null
+      };
     }
     if (creditBackedPayment && summary.terminalFailure) {
       sessionPatch.creditReservation = returnSantaClawzCreditsForTerminalFailure(
@@ -17524,24 +17539,28 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const submittedRequestId = resolveSantaClawzExecutionRequestId(submit.payload);
-      const stateUrl = submittedRequestId
-        ? `${submit.source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
-        : null;
+      const stateUrl = resolveSantaClawzAuthenticatedStateUrl({
+        ...directPayment,
+        response: submit.payload
+      }, submittedRequestId, submit.source);
       const executionState = stateUrl
         ? await fetchSantaClawzExecutionStateForDirectPayment({ ...directPayment, stateUrl, submittedRequestId })
         : null;
       const combinedSubmitPayload = executionState?.payload
         ? sanitizeMetadata({ ...submit.payload, executionState: executionState.payload })
         : submit.payload;
-      const delivery = materializeSantaClawzInlineArtifacts(
-        sessionForSubmit.id,
-        extractSantaClawzDelivery(combinedSubmitPayload)
-      );
       const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
         expectedInputDigestSha256: hireRequestDigestSha256,
         resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
       });
+      const delivery = materializeSantaClawzInlineArtifacts(
+        sessionForSubmit.id,
+        restrictSantaClawzDeliveryToVerifiedOutputs(
+          extractSantaClawzDelivery(combinedSubmitPayload),
+          verifiedReturn
+        )
+      );
       const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
         verifiedReturn
@@ -17879,24 +17898,28 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const submittedRequestId = resolveSantaClawzExecutionRequestId(submit.payload);
-      const stateUrl = submittedRequestId
-        ? `${submit.source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
-        : null;
+      const stateUrl = resolveSantaClawzAuthenticatedStateUrl({
+        ...directPayment,
+        response: submit.payload
+      }, submittedRequestId, submit.source);
       const executionState = stateUrl
         ? await fetchSantaClawzExecutionStateForDirectPayment({ ...directPayment, stateUrl, submittedRequestId })
         : null;
       const combinedSubmitPayload = executionState?.payload
         ? sanitizeMetadata({ ...submit.payload, executionState: executionState.payload })
         : submit.payload;
-      const delivery = materializeSantaClawzInlineArtifacts(
-        sessionForDirectSubmit.id,
-        extractSantaClawzDelivery(combinedSubmitPayload)
-      );
       const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
         expectedInputDigestSha256: hireRequestDigestSha256,
         resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
       });
+      const delivery = materializeSantaClawzInlineArtifacts(
+        sessionForDirectSubmit.id,
+        restrictSantaClawzDeliveryToVerifiedOutputs(
+          extractSantaClawzDelivery(combinedSubmitPayload),
+          verifiedReturn
+        )
+      );
       const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
         verifiedReturn

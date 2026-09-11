@@ -18529,7 +18529,15 @@
 	      const relayStatus = String(summary.relayDeliveryStatus || operational.relayDeliveryStatus || paymentState.relayDeliveryStatus || '').trim().toLowerCase();
 	      const paymentStatus = String(summary.paymentStatus || operational.paymentStatus || paymentState.paymentStatus || directPayment.status || '').trim().toLowerCase();
 	      if (delivery.accepted) {
-	        return { title: 'Audit complete', detail: 'The Markdown report and structured JSON are ready.', badgeLabel: 'Done', summary: 'Audit complete · files ready' };
+	        const partialDelivery = directPayment?.delivery?.verification?.partialDelivery === true;
+	        return {
+	          title: 'Audit complete',
+	          detail: partialDelivery
+	            ? 'SantaClawz completed the audit. The intact Markdown report is ready; incomplete structured output was omitted.'
+	            : 'The Markdown report and structured JSON are ready.',
+	          badgeLabel: 'Done',
+	          summary: partialDelivery ? 'Audit complete · Markdown ready' : 'Audit complete · files ready'
+	        };
 	      }
 	      if (delivery.pending) {
 	        return { title: 'Verifying report', detail: 'SantaClawz returned the report. Magic City is verifying its delivery package.', badgeLabel: 'Verifying', summary: 'Report received · verifying delivery' };
@@ -18645,6 +18653,7 @@
 		        ? ''
 		        : `updated ${lastUpdateSeconds}s ago`;
 		      const retryBlocked = directPayment?.summary?.retryBlocked === true || directPayment?.summary?.returnRejected === true;
+		      const upstreamLifecycleVerified = directPayment?.summary?.returnValidation?.verificationSource === 'santaclawz_authenticated_lifecycle';
 		      const waitingText = verificationPending
 		        ? 'Report available. Delivery verification is pending.'
 		        : terminalFailure
@@ -18667,6 +18676,7 @@
 	          <div class="trace-meta">
 	            <div class="execution-proof-row">
 		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : verificationPending ? 'Verification pending' : progress?.badgeLabel || statusLabel)}</span>
+		              ${outputReady && upstreamLifecycleVerified ? '<span class="execution-proof-badge ready">Verified by SantaClawz</span>' : ''}
 		              ${requestId ? `<span class="execution-proof-badge">request ${escapeExecutionValue(String(requestId).slice(0, 18))}</span>` : ''}
 		              ${elapsedBadge ? `<span class="execution-proof-badge">${escapeExecutionValue(elapsedBadge)}</span>` : ''}
 		            </div>

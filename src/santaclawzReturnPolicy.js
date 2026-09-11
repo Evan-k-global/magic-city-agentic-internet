@@ -289,6 +289,103 @@ function validateSantaClawzDirectOutputProjection(payload = {}, {
   };
 }
 
+function validateSantaClawzAuthenticatedLifecycleProjection(payload = {}, {
+  expectedRequestId = '',
+  expectedInputDigestSha256 = ''
+} = {}) {
+  const executionState = isRecord(payload?.executionState) ? payload.executionState : null;
+  const verifiedOutput = isRecord(executionState?.delivery?.protocolVerifiedOutput)
+    ? executionState.delivery.protocolVerifiedOutput
+    : null;
+  if (!executionState || !verifiedOutput) return { ok: false, reason: 'santaclawz_return_missing' };
+
+  const requestId = String(executionState.requestId || executionState.ids?.executionRequestId || '').trim();
+  if (!requestId || (expectedRequestId && requestId !== String(expectedRequestId).trim())) {
+    return { ok: false, reason: 'santaclawz_return_request_mismatch' };
+  }
+  const accessMode = String(executionState.stateAccess?.mode || '').trim();
+  if (!['workspace', 'payment_digest_recovery'].includes(accessMode)) {
+    return { ok: false, reason: 'santaclawz_direct_output_auth_invalid' };
+  }
+  const inputDigestSha256 = String(verifiedOutput.inputDigestSha256 || '').trim().toLowerCase();
+  if (
+    inputDigestSha256
+    && expectedInputDigestSha256
+    && inputDigestSha256 !== String(expectedInputDigestSha256).trim().toLowerCase()
+  ) {
+    return { ok: false, reason: 'santaclawz_return_input_mismatch' };
+  }
+
+  const protocolLifecycle = isRecord(executionState.protocolLifecycle) ? executionState.protocolLifecycle : {};
+  const lifecycle = isRecord(executionState.lifecycle) ? executionState.lifecycle : {};
+  const lifecycleChecks = isRecord(executionState.lifecycleChecks) ? executionState.lifecycleChecks : {};
+  const protocolState = String(protocolLifecycle.protocolState || executionState.protocolState || '').toUpperCase();
+  const proofStatus = String(lifecycle.proofStatus || '').toLowerCase();
+  const paymentFinality = String(protocolLifecycle.paymentFinality || executionState.paymentFinality || '').toLowerCase();
+  const sellerOutcome = String(protocolLifecycle.sellerOutcome || executionState.sellerOutcome || '').toLowerCase();
+  if (
+    protocolState !== 'DELIVERED_SETTLED'
+    || paymentFinality !== 'settled'
+    || sellerOutcome !== 'completed'
+    || !['return_validated', 'anchored_or_attested'].includes(proofStatus)
+    || (protocolLifecycle.terminal !== true && lifecycleChecks.terminal !== true && lifecycleChecks.protocolTerminal !== true)
+  ) {
+    return { ok: false, reason: 'santaclawz_return_not_completed' };
+  }
+
+  const outputs = Array.isArray(verifiedOutput.buyerVisibleOutputs)
+    ? verifiedOutput.buyerVisibleOutputs
+    : [];
+  const verifiedBuyerOutputs = [];
+  const suppressedBuyerOutputs = [];
+  for (const entry of outputs) {
+    if (!isRecord(entry)) continue;
+    const name = String(entry.name || '').trim();
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    const declaredHash = String(entry.sha256 || '').trim().toLowerCase();
+    const contentType = String(entry.contentType || '').trim();
+    if (!name || !text || !SHA256_HEX.test(declaredHash)) {
+      suppressedBuyerOutputs.push({ name: name || null, reason: 'missing_content_or_hash' });
+      continue;
+    }
+    const actualHash = sha256Hex(Buffer.from(text, 'utf8'));
+    if (actualHash !== declaredHash) {
+      suppressedBuyerOutputs.push({ name, reason: 'received_bytes_hash_mismatch' });
+      continue;
+    }
+    if (/\.json$/i.test(name)) {
+      try {
+        JSON.parse(text);
+      } catch {
+        suppressedBuyerOutputs.push({ name, reason: 'invalid_json' });
+        continue;
+      }
+    }
+    verifiedBuyerOutputs.push({
+      name,
+      text,
+      sha256: actualHash,
+      bytes: Buffer.byteLength(text, 'utf8'),
+      ...(contentType ? { contentType } : {})
+    });
+  }
+
+  return {
+    ok: true,
+    mode: 'authenticated_terminal_lifecycle',
+    requestId,
+    accessMode,
+    upstreamLifecycleVerified: true,
+    packageHash: String(verifiedOutput.packageHash || '').trim().toLowerCase() || null,
+    verifiedOutput,
+    verifiedBuyerOutputs,
+    verifiedInlineOutputs: verifiedBuyerOutputs.map(({ name, sha256, bytes }) => ({ name, sha256, bytes })),
+    deliverables: verifiedBuyerOutputs.map(({ name, sha256 }) => ({ name, sha256 })),
+    suppressedBuyerOutputs,
+    partialDelivery: suppressedBuyerOutputs.length > 0
+  };
+}
+
 export async function verifySantaClawzCompletedReturn(payload = {}, {
   expectedRequestId = '',
   expectedInputDigestSha256 = '',
@@ -304,8 +401,21 @@ export async function verifySantaClawzCompletedReturn(payload = {}, {
       expectedInputDigestSha256
     });
   }
+  if (!validation.ok && [
+    'santaclawz_return_missing',
+    'santaclawz_inline_output_hash_mismatch',
+    'santaclawz_inline_json_invalid',
+    'santaclawz_buyer_delivery_missing',
+    'santaclawz_package_hash_unverifiable'
+  ].includes(validation.reason)) {
+    const lifecycleValidation = validateSantaClawzAuthenticatedLifecycleProjection(payload, {
+      expectedRequestId,
+      expectedInputDigestSha256
+    });
+    if (lifecycleValidation.ok) validation = lifecycleValidation;
+  }
   if (!validation.ok) return validation;
-  if (validation.mode === 'authenticated_direct_output') {
+  if (validation.mode === 'authenticated_direct_output' || validation.mode === 'authenticated_terminal_lifecycle') {
     return {
       ...validation,
       verifiedDeliverableCount: validation.verifiedInlineOutputs.length
