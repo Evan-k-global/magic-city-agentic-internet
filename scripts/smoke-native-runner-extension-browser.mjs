@@ -503,6 +503,18 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '</main>'
     ].join('');
   }
+  if (pathname === '/cart-duplicated-title') {
+    const title = 'Nature Valley Granola Bar, Oats and Honey, 1.5 oz';
+    return [
+      '<main><h1>Your cart</h1>',
+      '<div id="activeCartViewForm">',
+      '<div class="sc-list-item" data-asin="NATURE-VALLEY-OATS-HONEY">',
+      `<a href="/dp/NATURE-VALLEY-OATS-HONEY"><span>${title}</span><span aria-hidden="true">${title}</span></a>`,
+      '<p>$2.97</p><label>Quantity: <select name="quantity"><option selected>1</option></select></label><button data-action="delete">Delete</button>',
+      '</div></div><p>Subtotal (1 item): $2.97</p>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/cart' || pathname === '/gp/cart/view.html') {
     if (searchParams.get('brand') === 'nature-valley-valid') brandCartItem = 'nature-valley-valid';
     if (searchParams.get('late') === 'paid') {
@@ -670,7 +682,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<label><input type="radio" name="delivery" /> Try Prime FREE one-day trial</label></div></div>',
       `<input aria-label="Billing street address" value="${confirmedPendingOrder ? '99 Billing Plaza' : '1 Wrong Billing Way'}" />`,
       `<input aria-label="Billing ZIP code" value="${confirmedPendingOrder ? '10001' : '99999'}" />`,
-      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
+      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="sessionStorage.setItem('magic-city-native-final-click', String(Number(sessionStorage.getItem('magic-city-native-final-click') || 0) + 1)); ${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
       `<p id="order-result">${confirmedPendingOrder ? 'Order placed' : ''}</p>`,
       confirmedPendingOrder ? '<script>document.querySelector(\'[aria-label="Street address"]\').value="1 Magic City Way"; document.querySelector(\'[aria-label="City"]\').value="San Francisco"; document.querySelector(\'[aria-label="State"]\').value="CA"; document.querySelector(\'[aria-label="ZIP code"]\').value="94107"; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true; document.querySelector(\'#payment-options\').hidden=true;</script>' : '',
       '</main>'
@@ -748,6 +760,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
         ? 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz'
         : pendingVariant === 'almond-pack-mismatch'
           ? 'Nature Valley Sweet & Salty Almond Granola Bars, 12 ct, 14.4 oz'
+        : pendingVariant === 'single-oats'
+          ? 'Nature Valley Granola Bar, Oats and Honey, 1.5 oz'
       : liveSparseDuplicateOrder
         ? 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz'
         : 'Test Gadget';
@@ -2523,7 +2537,14 @@ async function main() {
       pendingOrderConfirmationDelayMs: 65_000
     };
     dropPrepareCartCheckpointResponse = true;
-    dropCommittedCheckpointResponses = new Set(['open-site', 'inspect-review', 'confirm-pending-order']);
+    dropCommittedCheckpointResponses = new Set([
+      'open-site',
+      'inspect-cart',
+      'reconcile-payment-profile',
+      'inspect-review',
+      'submit-final-order',
+      'confirm-pending-order'
+    ]);
     committedCheckpointDroppedAtMs = new Map();
     committedCheckpointRecoveryPolledAtMs = new Map();
     await popup.close();
@@ -2656,7 +2677,14 @@ async function main() {
         sawReconnectingRunner
       })}`);
     }
-    const expandedRecoveryActions = ['open-site', 'inspect-review', 'confirm-pending-order'];
+    const expandedRecoveryActions = [
+      'open-site',
+      'inspect-cart',
+      'reconcile-payment-profile',
+      'inspect-review',
+      'submit-final-order',
+      'confirm-pending-order'
+    ];
     const expandedRecoveryTimings = Object.fromEntries(expandedRecoveryActions.map((actionId) => {
       const droppedAtMs = Number(committedCheckpointDroppedAtMs.get(actionId) || 0);
       const recoveryPolledAtMs = Number(committedCheckpointRecoveryPolledAtMs.get(actionId) || 0);
@@ -2690,18 +2718,23 @@ async function main() {
     });
     recordPurchaseScenario('Lost committed non-cart checkpoints resume inline without replay', expandedRecoveryTimings);
     const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
-    const pendingFinalClicks = primaryStorePage
-      ? await primaryStorePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0))
-      : 0;
+    const finalClickEvidence = primaryStorePage
+      ? await primaryStorePage.evaluate(() => ({
+          firstSubmitClicks: Number(sessionStorage.getItem('magic-city-native-final-click') || 0),
+          pendingFinalClicks: Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0)
+        }))
+      : { firstSubmitClicks: 0, pendingFinalClicks: 0 };
+    const { firstSubmitClicks, pendingFinalClicks } = finalClickEvidence;
     const pendingDiagnosticPage = await context.newPage();
     await pendingDiagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
     const pendingRunnerState = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
       chrome.storage.local.get(['activeRun'], resolve);
     }));
-    if (pendingFinalClicks !== 1
+    if (firstSubmitClicks !== 1
+      || pendingFinalClicks !== 1
       || !checkpoints.some((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
         && checkpoint.planActionStatus === 'completed')) {
-      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ pendingFinalClicks, activeRun: pendingRunnerState.activeRun, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus, url: checkpoint.browser?.url, reason: checkpoint.browser?.runnerStep?.reason, evidence: checkpoint.browser?.runnerStep?.pendingOrderMatchEvidence, cartItems: checkpoint.browser?.checkoutSummary?.cartItems })) })}`);
+      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ firstSubmitClicks, pendingFinalClicks, activeRun: pendingRunnerState.activeRun, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus, url: checkpoint.browser?.url, reason: checkpoint.browser?.runnerStep?.reason, evidence: checkpoint.browser?.runnerStep?.pendingOrderMatchEvidence, cartItems: checkpoint.browser?.checkoutSummary?.cartItems })) })}`);
     }
     const durableDispatches = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
       chrome.storage.local.get(['finalOrderDispatches'], resolve);
@@ -2712,7 +2745,10 @@ async function main() {
       || !durableScopes.includes(`${plan.planHash}:confirm-pending-order`)) {
       fail(`browser_extension_pending_order_dispatch_receipts_not_both_durable:${JSON.stringify(durableDispatches)}`);
     }
-    recordPurchaseScenario('Sparse Amazon duplicateOrder page is continued exactly once', { pendingFinalClicks });
+    recordPurchaseScenario('Lost first-submit response advances to pending-order continuation without replay', {
+      firstSubmitClicks,
+      pendingFinalClicks
+    });
 
     const replayPage = await context.newPage();
     await replayPage.goto(`${baseUrl}/checkout/pending-order?stay=1`);
@@ -2809,6 +2845,55 @@ async function main() {
       clickCount: accessibilityPendingClickCount
     });
     await accessibilityPendingPage.close();
+
+    const duplicatedTitleCartPage = await context.newPage();
+    await duplicatedTitleCartPage.goto(`${baseUrl}/cart-duplicated-title`);
+    const duplicatedTitleCartTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), duplicatedTitleCartPage.url());
+    const duplicatedTitleCartState = await pendingDiagnosticPage.evaluate(async (tabId) => {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+      return chrome.tabs.sendMessage(tabId, { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile: {} });
+    }, duplicatedTitleCartTab.id);
+    const duplicatedTitleCartItem = duplicatedTitleCartState?.checkoutSummary?.cartItems?.[0] || null;
+    const cleanSingleBarTitle = 'Nature Valley Granola Bar, Oats and Honey, 1.5 oz';
+    if (duplicatedTitleCartItem?.asin !== 'NATURE-VALLEY-OATS-HONEY'
+      || duplicatedTitleCartItem?.title !== cleanSingleBarTitle
+      || Number(duplicatedTitleCartItem?.price) !== 2.97
+      || Number(duplicatedTitleCartItem?.quantity) !== 1) {
+      fail(`browser_extension_cart_duplicated_title_not_clean:${JSON.stringify(duplicatedTitleCartState)}`);
+    }
+    await duplicatedTitleCartPage.close();
+
+    const duplicatedTitlePendingPage = await context.newPage();
+    await duplicatedTitlePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=single-oats&unitPrice=2.97`);
+    const duplicatedTitlePendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), duplicatedTitlePendingPage.url());
+    const duplicatedTitlePendingOutcome = await invokePendingAction(duplicatedTitlePendingTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-duplicated-title-plan:confirm-pending-order',
+      sessionId: 'pending-duplicated-title-session',
+      planHash: 'pending-duplicated-title-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-OATS-HONEY', title: cleanSingleBarTitle, price: 2.97 },
+      boundCartEvidence: {
+        ...duplicatedTitleCartItem,
+        sessionId: 'pending-duplicated-title-session',
+        planHash: 'pending-duplicated-title-plan'
+      }
+    });
+    await duplicatedTitlePendingPage.waitForTimeout(300);
+    const duplicatedTitlePendingClickCount = await duplicatedTitlePendingPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!duplicatedTitlePendingOutcome?.completed
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.identitySource !== 'exact_title'
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.quantityMatches !== true
+      || duplicatedTitlePendingClickCount !== 1) {
+      fail(`browser_extension_duplicated_title_pending_order_not_confirmed:${JSON.stringify({ duplicatedTitlePendingOutcome, duplicatedTitlePendingClickCount })}`);
+    }
+    recordPurchaseScenario('Duplicated cart title is canonicalized before strict pending-order matching', {
+      title: duplicatedTitleCartItem.title,
+      identitySource: duplicatedTitlePendingOutcome.pendingOrderMatchEvidence.identitySource,
+      clickCount: duplicatedTitlePendingClickCount
+    });
+    await duplicatedTitlePendingPage.close();
 
     const livePendingPage = await context.newPage();
     await livePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=2.97`);

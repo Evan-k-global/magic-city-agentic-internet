@@ -10,8 +10,8 @@ const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
 const INLINE_CHECKPOINT_RECONCILIATION_DELAY_MS = 200;
-const MAX_INLINE_CHECKPOINT_RECONCILIATIONS = 4;
-const LEAN_RUNTIME_MODE = 'v0.5.5-canonical-pending-order-identity';
+const MAX_INLINE_CHECKPOINT_RECONCILIATIONS = 8;
+const LEAN_RUNTIME_MODE = 'v0.5.6-checkpoint-and-pending-order-recovery';
 const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
@@ -70,7 +70,7 @@ async function reconcileCommittedCheckpoint(result) {
     const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
     const actionId = String(stored.lastExecution?.actionId || '');
     const sessionId = String(interrupted.sessionId || '');
-    if (!/^(?:open-site|(?:prepare|open)-cart|continue-checkout|inspect-review|confirm-pending-order|confirm-merchant-order)(?:-\d+)?$/.test(actionId)
+    if (!/^(?:open-site|(?:prepare|open|inspect)-cart|continue-checkout|reconcile-payment-profile|inspect-review|submit-final-order|confirm-pending-order|confirm-merchant-order)(?:-\d+)?$/.test(actionId)
       || String(stored.lastExecution?.sessionId || '') !== sessionId
       || String(stored.activeRun?.sessionId || '') !== sessionId) {
       return reconciledResult;

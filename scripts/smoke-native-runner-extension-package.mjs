@@ -171,8 +171,14 @@ if (!/ACTIVE_MISSION_RECOVERY_DELAY_MS\s*=\s*30_000/.test(packagedBackground)
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
 }
 if (!/async function reconcileCommittedCheckpoint\(result\)/.test(packagedBackground)
-  || !/open-site\|\(\?:prepare\|open\)-cart\|continue-checkout\|inspect-review\|confirm-pending-order\|confirm-merchant-order/.test(packagedBackground)) {
+  || !/open-site\|\(\?:prepare\|open\|inspect\)-cart\|continue-checkout\|reconcile-payment-profile\|inspect-review\|submit-final-order\|confirm-pending-order\|confirm-merchant-order/.test(packagedBackground)
+  || !/MAX_INLINE_CHECKPOINT_RECONCILIATIONS\s*=\s*8/.test(packagedBackground)) {
   fail('committed checkout checkpoints must reconcile inline only for the reviewed action allowlist');
+}
+if (!/let finalSubmitAuthorityLease = normalizeFinalSubmitAuthorityLease/.test(packagedLegacyBackground)
+  || !/const leaseScopeChangedAfterCheckpoint =/.test(packagedLegacyBackground)
+  || !/recoverMissingFinalSubmitAuthorityLease\(session, plan, action\)/.test(packagedLegacyBackground)) {
+  fail('a recovered final-submit cursor must obtain authority scoped to its current signed action');
 }
 if (!/if \(hasConfirmedMerchantOrder\(report\)\) \{[\s\S]{0,240}return reportAndStop\(/.test(packagedLegacyBackground)) {
   fail('durably checkpointed merchant confirmation must terminate before later tab-dependent actions');

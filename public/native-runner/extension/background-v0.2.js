@@ -2839,8 +2839,11 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
   };
   if (action.pendingOrderContinuation === true) {
     const beforeContinuation = await chrome.tabs.get(tabId).catch(() => null);
-    if (beforeContinuation?.url
-      && !/\/(?:duplicateOrder|pending-order)(?:[/?#]|$)/i.test(beforeContinuation.url)
+    const pendingOrderUrlVisible = /\/(?:duplicateOrder|pending-order)(?:[/?#]|$)/i.test(String(beforeContinuation?.url || ''));
+    if (pendingOrderUrlVisible) {
+      await waitForTabReady(tabId, 2_500).catch(() => null);
+      await delay(120);
+    } else if (beforeContinuation?.url
       && !/order-confirmation|thank|order-confirmed/i.test(beforeContinuation.url)) {
       await waitForTabNavigation(tabId, beforeContinuation.url, 5_000).catch(() => null);
       await delay(180);
@@ -3568,6 +3571,19 @@ async function runSession(rawSession) {
       // capability must still be current and the runner must have observed a
       // live session within one short lease window before dispatch.
       if (action.type === 'final_submit' && !recoveredFinalOrderAlreadyConfirmed) {
+	        const leaseScopeChangedAfterCheckpoint = Boolean(
+	          resumingPersistedRun
+	          && finalSubmitAuthorityLease
+	          && (
+	            finalSubmitAuthorityLease.sessionId !== String(session.id || '').trim()
+	            || finalSubmitAuthorityLease.planHash !== String(plan.planHash || '').trim()
+	            || finalSubmitAuthorityLease.actionId !== String(action.id || '').trim()
+	          )
+	        );
+	        if (leaseScopeChangedAfterCheckpoint) {
+	          finalSubmitAuthorityLease = null;
+	          await saveActiveRun({ finalSubmitAuthorityLease: null });
+	        }
 	        if (!finalSubmitAuthorityLease) {
 	          const recoveredAuthority = await recoverMissingFinalSubmitAuthorityLease(session, plan, action);
 	          session = recoveredAuthority.session;
@@ -3731,7 +3747,14 @@ async function runSession(rawSession) {
       }
       let report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
       const observedCartEvidence = verifiedCartEvidenceFor(report, progress.selectedCandidate, session, plan);
-      if (observedCartEvidence) progress.cartEvidence = observedCartEvidence;
+      if (observedCartEvidence) {
+        progress.cartEvidence = observedCartEvidence;
+        // Keep the exact cart identity available if the server commits this
+        // checkpoint but its response is lost. Recovery may advance directly
+        // to the signed pending-order continuation without reinspecting or
+        // mutating the cart.
+        await saveActiveRun({ cartEvidence: observedCartEvidence });
+      }
       if (action.type === 'final_submit' && Array.isArray(outcome.finalSubmitReceipts)) {
         // The executor returns both pre-navigation receipts in its signed
         // action response. Preserve that explicit pair even if a merchant
