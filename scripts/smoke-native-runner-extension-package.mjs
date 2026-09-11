@@ -230,6 +230,11 @@ if (!/retryingRecoverableExecution/.test(packagedBackground)
   || !/\^select-match/.test(packagedBackground)) {
   fail('select-match executor injection recovery must remain inside the active mission connection');
 }
+if (!/onClaimAccepted/.test(packagedLegacyBackground)
+  || !/directClaimAccepted/.test(packagedLegacyBackground)
+  || !/const status = claimRejected[\s\S]{0,180}\? 'claim_failed'/.test(packagedLegacyBackground)) {
+  fail('direct-start failures must distinguish a rejected claim from an accepted mission execution');
+}
 
   const smoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
     cwd: rootDir,
@@ -279,6 +284,7 @@ if (!/retryingRecoverableExecution/.test(packagedBackground)
   if (confirmedOrderTerminalSmoke.status !== 0) fail(`confirmed order terminal smoke exited with ${confirmedOrderTerminalSmoke.status}`);
 
   for (const focus of [
+    'claim-rejection',
     'selection-injection-recovery',
     'selection-delayed-page-load',
     'selection-fast-path-timeout'

@@ -3331,7 +3331,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
   return outcome || { completed: false, reason: 'The local browser action did not return a result.' };
 }
 
-async function runSession(rawSession) {
+async function runSession(rawSession, { onClaimAccepted = null } = {}) {
   if (inFlightSessionIds.has(rawSession.id)) return { sessionId: rawSession.id, status: 'already_running' };
   inFlightSessionIds.add(rawSession.id);
   let session = rawSession;
@@ -3369,6 +3369,7 @@ async function runSession(rawSession) {
     scheduleRunnerResume(8_000);
     if (!startupTiming.claimStartedAt) startupTiming.claimStartedAt = new Date().toISOString();
     session = await claimSession(rawSession);
+    if (typeof onClaimAccepted === 'function') onClaimAccepted(session);
     let authorityVerifiedAt = Date.now();
     startupTiming.claimAcceptedAt = new Date().toISOString();
     startupTiming.claimDurationMs = Math.max(0, Date.parse(startupTiming.claimAcceptedAt) - Date.parse(startupTiming.claimStartedAt));
@@ -4367,7 +4368,7 @@ async function resumeActiveRun() {
 async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = '') {
   const normalizedSessionId = String(requestedSessionId || '').trim();
   const normalizedDispatchNonce = String(requestedDispatchNonce || '').trim();
-  let directExecutionStarted = false;
+  let directClaimAccepted = false;
   const wakeReceivedAt = new Date().toISOString();
   const recordWake = async (status, message = '') => {
     if (!normalizedSessionId) return;
@@ -4405,8 +4406,11 @@ async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = 
         runnerClientRunStartedAt: String(clientRunStartedAt || '').trim() || null,
         runnerWakeReceivedAt: wakeReceivedAt
       };
-      directExecutionStarted = true;
-      const execution = await runSession(directSession);
+      const execution = await runSession(directSession, {
+        onClaimAccepted: () => {
+          directClaimAccepted = true;
+        }
+      });
       return {
         paired: true,
         sessions: [],
@@ -4421,10 +4425,11 @@ async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = 
     poll = await pollSessions();
   } catch (error) {
     const message = error?.message || String(error);
-    const status = directExecutionStarted
-      ? 'step_needs_review'
-      : /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
-        ? 'claim_failed'
+    const claimRejected = /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message);
+    const status = claimRejected
+      ? 'claim_failed'
+      : directClaimAccepted
+        ? 'step_needs_review'
         : 'wake_failed';
     await recordWake(status, message);
     return {
@@ -4432,7 +4437,7 @@ async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = 
       sessions: [],
       actionableCount: 0,
       requestedSessionId: normalizedSessionId || null,
-      requestedSessionFound: directExecutionStarted,
+      requestedSessionFound: directClaimAccepted,
       executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status, error: message }] : []
     };
   }

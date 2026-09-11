@@ -1818,9 +1818,40 @@ async function main() {
         || session.status !== 'queued') {
         fail(`browser_extension_claim_rejection_state_not_durable:${JSON.stringify({ runnerState, checkpoints, session })}`);
       }
-      recordPurchaseScenario('Claim rejection is reported immediately without opening a browser action', {
+      rejectPrimaryClaimError = 'extension_run_dispatch_required';
+      const directWakeResult = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'rejected-direct-dispatch'
+        }, resolve);
+      }), session.id);
+      if (!directWakeResult?.ok
+        || directWakeResult.result?.requestedSessionFound !== false
+        || directWakeResult.result?.executed?.[0]?.status !== 'claim_failed'
+        || directWakeResult.result?.executed?.[0]?.error !== rejectPrimaryClaimError) {
+        fail(`browser_extension_direct_claim_rejection_not_reported:${JSON.stringify(directWakeResult)}`);
+      }
+      const directRunnerState = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'activeRun'], resolve);
+      }));
+      if (directRunnerState.lastError !== rejectPrimaryClaimError
+        || directRunnerState.lastExecution?.status !== 'claim_failed'
+        || directRunnerState.activeSessionId
+        || directRunnerState.activeRun
+        || checkpoints.length !== 0
+        || session.status !== 'queued') {
+        fail(`browser_extension_direct_claim_rejection_state_not_durable:${JSON.stringify({
+          runnerState: directRunnerState,
+          checkpoints,
+          session
+        })}`);
+      }
+      recordPurchaseScenario('Polling and direct-start claim rejections are reported before browser work', {
         status: runnerState.lastExecution.status,
-        error: runnerState.lastError
+        directStatus: directRunnerState.lastExecution.status,
+        error: runnerState.lastError,
+        directError: directRunnerState.lastError
       });
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner claim rejection smoke passed');
