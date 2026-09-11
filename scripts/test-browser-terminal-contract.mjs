@@ -199,6 +199,24 @@ const failedFinalDispatch = evaluateBrowserExtensionFulfillment({
 assert.equal(failedFinalDispatch.accepted, false, 'a final click that did not dispatch must never be accepted as an order');
 assert.equal(failedFinalDispatch.proofEligible, false);
 
+const pendingOrderManualVerification = evaluateBrowserExtensionFulfillment({
+  status: 'fulfilled',
+  result: {
+    browserExecution: {
+      milestoneProtocol: 'verified-v1',
+      verifiedMilestones: ['checkout_open', 'final_review_ready', 'final_submit_requested'],
+      finalUrl: 'https://www.amazon.com/checkout/p/example/duplicateOrder',
+      stopState: 'pending_order_verification_required',
+      finalSubmitRequested: false,
+      checkoutProgress: { checkoutOpened: true },
+      checkoutSummary: { stage: 'checkout', addressVerification: 'unverified' }
+    }
+  }
+});
+assert.equal(pendingOrderManualVerification.status, 'fulfilled');
+assert.equal(pendingOrderManualVerification.accepted, true);
+assert.equal(pendingOrderManualVerification.reason, 'pending_order_verification_required');
+
 const confirmedOrderWithStaleCheckoutSummary = evaluateBrowserExtensionFulfillment({
   status: 'fulfilled',
   result: {

@@ -492,6 +492,17 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '</main>'
     ].join('');
   }
+  if (pathname === '/cart-accessibility-title') {
+    return [
+      '<main><h1>Your cart</h1>',
+      '<div id="activeCartViewForm">',
+      '<div class="sc-list-item" data-asin="NATURE-VALLEY-ALMOND">',
+      '<a href="/dp/NATURE-VALLEY-ALMOND">Nature Valley Sweet &amp; Salty Almond Granola Bars, 6 ct, 7.2 oz<span class="a-offscreen"> | ... Opens in a new tab</span></a>',
+      '<p>$2.97</p><label>Quantity: <select name="quantity"><option selected>1</option></select></label><button data-action="delete">Delete</button>',
+      '</div></div><p>Subtotal (1 item): $2.97</p>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/cart' || pathname === '/gp/cart/view.html') {
     if (searchParams.get('brand') === 'nature-valley-valid') brandCartItem = 'nature-valley-valid';
     if (searchParams.get('late') === 'paid') {
@@ -730,12 +741,17 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
   if (pathname === '/checkout/pending-order' || pathname === '/checkout/duplicateOrder') {
     const sparseDuplicateOrder = pathname === '/checkout/duplicateOrder';
     const liveSparseDuplicateOrder = sparseDuplicateOrder && searchParams.get('live') === '1';
-    const pendingTitle = searchParams.get('variant') === 'cashew'
+    const pendingVariant = searchParams.get('variant');
+    const pendingTitle = pendingVariant === 'cashew'
       ? 'Nature Valley Cashew Granola Bars'
+      : pendingVariant === 'almond'
+        ? 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz'
+        : pendingVariant === 'almond-pack-mismatch'
+          ? 'Nature Valley Sweet & Salty Almond Granola Bars, 12 ct, 14.4 oz'
       : liveSparseDuplicateOrder
         ? 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz'
         : 'Test Gadget';
-    const pendingAsin = searchParams.get('variant') === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
+    const pendingAsin = pendingVariant === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
     const pendingQuantity = Number(searchParams.get('quantity')) || null;
     const pendingUnitPrice = Number(searchParams.get('unitPrice')) || 3.5;
     const pendingComparisonUnitPrice = Number(searchParams.get('comparisonUnitPrice')) || 0.33;
@@ -1716,6 +1732,125 @@ async function main() {
         };
       };
 
+      const runPendingOrderVerificationCase = async () => {
+        checkpoints.length = 0;
+        fulfillment = null;
+        const id = 'browser-smoke-pending-order-verification';
+        const pendingPlan = rehashExtensionPlan({
+          ...plan,
+          planId: `mplan_${id}`,
+          startUrl: `${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=cashew&unitPrice=2.97`,
+          limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+          actions: [
+            {
+              id: 'submit-final-order',
+              type: 'final_submit',
+              missionAction: 'final_submit',
+              autoSubmitAfterVerifiedCheckout: true,
+              expectedMilestone: 'final_submit_requested',
+              maxPrice: 4
+            },
+            {
+              id: 'confirm-pending-order',
+              type: 'final_submit',
+              missionAction: 'final_submit',
+              autoSubmitAfterVerifiedCheckout: true,
+              pendingOrderContinuation: true,
+              priorFinalSubmitActionId: 'submit-final-order',
+              chainAuthorizationActionId: 'submit-final-order',
+              expectedItemCount: 1,
+              maxPrice: 4
+            },
+            {
+              id: 'confirm-merchant-order',
+              type: 'inspect',
+              missionAction: 'read_public_page',
+              awaitMerchantOrderConfirmation: true,
+              merchantConfirmationTimeoutMs: 90_000,
+              expectedMilestone: 'order_submitted'
+            }
+          ]
+        });
+        const merchantPage = await context.newPage();
+        await merchantPage.goto(pendingPlan.startUrl);
+        const merchantTab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) => (
+          tabs.find((candidate) => candidate.url === url) || null
+        )), merchantPage.url());
+        if (!merchantTab?.id) fail(`browser_extension_${id}_merchant_tab_missing`);
+        const cartEvidence = {
+          sessionId: id,
+          planHash: pendingPlan.planHash,
+          asin: 'NATURE-VALLEY-ALMOND',
+          title: 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz',
+          price: 2.97,
+          quantity: 1,
+          verifiedAt: new Date().toISOString()
+        };
+        session = {
+          ...session,
+          id,
+          status: 'queued',
+          claimedByPluginId: null,
+          fulfillment: null,
+          missionBoundAuth: {
+            ...session.missionBoundAuth,
+            capabilityId: `browser-smoke-${id}-capability`,
+            subject: { sessionId: id }
+          },
+          extensionMissionPlan: pendingPlan,
+          extensionMissionPlanState: {
+            planHash: pendingPlan.planHash,
+            nextActionIndex: 1,
+            completedActionIds: ['submit-final-order'],
+            verifiedMilestones: ['checkout_open', 'final_review_ready', 'final_submit_requested']
+          }
+        };
+        await seedSessionCheckoutProfile(id, defaultCheckoutProfile, pendingPlan.planHash);
+        await popup.evaluate(async ({ sessionId, tabId, planHash, evidence }) => {
+          const stored = await chrome.storage.local.get({ activeMissionTabs: {}, finalOrderDispatches: {} });
+          await chrome.storage.local.set({
+            activeSessionId: sessionId,
+            activeRun: {
+              sessionId,
+              planHash,
+              phase: 'running',
+              tabId,
+              nextActionIndex: 1,
+              selectedCandidate: { asin: evidence.asin, title: evidence.title, price: evidence.price },
+              cartEvidence: evidence
+            },
+            activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+            finalOrderDispatches: {
+              ...(stored.finalOrderDispatches || {}),
+              [String(tabId)]: [{
+                actionId: 'submit-final-order',
+                receiptScope: `${planHash}:submit-final-order`,
+                kind: 'final_order',
+                phase: 'click_dispatched',
+                at: new Date().toISOString()
+              }]
+            }
+          });
+        }, { sessionId: id, tabId: merchantTab.id, planHash: pendingPlan.planHash, evidence: cartEvidence });
+        const wake = await popup.evaluate((sessionId) => new Promise((resolve) => {
+          chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+        }), id);
+        if (!wake?.ok) fail(`browser_extension_${id}_wake_failed:${JSON.stringify(wake)}`);
+        await waitFor(() => Boolean(fulfillment), 10_000);
+        const browserExecution = fulfillment?.result?.browserExecution || {};
+        const clickCount = await merchantPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+        if (fulfillment?.status !== 'fulfilled'
+          || fulfillment?.fundingDisposition !== 'hold'
+          || browserExecution.stopState !== 'pending_order_verification_required'
+          || !/pending order did not match/i.test(String(browserExecution.stopEvidence || ''))
+          || clickCount !== 0
+          || checkpoints.some((checkpoint) => checkpoint.state === 'address_verification_required')) {
+          fail(`browser_extension_${id}_wrong_handoff:${JSON.stringify({ fulfillment, checkpoints, clickCount })}`);
+        }
+        await merchantPage.close();
+        return { stopState: browserExecution.stopState, fundingDisposition: fulfillment.fundingDisposition, clickCount };
+      };
+
       const closedTabResult = await runConfirmedOrderCase({
         id: 'browser-smoke-confirmation-tab-closed',
         closeTab: true
@@ -1726,6 +1861,8 @@ async function main() {
         dropFulfillResponse: true
       });
       recordPurchaseScenario('Lost fulfillment response reconciles the original confirmed order without replay', droppedResponseResult);
+      const pendingOrderVerificationResult = await runPendingOrderVerificationCase();
+      recordPurchaseScenario('Pending-order identity mismatch pauses for manual verification without an address error', pendingOrderVerificationResult);
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner confirmed order terminal smoke passed');
       return;
@@ -2624,6 +2761,55 @@ async function main() {
     recordPurchaseScenario('Pending-order continuation reuses action-scoped no-replay receipts', { replayClickCount });
     await replayPage.close();
 
+    const accessibilityCartPage = await context.newPage();
+    await accessibilityCartPage.goto(`${baseUrl}/cart-accessibility-title`);
+    const accessibilityCartTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), accessibilityCartPage.url());
+    const accessibilityCartState = await pendingDiagnosticPage.evaluate(async (tabId) => {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+      return chrome.tabs.sendMessage(tabId, { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile: {} });
+    }, accessibilityCartTab.id);
+    const accessibilityCartItem = accessibilityCartState?.checkoutSummary?.cartItems?.[0] || null;
+    const cleanAlmondTitle = 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz';
+    if (accessibilityCartItem?.asin !== 'NATURE-VALLEY-ALMOND'
+      || accessibilityCartItem?.title !== cleanAlmondTitle
+      || Number(accessibilityCartItem?.price) !== 2.97
+      || Number(accessibilityCartItem?.quantity) !== 1) {
+      fail(`browser_extension_cart_accessibility_title_not_clean:${JSON.stringify(accessibilityCartState)}`);
+    }
+    await accessibilityCartPage.close();
+
+    const accessibilityPendingPage = await context.newPage();
+    await accessibilityPendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=almond&unitPrice=2.97`);
+    const accessibilityPendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), accessibilityPendingPage.url());
+    const accessibilityPendingOutcome = await invokePendingAction(accessibilityPendingTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-accessibility-title-plan:confirm-pending-order',
+      sessionId: 'pending-accessibility-title-session',
+      planHash: 'pending-accessibility-title-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-ALMOND', title: cleanAlmondTitle, price: 2.97 },
+      boundCartEvidence: {
+        ...accessibilityCartItem,
+        sessionId: 'pending-accessibility-title-session',
+        planHash: 'pending-accessibility-title-plan'
+      }
+    });
+    await accessibilityPendingPage.waitForTimeout(300);
+    const accessibilityPendingClickCount = await accessibilityPendingPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!accessibilityPendingOutcome?.completed
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.identitySource !== 'exact_title'
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.quantityMatches !== true
+      || accessibilityPendingClickCount !== 1) {
+      fail(`browser_extension_accessibility_title_pending_order_not_confirmed:${JSON.stringify({ accessibilityPendingOutcome, accessibilityPendingClickCount })}`);
+    }
+    recordPurchaseScenario('ASIN-bound cart title excludes the accessibility suffix before strict pending-order matching', {
+      title: accessibilityCartItem.title,
+      identitySource: accessibilityPendingOutcome.pendingOrderMatchEvidence.identitySource,
+      clickCount: accessibilityPendingClickCount
+    });
+    await accessibilityPendingPage.close();
+
     const livePendingPage = await context.newPage();
     await livePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=2.97`);
     const livePendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), livePendingPage.url());
@@ -2750,6 +2936,33 @@ async function main() {
     }
     recordPurchaseScenario('Pending-order continuation rejects a same-price product variant mismatch', { mismatchClickCount });
     await pendingMismatchPage.close();
+
+    const pendingPackMismatchPage = await context.newPage();
+    await pendingPackMismatchPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=almond-pack-mismatch&unitPrice=2.97`);
+    const packMismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingPackMismatchPage.url());
+    const packMismatchOutcome = await invokePendingAction(packMismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-pack-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-pack-mismatch-session',
+      planHash: 'pending-pack-mismatch-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-ALMOND', title: 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz', price: 2.97 },
+      boundCartEvidence: {
+        sessionId: 'pending-pack-mismatch-session',
+        planHash: 'pending-pack-mismatch-plan',
+        asin: 'NATURE-VALLEY-ALMOND',
+        title: 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const packMismatchClickCount = await pendingPackMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (packMismatchOutcome?.completed !== false
+      || packMismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== false
+      || packMismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_pack_mismatch_not_rejected:${JSON.stringify({ packMismatchOutcome, packMismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects a same-price pack-size mismatch', { packMismatchClickCount });
+    await pendingPackMismatchPage.close();
 
     const pendingQuantityMismatchPage = await context.newPage();
     await pendingQuantityMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&quantity=2&unitPrice=2.97&orderTotal=5.94`);

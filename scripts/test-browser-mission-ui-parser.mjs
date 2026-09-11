@@ -144,6 +144,12 @@ assert.match(
 );
 assert.match(html, /Confirm delivery address/, 'address handoff must replace generic needs-attention copy');
 assert.match(html, /Choose payment method/, 'payment handoff must replace generic needs-attention copy');
+assert.match(html, /Pending order needs verification/, 'a pending-order identity mismatch must identify the real manual review boundary');
+assert.match(
+  localRunnerLegacyBackground,
+  /pendingOrderContinuationStep[\s\S]*pending_order_verification_required/,
+  'the sparse pending-order page must not be reclassified as an address-verification failure'
+);
 assert.match(html, /runState\.actionLabel[\s\S]*data-native-runner-focus-tab/, 'known browser handoffs must promote the prepared tab action to the run summary');
 assert.match(
   html,

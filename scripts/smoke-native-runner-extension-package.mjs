@@ -133,12 +133,17 @@ if (!/function scheduleFinalOrderClick\(control\)/.test(packagedExecutor)
 }
 if (!/function activeCartItemEvidence\(\)/.test(packagedExecutor)
   || !/function pendingOrderMatchEvidence\(action/.test(packagedExecutor)
+  || !/function canonicalProductTitle\(value = ''\)/.test(packagedExecutor)
+  || !/productTitleFromRow\(row, link\)/.test(packagedExecutor)
   || !/identitySource:\s*asinRow \? 'asin'/.test(packagedExecutor)
   || !/quantitySource:\s*quantityMatches \? 'verified_cart'/.test(packagedExecutor)
   || !/quantityContradiction/.test(packagedExecutor)
   || !/merchandisePriceContradiction/.test(packagedExecutor)
   || !/action\.priorPendingOrderDispatchReceipt/.test(packagedExecutor)) {
   fail('pending-order continuation must require exact product identity and previously verified cart quantity');
+}
+if (!/pendingOrderContinuationStep[\s\S]{0,1200}pending_order_verification_required/.test(packagedLegacyBackground)) {
+  fail('a sparse pending-order identity mismatch must remain a manual pending-order boundary');
 }
 if (/if \(globalThis\.__magicCityExecutorInstalled\) return;/.test(packagedExecutor)
   || !/priorFinalOrderReceipt\([\s\S]{0,220}'click_dispatched'/.test(packagedExecutor)

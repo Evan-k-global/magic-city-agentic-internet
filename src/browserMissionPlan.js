@@ -46,7 +46,8 @@ const VERIFIED_HUMAN_BOUNDARIES = new Set([
   'captcha_or_challenge_required',
   'login_required',
   'payment_required',
-  'final_approval_required'
+  'final_approval_required',
+  'pending_order_verification_required'
 ]);
 const UNVERIFIED_TECHNICAL_STOPS = new Set([
   'basket_item_not_added',

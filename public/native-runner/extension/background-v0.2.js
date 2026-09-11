@@ -2223,6 +2223,8 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
   const deliveryVerificationStep = boundaryActionType === 'fill_checkout_profile'
     || boundaryActionType === 'final_submit'
     || /(?:inspect-review|reconcile|verify-reviewed-checkout|submit-final-order|pause-for-user)/i.test(boundaryActionId);
+  const pendingOrderContinuationStep = boundaryAction.pendingOrderContinuation === true
+    || /^confirm-pending-order(?:-\d+)?$/i.test(boundaryActionId);
   if (deliveryPolicyStage && plan?.primeRequired === true) {
     if (summary.cartPrimeFulfillmentObserved === true && summary.cartPrimeVerified === false) {
       return {
@@ -2251,6 +2253,13 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
     }
   }
   if (verifiedFinalReview) return null;
+  if (pendingOrderContinuationStep
+    && /\/(?:duplicateOrder|pending-order)(?:[/?#]|$)/i.test(String(report.url || report.finalUrl || ''))) {
+    return {
+      state: 'pending_order_verification_required',
+      evidence: report.runnerStep?.reason || 'Amazon requested a repeat-order confirmation, but Magic City could not verify the displayed product, quantity, and price. Review the preserved Amazon tab; no additional order click was issued.'
+    };
+  }
   if (checkoutish && summary.addressVerification === 'unverified') {
     return {
       state: 'address_verification_required',
@@ -2520,6 +2529,7 @@ async function reportAndStop(session, plan, report, note = '') {
       'needs_payment',
       'final_submit_unconfirmed',
       'final_submit_dispatch_failed',
+      'pending_order_verification_required',
       'local_checkout_profile_missing'
     ].includes(String(report.stopState || '').toLowerCase());
   await fulfillSession(session, report, note, plan);

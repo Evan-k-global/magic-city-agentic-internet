@@ -10376,7 +10376,7 @@
       const completionState = String(result.completionState || '').toLowerCase();
       const stopState = String(result?.browserExecution?.stopState || result.stopState || '').toLowerCase();
       return completionState === 'waiting_on_user'
-        || ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required', 'login_required', 'needs_login', 'captcha_or_challenge_required', 'needs_captcha', 'final_approval_required', 'needs_final_approval', 'review_ready'].includes(stopState);
+        || ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required', 'pending_order_verification_required', 'login_required', 'needs_login', 'captcha_or_challenge_required', 'needs_captcha', 'final_approval_required', 'needs_final_approval', 'review_ready'].includes(stopState);
     }
 
     function getScopedStorageKey(baseKey, scope = getStorageScope()) {
@@ -15571,6 +15571,7 @@
       if (stopState === 'address_verification_required') return 'Recheck the selected delivery address in the preserved Amazon tab.';
       if (stopState === 'payment_required' || stopState === 'needs_payment') return 'Select the saved payment method in Chrome to continue.';
       if (stopState === 'local_checkout_profile_missing') return 'Unlock Local Data Vault, then retry checkout verification.';
+      if (stopState === 'pending_order_verification_required') return 'Amazon requested repeat-order confirmation. Review the preserved Amazon tab.';
       if (stopState === 'final_submit_dispatch_failed') return 'The final order click did not dispatch. The order was not placed.';
       if (stopState === 'final_approval_required' || stopState === 'needs_final_approval') return 'Order is ready for final approval.';
       if (/Magic City Runner prepared the browser task locally and stopped before login, payment, or final order approval/i.test(note)) {
@@ -15726,6 +15727,14 @@
             actionLabel: 'Open Amazon'
           };
         }
+        if (kind === 'browser' && browserStopState === 'pending_order_verification_required') {
+          return {
+            title: 'Pending order needs verification',
+            detail: browserExecution.stopEvidence || 'Review the matching product, quantity, and price in the preserved Amazon tab. No additional order click was issued.',
+            badgeLabel: 'Review needed',
+            actionLabel: 'Open Amazon'
+          };
+        }
         if (kind === 'browser' && (browserStopState === 'checkout_profile_mismatch' || browserSummary.addressMatches === false)) {
           const vaultUnavailable = browserExecution.localCheckoutProfileExpected && !browserExecution.localCheckoutProfileAvailable;
           return vaultUnavailable
@@ -15775,6 +15784,14 @@
         }
         if (kind === 'browser' && stopState === 'review_ready') {
           return { title: 'Checkout ready', detail: 'Approve in Magic City or open Amazon to inspect first.', badgeLabel: 'Approval needed', actionLabel: 'Open Amazon' };
+        }
+        if (kind === 'browser' && stopState === 'pending_order_verification_required') {
+          return {
+            title: 'Pending order needs verification',
+            detail: browserExecution.stopEvidence || 'Review the matching product, quantity, and price in the preserved Amazon tab. No additional order click was issued.',
+            badgeLabel: 'Review needed',
+            actionLabel: 'Open Amazon'
+          };
         }
         return {
           title: kind === 'browser' ? 'Browser paused' : 'Ready',
@@ -17675,6 +17692,7 @@
       if (stopState === 'budget_exceeded') return 'Budget exceeded.';
       if (stopState === 'checkout_profile_mismatch') return 'Delivery address needs update.';
       if (stopState === 'address_verification_required') return 'Recheck delivery address.';
+      if (stopState === 'pending_order_verification_required') return 'Pending order needs verification.';
       if (stopState === 'browser_ready') return 'Browser ready.';
       if (stopState) return `Paused: ${stopState.replace(/_/g, ' ')}.`;
       return 'Browser finished.';
@@ -17761,6 +17779,8 @@
         ? 'Delivery address needs update'
         : stopState === 'address_verification_required'
           ? 'Recheck delivery address'
+        : stopState === 'pending_order_verification_required'
+          ? 'Pending order needs verification'
         : stopState === 'needs_payment' || stopState === 'payment_required'
           ? 'Payment needs selection'
           : stopState === 'needs_final_approval' || stopState === 'final_approval_required'
@@ -17784,8 +17804,10 @@
             ? 'Reduce cart or raise max spend.'
           : stopState === 'checkout_profile_mismatch'
             ? 'Save a complete delivery address in Settings, then retry.'
-            : stopState === 'address_verification_required'
+          : stopState === 'address_verification_required'
               ? 'Open Amazon, then recheck this checkout tab.'
+          : stopState === 'pending_order_verification_required'
+            ? 'Review the product, quantity, and price in Amazon.'
           : stopState === 'needs_final_approval' || stopState === 'final_approval_required' || stopState === 'review_ready'
             ? automaticFinalSubmitUnavailable
               ? 'Checkout is prepared. Place the final order in Chrome.'

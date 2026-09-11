@@ -189,6 +189,23 @@
     return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  function canonicalProductTitle(value = '') {
+    return compactText(value, 500)
+      .replace(/\s*(?:\|\s*\.{0,3}\s*)?opens in (?:a )?new tab\s*$/i, '')
+      .trim();
+  }
+
+  function productTitleFromRow(row, link = null) {
+    const titleLink = link || row?.querySelector?.('a[href*="/dp/"], a[href*="/gp/product/"]') || null;
+    const candidates = [
+      titleLink?.getAttribute?.('aria-label'),
+      titleLink?.querySelector?.('.a-truncate-full')?.textContent,
+      row?.querySelector?.('.sc-product-title, [data-testid*="title" i], h2, h3')?.textContent,
+      titleLink?.textContent
+    ];
+    return candidates.map(canonicalProductTitle).find(Boolean) || '';
+  }
+
   const ADDRESS_TOKEN_ALIASES = {
     st: 'street', str: 'street', street: 'street',
     rd: 'road', road: 'road',
@@ -1822,7 +1839,7 @@
       const asinFromUrl = href.match(/\/(?:dp|gp\/product)\/([A-Za-z0-9_-]{6,32})(?:[/?#]|$)/i)?.[1] || '';
       const asin = String(row.getAttribute?.('data-asin') || row.querySelector?.('[data-asin]')?.getAttribute?.('data-asin') || asinFromUrl).trim().slice(0, 32);
       const rowText = compactText(row.innerText || row.textContent || '', 1800);
-      const title = compactText(link?.textContent || row.querySelector?.('h2, h3, [data-testid*="title" i]')?.textContent || rowText, 180);
+      const title = compactText(productTitleFromRow(row, link) || canonicalProductTitle(rowText), 180);
       const price = priceFromText(rowText);
       return {
         asin: asin || null,
@@ -3848,7 +3865,7 @@
       ? action.boundCartEvidence
       : null;
     const expectedAsin = String(cartEvidence?.asin || candidate?.asin || '').trim();
-    const expectedTitle = normalizeMatchText(cartEvidence?.title || candidate?.title || '');
+    const expectedTitle = normalizeMatchText(canonicalProductTitle(cartEvidence?.title || candidate?.title || ''));
     const productRows = Array.from(document.querySelectorAll([
       '[data-asin]:not([data-asin=""])',
       '[data-item-index]',
@@ -3875,10 +3892,10 @@
     const asinRow = evidenceRowFor(asinElement || asinLink);
     const titleElement = expectedTitle
       ? [...productLinks, ...Array.from(document.querySelectorAll('h1, h2, h3, [data-testid*="title" i], span.a-size-base, span.a-text-bold, p')).filter(visible)]
-          .find((element) => normalizeMatchText(element.innerText || element.textContent || '') === expectedTitle)
+          .find((element) => normalizeMatchText(canonicalProductTitle(element.innerText || element.textContent || '')) === expectedTitle)
       : null;
     const exactTitleRow = evidenceRowFor(titleElement)
-      || productRows.find((row) => normalizeMatchText(row.innerText || row.textContent || '') === expectedTitle);
+      || productRows.find((row) => normalizeMatchText(canonicalProductTitle(row.innerText || row.textContent || '')) === expectedTitle);
     const identityRow = asinRow || exactTitleRow;
     const identityMatches = Boolean(identityRow);
     const candidatePrice = Number(cartEvidence?.price ?? candidate?.price);
