@@ -150,6 +150,7 @@ import {
   getNativeRunnerDevice,
   getNativeRunnerDeviceByTokenHash,
   updateNativeRunnerDevice,
+  updateNativeRunnerDeviceEphemeral,
   listNativeRunnerDevices,
   createNativeRunnerPairingSession,
   getNativeRunnerPairingSession,
@@ -225,7 +226,13 @@ import {
 import { toUnits, fromUnits, CREDIT_SCALE } from './units.js';
 import { buildSeededAgents, executeProvider, executeProviderStream, getConfiguredProviders, rankAmazonCandidatesWithProvider } from './providers.js';
 import { buildAnchorPayload, compileArtifactProofProgram, generateArtifactProof, verifyArtifactProof } from './zekoProof.js';
-import { getAnchorConfig, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
+import { getAnchorConfig, getMbaRelayerReadiness, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
+import { canonicalValueToFieldDecimal } from './mba/canonicalField.js';
+import {
+  createSantaClawzStatusRefreshCoordinator,
+  hasSemanticSantaClawzStatusChanged,
+  semanticSantaClawzStatusDigest
+} from './santaclawzStatusRefresh.js';
 import { inferCapabilityFromPrompt, isMagicInternetPurchaseRequest, looksLikeCodeAuditRequest, buildActionPlanAsync, finalizeActionRun } from './actionRuntime.js';
 import { CONNECTOR_SPECS, getConnector, getConnectorHandoffData } from './connectors.js';
 import { rankExecutionAgentsForSession } from './executionAgents.js';
@@ -243,6 +250,17 @@ import {
   refreshSantaClawzPreflightSnapshots,
   startSantaClawzAgentCacheRefresher
 } from './santaclawzAgentProvider.js';
+import {
+  SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID,
+  externalSantaClawzAgentId as normalizeExternalSantaClawzAgentId,
+  getSantaClawzApprovedExternalAgentIds,
+  isApprovedSantaClawzAgentId,
+  isSantaClawzAuditOfferMessage,
+  validateSantaClawzHireInputContract,
+  validateSantaClawzPaymentRequirement,
+  validateSantaClawzRuntimeContract
+} from './santaclawzIntegrationPolicy.js';
+import { validateSantaClawzCompletedReturn, verifySantaClawzCompletedReturn } from './santaclawzReturnPolicy.js';
 import { buildExecutionTaskPackage, buildExecutionResult, describeCompletionState } from './executionRuntime.js';
 import {
   BROWSER_EXTENSION_PLAN_PROTOCOL,
@@ -339,9 +357,17 @@ const PORT = Number(process.env.PORT ?? 4411);
 const HOST = process.env.HOST ?? '0.0.0.0';
 const MAGIC_CITY_SAFE_HTTP_STARTUP = process.env.MAGIC_CITY_SAFE_HTTP_STARTUP !== 'false';
 const MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE = String(process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE || '').toLowerCase() === 'true';
+const MAGIC_CITY_SANTACLAWZ_MODE = ['disabled', 'read_only', 'live'].includes(String(process.env.MAGIC_CITY_SANTACLAWZ_MODE || 'disabled').trim().toLowerCase())
+  ? String(process.env.MAGIC_CITY_SANTACLAWZ_MODE || 'disabled').trim().toLowerCase()
+  : 'disabled';
+const MAGIC_CITY_SANTACLAWZ_LIVE = MAGIC_CITY_SANTACLAWZ_MODE === 'live';
+const MAGIC_CITY_SANTACLAWZ_ENROLLMENT_ENABLED = MAGIC_CITY_SANTACLAWZ_LIVE
+  && String(process.env.MAGIC_CITY_SANTACLAWZ_ENROLLMENT_ENABLED || 'false').trim().toLowerCase() === 'true';
 const SANTACLAWZ_SAFE_START_DELAY_MS = Math.max(1000, Number(process.env.SANTACLAWZ_SAFE_START_DELAY_MS ?? 15000));
-const AUTO_START_SANTACLAWZ_CACHE_REFRESHER = process.env.AUTO_START_SANTACLAWZ_CACHE_REFRESHER === 'true'
-  || (!MAGIC_CITY_SAFE_HTTP_STARTUP && process.env.AUTO_START_SANTACLAWZ_CACHE_REFRESHER !== 'false');
+const AUTO_START_SANTACLAWZ_CACHE_REFRESHER = MAGIC_CITY_SANTACLAWZ_LIVE && (
+  process.env.AUTO_START_SANTACLAWZ_CACHE_REFRESHER === 'true'
+  || (!MAGIC_CITY_SAFE_HTTP_STARTUP && process.env.AUTO_START_SANTACLAWZ_CACHE_REFRESHER !== 'false')
+);
 const AUTO_START_LOCAL_EXECUTION_AGENTS = !['0', 'false', 'no'].includes(
   String(process.env.AUTO_START_LOCAL_EXECUTION_AGENTS || 'true').toLowerCase()
 );
@@ -379,7 +405,7 @@ const ZEKO_PROOF_WORKER_TIMEOUT_MS = Math.max(
   5_000,
   Number(process.env.ZEKO_PROOF_WORKER_TIMEOUT_MS || 10 * 60 * 1000) || 10 * 60 * 1000
 );
-const SANTACLAWZ_PROOF_NETWORK = String(process.env.SANTACLAWZ_PROOF_NETWORK || 'zeko:testnet').trim();
+const SANTACLAWZ_PROOF_NETWORK = String(process.env.SANTACLAWZ_PROOF_NETWORK || 'zeko:sepolia').trim();
 const FREE_DAILY_INTENT_LIMIT = Number(process.env.FREE_DAILY_INTENT_LIMIT ?? 0);
 const FREE_MAX_PROMPT_CHARS = Number(process.env.FREE_MAX_PROMPT_CHARS ?? 4000);
 const ROUTING_BATCH_WINDOW_MS = Number(process.env.ROUTING_BATCH_WINDOW_MS ?? 15000);
@@ -689,8 +715,21 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
 ).trim();
 const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
-  '0.4.5'
+  '0.4.33'
 ).trim();
+const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
+  1_000,
+  Number(process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS || 7_500)
+);
+// Anchoring is useful evidence, but checkout must never depend on a proving
+// workload running inside the web process. Keep the irreversible chain gate
+// explicitly opt-in until it has a separately deployed relayer.
+const FINAL_SUBMIT_CHAIN_GATE_ENABLED = String(
+  process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_GATE_ENABLED || ''
+).trim().toLowerCase() === 'true';
+const MINA_FIELD_ORDER = '28948022309329048855892746252171976963363056481941647379679742748393362948097';
+const finalSubmitChainAuthorizationTasks = new Map();
+let zekoNetworkStatusCache = null;
 
 const SPREADSHEET_PRICING = {
   'Quick cleanup': { 'Up to 500 rows': 3, '500-5k rows': 8, '5k+ rows': 22 },
@@ -748,6 +787,18 @@ async function sendJson(res, code, payload) {
     'pragma': 'no-cache',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer'
+  });
+  res.end(JSON.stringify(payload, null, 2));
+}
+
+function sendAdvisoryJson(res, code, payload) {
+  res.writeHead(code, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    pragma: 'no-cache',
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'x-magic-city-durability': 'advisory'
   });
   res.end(JSON.stringify(payload, null, 2));
 }
@@ -2465,6 +2516,17 @@ function retailCheckoutVerifiedMilestones(session = {}) {
   return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
+function connectorSessionHasConfirmedBrowserOrder(session = {}) {
+  const browserExecution = session?.fulfillment?.result?.browserExecution || session?.fulfillment?.browserExecution || {};
+  const verifiedMilestones = Array.isArray(browserExecution.verifiedMilestones)
+    ? browserExecution.verifiedMilestones
+    : [];
+  return browserExecution.orderSubmitted === true
+    || browserExecution.milestoneSignals?.orderSubmitted === true
+    || verifiedMilestones.includes('order_submitted')
+    || retailCheckoutVerifiedMilestones(session).includes('order_submitted');
+}
+
 function latestRetailCheckoutStepReceipt(session = {}) {
   const trace = Array.isArray(session?.missionBoundaryTrace) ? session.missionBoundaryTrace : [];
   return trace.map((event) => event?.retailCheckoutStepReceipt).filter(Boolean).at(-1) || null;
@@ -2580,6 +2642,302 @@ function buildFinalSubmitApprovalReceipt({ req, session = {}, body = {}, authUse
   });
 }
 
+// A normal Run can explicitly authorize one final submit up front. Unlike the
+// review-resume receipt above, this commits to the signed plan rather than to
+// checkout observations that do not exist yet. The server still requires every
+// checkout milestone and a fresh final-review observation at the submit step.
+function buildAutoSubmitMissionApprovalReceipt({ req, session = {}, selections = {}, authUser = null, extensionPlan = null } = {}) {
+  const targetUrl = String(selections.targetUrl || session?.selections?.targetUrl || '').trim();
+  const now = Date.now();
+  const receipt = {
+    schema: 'magic-city-final-submit-approval-v1',
+    action: 'final_submit',
+    authorizationMode: 'mission_auto_submit',
+    sessionId: session?.id || null,
+    connectorId: session?.connectorId || null,
+    approvedAt: new Date(now).toISOString(),
+    // Keep this authority short-lived and never longer than a mission
+    // capability can be valid. A retry issues a fresh capability and receipt.
+    expiresAt: new Date(now + Math.min(MISSION_BOUND_AUTH_TTL_SEC * 1000, 20 * 60 * 1000)).toISOString(),
+    issuer: buildRequestBaseUrl(req),
+    requesterHash: authUser?.requesterId ? hashIdentifier(authUser.requesterId) : (session?.requesterHash || null),
+    targetDomain: normalizeMissionDomain(targetUrl),
+    targetUrlHash: targetUrl ? hashOpaqueValue(targetUrl) : null,
+    planHash: extensionPlan?.planHash || null,
+    itemBudget: selections.budget || selections.maxSpend || selections.maxPrice || null,
+    itemBudgetBasis: 'merchandise_subtotal',
+    maxOrders: 1,
+    requiredMilestones: MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES,
+    verifiedMilestones: [],
+    verifiedMilestonesHash: mbaSha256Hex([]),
+    latestRetailStepReceiptHash: null
+  };
+  return sanitizeMetadata({
+    ...receipt,
+    approvalHash: hashHex(stableJsonStringify(receipt))
+  });
+}
+
+function finalSubmitChainAuthorizationForRunner(value = null) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    schema: value.schema || null,
+    status: value.status || 'preparing',
+    network: value.network || null,
+    sessionId: value.sessionId || null,
+    planHash: value.planHash || null,
+    actionId: value.actionId || null,
+    approvalHash: value.approvalHash || null,
+    expiresAt: value.expiresAt || null,
+    txHash: value.txHash || null,
+    explorerUrl: value.explorerUrl || null,
+    registryAddress: value.registryAddress || null,
+    registrySequence: value.registrySequence || null,
+    preparedAt: value.preparedAt || null,
+    settledAt: value.settledAt || null,
+    bypassAllowed: value.bypassAllowed === true,
+    bypassReason: value.bypassReason || null,
+    gateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+    detail: value.detail || null
+  };
+}
+
+function buildFinalSubmitChainAuthorization(session = {}) {
+  const approval = session.finalSubmitApproval || null;
+  const plan = getExtensionMissionPlanForSession(session);
+  const action = plan?.actions?.find((item) => item?.type === 'final_submit') || null;
+  const capability = session.missionBoundAuth?.protocol?.capability || null;
+  if (!approval?.approvalHash || !plan?.planHash || !action?.id || !capability?.capabilityHash) return null;
+  const commitment = {
+    schema: 'magic-city-final-submit-chain-authorization-v1',
+    sessionId: session.id,
+    planHash: plan.planHash,
+    actionId: action.id,
+    approvalHash: approval.approvalHash,
+    expiresAt: approval.expiresAt,
+    targetDomain: approval.targetDomain || null
+  };
+  return {
+    ...commitment,
+    status: 'preparing',
+    network: getAnchorConfig().networkId,
+    preparedAt: new Date().toISOString(),
+    statementHash: canonicalValueToFieldDecimal(commitment, MINA_FIELD_ORDER),
+    missionBoundary: {
+      schema: 'magic-city-mba-final-submit-chain-authorization-v1',
+      sessionId: session.id,
+      protocolCapabilityHash: capability.capabilityHash,
+      protocolMissionIdHash: capability.missionIdHash || null,
+      protocolPolicyHash: session.missionBoundAuth?.protocol?.policy?.policyHash || null,
+      targetDomain: approval.targetDomain || null
+    },
+    publicInputs: {
+      schema: 'magic-city-mba-final-submit-chain-authorization-v1',
+      sessionId: session.id,
+      planHash: plan.planHash,
+      actionId: action.id,
+      approvalHash: approval.approvalHash,
+      protocolCapabilityHash: capability.capabilityHash
+    }
+  };
+}
+
+function chainAuthorizationUnavailable(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return error?.statusCode === 502
+    || error?.statusCode === 503
+    || error?.statusCode === 504
+    || /timeout|fetch|network|not_deployed|not_configured|out_of_sync|pending_confirmation/.test(message);
+}
+
+function localFinalSubmitChainBypass(prepared, reason, detail) {
+  return finalSubmitChainAuthorizationForRunner({
+    ...prepared,
+    status: 'unavailable',
+    bypassAllowed: true,
+    bypassReason: reason,
+    detail
+  });
+}
+
+function setFinalSubmitChainAuthorization(sessionId, authorization, trace = null) {
+  const session = getConnectorSession(sessionId);
+  if (!session) return null;
+  return updateConnectorSession(sessionId, withTaskPackage(session, {
+    finalSubmitChainAuthorization: authorization,
+    executionTrace: trace
+      ? [...(Array.isArray(session.executionTrace) ? session.executionTrace : []), trace]
+      : session.executionTrace
+  }));
+}
+
+function beginFinalSubmitChainAuthorization(sessionId) {
+  const existing = finalSubmitChainAuthorizationTasks.get(sessionId);
+  if (existing) return existing;
+  const prepared = buildFinalSubmitChainAuthorization(getConnectorSession(sessionId));
+  if (!prepared) return null;
+  if (!FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
+    const bypass = localFinalSubmitChainBypass(
+      prepared,
+      'chain_gate_disabled',
+      'Zeko final-submit gating is temporarily disabled. Magic City will continue with the signed local one-order authorization.'
+    );
+    setFinalSubmitChainAuthorization(sessionId, bypass, {
+      pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+      label: 'Zeko final-submit gate disabled',
+      detail: bypass.detail,
+      state: 'final_submit_chain_bypassed',
+      createdAt: new Date().toISOString()
+    });
+    return Promise.resolve(bypass);
+  }
+  setFinalSubmitChainAuthorization(sessionId, finalSubmitChainAuthorizationForRunner(prepared), {
+    pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+    label: 'Preparing Zeko final-submit authorization',
+    detail: 'Submitting the signed one-order authorization while checkout proceeds.',
+    state: 'final_submit_chain_preparing',
+    createdAt: new Date().toISOString()
+  });
+  const task = (async () => {
+    try {
+      // This is intentionally the first on-chain operation. It makes an
+      // outage a cheap, explicit local bypass instead of an o1js compile.
+      const networkStatus = await getZekoNetworkStatus();
+      if (!networkStatus.available) {
+        const fallback = localFinalSubmitChainBypass(
+          prepared,
+          'zeko_sepolia_unavailable',
+          'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
+        );
+        setFinalSubmitChainAuthorization(sessionId, fallback, {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          label: 'Zeko Sepolia unavailable',
+          detail: fallback.detail,
+          state: 'final_submit_chain_bypassed',
+          createdAt: new Date().toISOString()
+        });
+        return fallback;
+      }
+      if (networkStatus.mbaRelayer?.ready !== true) {
+        const fallback = localFinalSubmitChainBypass(
+          prepared,
+          'zeko_mba_relayer_unavailable',
+          'The Zeko MBA relayer is not ready. Magic City will continue with the signed local one-order authorization.'
+        );
+        setFinalSubmitChainAuthorization(sessionId, fallback, {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          label: 'Zeko MBA relayer unavailable',
+          detail: fallback.detail,
+          state: 'final_submit_chain_bypassed',
+          createdAt: new Date().toISOString()
+        });
+        return fallback;
+      }
+      const anchor = await submitAnchorPayload({
+        schema: 'magic-city-final-submit-chain-anchor-v1',
+        network: prepared.network,
+        statementHash: prepared.statementHash,
+        statementKind: 'final_submit_authorization',
+        sourceKind: 'mission_auto_submit',
+        sourceId: prepared.sessionId,
+        missionBoundary: prepared.missionBoundary,
+        publicInputs: prepared.publicInputs
+      });
+      if (anchor?.mode !== 'relay' || !anchor?.txHash) {
+        const err = new Error('final_submit_chain_anchor_not_settled');
+        err.statusCode = 503;
+        throw err;
+      }
+      const settled = finalSubmitChainAuthorizationForRunner({
+        ...prepared,
+        status: 'anchored',
+        txHash: anchor.txHash || null,
+        explorerUrl: anchor.txHash ? zekoExplorerTxUrl(anchor.txHash) : null,
+        registryAddress: anchor.registryAddress || null,
+        registrySequence: anchor.registrySequence || null,
+        settledAt: new Date().toISOString(),
+        detail: 'Zeko confirmed this exact one-order authorization.'
+      });
+      setFinalSubmitChainAuthorization(sessionId, settled, {
+        pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+        label: 'Zeko authorization anchored',
+        detail: 'The signed final-submit authorization settled before checkout completed.',
+        state: 'final_submit_chain_anchored',
+        createdAt: new Date().toISOString()
+      });
+      return settled;
+    } catch (error) {
+      const unavailable = chainAuthorizationUnavailable(error);
+      const fallback = unavailable
+        ? localFinalSubmitChainBypass(
+            prepared,
+            'zeko_sepolia_unavailable',
+            'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
+          )
+        : finalSubmitChainAuthorizationForRunner({
+            ...prepared,
+            status: 'failed',
+            detail: 'The Zeko final-submit authorization could not be prepared.'
+          });
+      setFinalSubmitChainAuthorization(sessionId, fallback, {
+        pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+        label: unavailable ? 'Zeko Sepolia unavailable' : 'Zeko authorization failed',
+        detail: fallback.detail,
+        state: unavailable ? 'final_submit_chain_bypassed' : 'final_submit_chain_failed',
+        createdAt: new Date().toISOString()
+      });
+      return fallback;
+    } finally {
+      finalSubmitChainAuthorizationTasks.delete(sessionId);
+    }
+  })();
+  finalSubmitChainAuthorizationTasks.set(sessionId, task);
+  return task;
+}
+
+async function getZekoNetworkStatus({ force = false } = {}) {
+  const checkedAtMs = Date.parse(String(zekoNetworkStatusCache?.checkedAt || ''));
+  if (!force && Number.isFinite(checkedAtMs) && Date.now() - checkedAtMs < 15_000) return zekoNetworkStatusCache;
+  const anchor = getAnchorConfig();
+  const graphql = String(process.env.ZEKO_GRAPHQL || 'https://sepolia.zeko.io/graphql').trim();
+  const registryAddress = anchor.mbaMissionRegistry?.registryAddress || null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const response = await fetch(graphql, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: 'query ZekoNetworkStatus($pk: PublicKey!) { account(publicKey: $pk) { publicKey } }',
+        variables: { pk: registryAddress }
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok || payload?.errors?.length || !payload?.data?.account?.publicKey) throw new Error('zeko_graphql_unavailable');
+    const mbaRelayer = await getMbaRelayerReadiness();
+    zekoNetworkStatusCache = {
+      network: anchor.networkId,
+      available: true,
+      finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+      mbaRelayer,
+      checkedAt: new Date().toISOString()
+    };
+  } catch {
+    zekoNetworkStatusCache = {
+      network: anchor.networkId,
+      available: false,
+      finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+      mbaRelayer: await getMbaRelayerReadiness(),
+      checkedAt: new Date().toISOString(),
+      warning: 'Zeko Sepolia is unavailable. Checkout will continue under the signed local authorization.'
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+  return zekoNetworkStatusCache;
+}
+
 function verifyRetailFinalSubmitApproval(session = {}, {
   targetUrl = '',
   retailCheckoutStep = null
@@ -2604,6 +2962,42 @@ function verifyRetailFinalSubmitApproval(session = {}, {
   if (approvedDomain && requestedDomain && approvedDomain !== requestedDomain) {
     throw createHttpError('mission_final_submit_approval_domain_mismatch', 403);
   }
+  const isMissionAutoSubmit = approval.authorizationMode === 'mission_auto_submit';
+  const hasAuthorizedSubmit = Array.isArray(session.executionTrace)
+    && session.executionTrace.some((event) => (
+      event?.state === 'final_submit_authorized'
+      && String(event?.approval?.approvalHash || '') === approvalHash
+    ));
+  if (!hasAuthorizedSubmit) {
+    throw createHttpError('mission_final_submit_approval_resume_missing', 409);
+  }
+  const refreshedMilestones = new Set(
+    (Array.isArray(retailCheckoutStep?.verifiedMilestones) ? retailCheckoutStep.verifiedMilestones : [])
+      .map((value) => String(value || '').trim())
+  );
+  if (retailCheckoutStep?.actionType !== 'final_submit'
+    || !refreshedMilestones.has('final_review_ready')) {
+    throw createHttpError('mission_final_submit_recheck_required', 409);
+  }
+  if (isMissionAutoSubmit) {
+    const plan = getExtensionMissionPlanForSession(session);
+    const persistedMilestones = new Set(retailCheckoutVerifiedMilestones(session));
+    const latestStep = latestRetailCheckoutStepReceipt(session);
+    if (
+      !plan
+      || plan.planHash !== approval.planHash
+      || plan.limits?.stopBeforeFinalSubmit !== false
+      || session.extensionFinalSubmitEnabled !== true
+      || Number(approval.maxOrders || 0) !== 1
+      || !MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES.every((milestone) => persistedMilestones.has(milestone))
+      || !MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES.every((milestone) => refreshedMilestones.has(milestone))
+      || !latestStep
+      || !verifyMbaRetailCheckoutStepReceipt(latestStep).valid
+    ) {
+      throw createHttpError('mission_final_submit_approval_checkout_unverified', 409);
+    }
+    return approval;
+  }
   const approvedMilestones = new Set(
     (Array.isArray(approval.verifiedMilestones) ? approval.verifiedMilestones : [])
       .map((value) => String(value || '').trim())
@@ -2625,27 +3019,6 @@ function verifyRetailFinalSubmitApproval(session = {}, {
     || !verifyMbaRetailCheckoutStepReceipt(approvedReviewEvent.retailCheckoutStepReceipt).valid
   ) {
     throw createHttpError('mission_final_submit_approval_trace_missing', 409);
-  }
-  const hasAuthorizedResume = Array.isArray(session.executionTrace)
-    && session.executionTrace.some((event) => (
-      event?.state === 'final_submit_authorized'
-      && String(event?.approval?.approvalHash || '') === approvalHash
-    ));
-  if (!hasAuthorizedResume) {
-    throw createHttpError('mission_final_submit_approval_resume_missing', 409);
-  }
-  const refreshedMilestones = new Set(
-    (Array.isArray(retailCheckoutStep?.verifiedMilestones) ? retailCheckoutStep.verifiedMilestones : [])
-      .map((value) => String(value || '').trim())
-  );
-  if (
-    retailCheckoutStep?.actionType !== 'final_submit'
-    // The resume plan begins at the already prepared checkout rather than
-    // replaying catalog/cart work. It must freshly observe final review, while
-    // the approval receipt commits the earlier verified milestones.
-    || !refreshedMilestones.has('final_review_ready')
-  ) {
-    throw createHttpError('mission_final_submit_recheck_required', 409);
   }
   return approval;
 }
@@ -5065,9 +5438,9 @@ function streamStaticFile(req, res, filePath) {
 }
 
 function isSantaClawzHelperBootstrapAgent(agent = {}) {
+  if (!MAGIC_CITY_SANTACLAWZ_LIVE) return false;
   const agentId = String(agent.agentId || agent.pluginId || '').trim();
-  if (!agentId) return false;
-  if (/agent_job_pack|hosted_agent_job_pack/i.test(agentId)) return false;
+  if (!isApprovedSantaClawzAgentId(agentId)) return false;
   const santaClawzOwned = agentId.startsWith('santaclawz:')
     || /santaclawz/i.test(String(agent.owner || agent.metadata?.source || agent.metadata?.providerId || ''));
   if (!santaClawzOwned) return false;
@@ -5112,9 +5485,12 @@ function formatAgentHubBootstrapAgent(agent = {}) {
 async function buildIndexHtmlWithAgentHubBootstrap(filePath) {
   const html = fs.readFileSync(filePath, 'utf8');
   const scripts = [
-    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};</script>`
+    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__=${escapeScriptJson(JSON.stringify(getSantaClawzApprovedExternalAgentIds().map((agentId) => `santaclawz:${agentId}`)))};</script>`
   ];
   try {
+    if (!MAGIC_CITY_SANTACLAWZ_LIVE) return html.includes('</head>')
+      ? html.replace('</head>', `${scripts.join('\n')}\n</head>`)
+      : `${scripts.join('\n')}\n${html}`;
     ensureSeededAgentsReady();
     const agentHubResult = await listAgentHubViews({});
     const allAgents = (Array.isArray(agentHubResult.agents) ? agentHubResult.agents : [])
@@ -6509,6 +6885,62 @@ function touchNativeRunnerDevice(device, patch = {}) {
   }) || device;
 }
 
+function nativeRunnerRegistrationFields(registration = {}) {
+  return {
+    pluginId: String(registration.pluginId || '').trim(),
+    ownerAgentId: String(registration.ownerAgentId || '').trim(),
+    kind: String(registration.kind || '').trim(),
+    endpoint: String(registration.endpoint || '').trim(),
+    localOnly: registration.localOnly !== false,
+    capabilities: Array.isArray(registration.capabilities) ? registration.capabilities : [],
+    tools: Array.isArray(registration.tools) ? registration.tools : [],
+    privacyModes: Array.isArray(registration.privacyModes) ? registration.privacyModes : ['private'],
+    helperAgents: Array.isArray(registration.helperAgents) ? registration.helperAgents : [],
+    metadata: sanitizeMetadata(registration.metadata || {})
+  };
+}
+
+function nativeRunnerRegistrationMatches(existing, requested) {
+  if (!existing || existing.status !== 'active') return false;
+  return stableJsonStringify(nativeRunnerRegistrationFields(existing))
+    === stableJsonStringify(nativeRunnerRegistrationFields(requested));
+}
+
+function beginNativeRunnerRequestTiming(req, res, urlPath) {
+  if (!isChromeExtensionRunnerRequest(req)) return null;
+  const stage = urlPath === '/plugins/register'
+    ? 'register'
+    : urlPath === '/connectors/sessions'
+      ? 'poll'
+      : /\/claim$/.test(urlPath)
+        ? 'claim'
+        : /\/checkpoint$/.test(urlPath)
+          ? 'checkpoint'
+          : null;
+  if (!stage) return null;
+  const startedAt = Date.now();
+  const marks = {};
+  const metadata = {};
+  res.once('finish', () => {
+    console.log('[agent-verification] native_runner_startup_request', JSON.stringify({
+      stage,
+      method: req.method,
+      sessionId: String(urlPath.match(/^\/connectors\/sessions\/([^/]+)/)?.[1] || '').slice(0, 96) || null,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      responseWaitMs: marks.responseReady == null ? null : Date.now() - startedAt - marks.responseReady,
+      marks,
+      ...metadata
+    }));
+  });
+  return {
+    mark(name, values = null) {
+      marks[name] = Date.now() - startedAt;
+      if (values && typeof values === 'object') Object.assign(metadata, sanitizeMetadata(values));
+    }
+  };
+}
+
 function nativeRunnerDeviceActorIds(device) {
   const allowed = new Set([
     device.pluginId || RUNNER_EXTENSION_PLUGIN_ID,
@@ -6723,6 +7155,33 @@ function enforceExtensionMissionPlanStep(session, body = {}, missionAction = '')
   };
 }
 
+function extensionCheckpointRequestHash(body = {}, { browser = null, runnerTiming = null, missionAction = '' } = {}) {
+  if (!String(runnerTiming?.checkpointRequestedAt || '').trim()) return null;
+  return hashHex(stableJsonStringify(sanitizeMetadata({
+    pluginId: body.pluginId,
+    label: body.label,
+    detail: body.detail || null,
+    state: body.state || 'running',
+    missionAction,
+    targetUrl: body.targetUrl || null,
+    browser,
+    runnerTiming,
+    planHash: body.planHash || null,
+    planActionId: body.planActionId || null,
+    planActionStatus: body.planActionStatus || 'completed',
+    milestoneProtocol: body.milestoneProtocol || null,
+    verifiedMilestones: Array.isArray(body.verifiedMilestones) ? body.verifiedMilestones : [],
+    userApproved: body.userApproved === true,
+    proofOfPossession: body.proofOfPossession || body.pop || null
+  })));
+}
+
+function isExactExtensionCheckpointReplay(session = {}, requestHash = '') {
+  if (!requestHash) return false;
+  const latest = Array.isArray(session.executionTrace) ? session.executionTrace.at(-1) : null;
+  return Boolean(latest?.extensionPlan && latest.checkpointRequestHash === requestHash);
+}
+
 function formatConnectorSessionForExtension(session = null) {
   if (!session) return null;
   const selections = pickExtensionBrowserSelections(session.finalSelections || session.selections || {});
@@ -6755,6 +7214,7 @@ function formatConnectorSessionForExtension(session = null) {
         }
       : null,
     missionBoundAuth: formatExtensionMissionCapability(session.missionBoundAuth),
+    finalSubmitChainAuthorization: finalSubmitChainAuthorizationForRunner(session.finalSubmitChainAuthorization),
     missionBoundaryLatestHash: session.missionBoundaryLatestHash || null,
     missionBoundaryEventCount: Array.isArray(session.missionBoundaryTrace) ? session.missionBoundaryTrace.length : 0,
     executionLive: session.executionLive
@@ -6839,7 +7299,11 @@ function nativeRunnerDeviceNeedsExtensionUpgrade(device = null) {
   // version floor protects our packaged DOM executor, not the protocol itself.
   if (!isMagicCityRunnerExtensionDevice(device)) return false;
   const version = String(device?.metadata?.extensionVersion || '').trim();
-  if (!version || !NATIVE_RUNNER_MIN_EXTENSION_VERSION) return false;
+  // A paired built-in runner without a reported version cannot prove it has
+  // the released DOM executor. Treat it as outdated rather than silently
+  // allowing it through the current-version gate.
+  if (!NATIVE_RUNNER_MIN_EXTENSION_VERSION) return false;
+  if (!version) return true;
   return compareDottedVersions(version, NATIVE_RUNNER_MIN_EXTENSION_VERSION) < 0;
 }
 
@@ -6961,7 +7425,7 @@ function buildNativeRunnerReadiness({
       ? 'Magic City Runner can execute approved browser missions in this Chrome profile.'
       : (executableReady ? 'Local browser worker is online and ready for legacy native work.' : 'Magic City Runner extension is paired and polling.'))
     : reason === 'runner_not_started'
-      ? 'A runner is paired, but it has not checked in yet. Open the Magic City Runner extension, then click Status in Settings.'
+      ? 'A runner is paired, but it has not checked in yet. Open the Magic City Runner extension, or click Check in Magic City.'
       : reason === 'runner_extension_outdated'
         ? `Update Magic City Runner to ${NATIVE_RUNNER_MIN_EXTENSION_VERSION} or newer, then click Check runner. The existing pairing remains valid.`
       : reason === 'runner_browser_permission_required'
@@ -6969,8 +7433,8 @@ function buildNativeRunnerReadiness({
       : reason === 'runner_executor_not_started'
         ? 'The extension is paired, but the local checkout worker is not running yet. Start the Magic City Runner helper, then retry.'
       : reason === 'runner_offline'
-        ? 'The Magic City Runner extension is paired but is not polling right now. Open the extension, then click Status in Settings.'
-        : 'Pair the Magic City Runner extension in Settings, then click Status.';
+        ? 'The Magic City Runner extension is paired but is not polling right now. Open the extension popup, or click Check in Magic City.'
+        : 'Pair the Magic City Runner extension in Settings, then click Check.';
   return {
     required: true,
     ready,
@@ -7017,7 +7481,7 @@ function resolveDefaultBrowserExecutionAgentForAuthUser(authUser = null) {
   return readiness.ready ? RUNNER_EXTENSION_PLUGIN_ID : HOSTED_BROWSER_WORKER_PLUGIN_ID;
 }
 
-function authorizeNativeRunnerPluginRequest(req, { body = null, session = null, pluginId = '' } = {}) {
+function authorizeNativeRunnerPluginRequest(req, { body = null, session = null, pluginId = '', advisory = false } = {}) {
   const device = assertActiveNativeRunnerBearer(req);
   if (!device) return null;
   const effectivePluginId = String(pluginId || body?.pluginId || '').trim();
@@ -7049,9 +7513,14 @@ function authorizeNativeRunnerPluginRequest(req, { body = null, session = null, 
     });
     throw createHttpError('native_runner_session_not_found', 404);
   }
-  const updated = touchNativeRunnerDevice(device, {
-    lastPluginId: effectivePluginId || device.pluginId || NATIVE_RUNNER_PLUGIN_ID
-  });
+  const updated = advisory
+    ? updateNativeRunnerDeviceEphemeral(device.id, {
+        lastSeenAt: new Date().toISOString(),
+        lastPluginId: effectivePluginId || device.pluginId || NATIVE_RUNNER_PLUGIN_ID
+      })
+    : touchNativeRunnerDevice(device, {
+        lastPluginId: effectivePluginId || device.pluginId || NATIVE_RUNNER_PLUGIN_ID
+      });
   return updated;
 }
 
@@ -8042,8 +8511,9 @@ async function failConnectorSessionFromWatchdog(session, reasonKey) {
 }
 
 async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {}) {
-  if (!EXECUTION_WATCHDOG_ENABLED || executionWatchdogRuntime.processing) return;
+  if (!EXECUTION_WATCHDOG_ENABLED || executionWatchdogRuntime.processing) return false;
   executionWatchdogRuntime.processing = true;
+  let durableMutation = false;
   try {
     const candidates = sessionId
       ? [getConnectorSession(sessionId)].filter(Boolean)
@@ -8099,10 +8569,13 @@ async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {})
         && getConnectorSessionWatchdogRetryCount(session) < EXECUTION_WATCHDOG_MAX_RETRIES;
       if (shouldRetryWithHostedWorker) {
         requeueConnectorSessionFromWatchdog(session, reasonKey);
+        durableMutation = true;
       } else {
         await failConnectorSessionFromWatchdog(session, reasonKey);
+        durableMutation = true;
       }
     }
+    return durableMutation;
   } finally {
     executionWatchdogRuntime.processing = false;
   }
@@ -9395,12 +9868,42 @@ function inferAgentExecutionFields({ prompt = '', selectedAgent = null } = {}) {
   };
 }
 
-function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary = {}, authUser = null, preferredExecutionAgentId = '', selectedAgent = null }) {
+function normalizeExecutionClientRequestId(value = '') {
+  const normalized = String(value || '').trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(normalized) ? normalized : '';
+}
+
+function findAgentExecutionSessionByClientRequestId(authUser, clientRequestId = '', expectedAgentId = '') {
+  const normalized = normalizeExecutionClientRequestId(clientRequestId);
+  const expected = String(expectedAgentId || '').trim();
+  if (!authUser?.id || !normalized) return null;
+  return listConnectorSessions(500).find((session) => (
+    session?.authUserId === authUser.id
+    && session?.handoffData?.kind === 'agent'
+    && session?.clientRequestId === normalized
+    && (!expected || String(session?.preferredExecutionAgentId || session?.handoffData?.selectedAgent?.pluginId || '').trim() === expected)
+  )) || null;
+}
+
+function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary = {}, authUser = null, preferredExecutionAgentId = '', selectedAgent = null, clientRequestId = '' }) {
   const effectivePrompt = String(prompt || '').trim() || 'Prepare an agent execution task.';
   const safeProfileSummary = sanitizeMetadata(profileSummary || {});
   const auth = req ? getAuthenticatedContext(req) : null;
   const selectedAgentSnapshot = normalizeSelectedExecutionAgentSnapshot(selectedAgent, preferredExecutionAgentId);
   const agentId = String(selectedAgentSnapshot?.pluginId || preferredExecutionAgentId || '').trim();
+  if (!MAGIC_CITY_SANTACLAWZ_LIVE && (
+    agentId.startsWith('santaclawz:')
+    || String(selectedAgentSnapshot?.metadata?.source || '').toLowerCase() === 'santaclawz'
+    || String(selectedAgentSnapshot?.agentType || '').toLowerCase() === 'paid_santaclawz'
+  )) {
+    assertSantaClawzLiveIntegration();
+  }
+  if (
+    (agentId.startsWith('santaclawz:') || String(selectedAgentSnapshot?.metadata?.source || '').toLowerCase() === 'santaclawz')
+    && !isApprovedSantaClawzAgentId(agentId || selectedAgentSnapshot?.agentId || '')
+  ) {
+    throw createHttpError('santaclawz_agent_not_approved', 403);
+  }
   const agentName = String(selectedAgentSnapshot?.metadata?.label || selectedAgentSnapshot?.agentName || agentId || 'Selected agent').trim();
   const fields = inferAgentExecutionFields({ prompt: effectivePrompt, selectedAgent: selectedAgentSnapshot });
   const inputRequirements = fields.inputRequirements || selectedAgentInputRequirements(selectedAgentSnapshot);
@@ -9465,6 +9968,7 @@ function buildDirectAgentExecutionSession({ req = null, prompt, profileSummary =
     }),
     requesterId: authUser?.requesterId || null,
     requesterHash: authUser?.requesterId ? hashIdentifier(authUser.requesterId) : null,
+    clientRequestId: normalizeExecutionClientRequestId(clientRequestId) || null,
     handoffData,
     actionSummary: sanitizeMetadata({
       title: handoffData.title,
@@ -9955,7 +10459,9 @@ async function listExecutionAgentsForSession(session, { includeEndpoint = false 
   const localExecutionAgents = MAGIC_CITY_LOCAL_EXECUTION_FALLBACK_ENABLED
     ? listLocalExecutionAgentsForSession(session, { includeEndpoint })
     : [];
-  const santaClawzResult = await listSantaClawzExecutionAgentsForSession(session, { includeEndpoint });
+  const santaClawzResult = MAGIC_CITY_SANTACLAWZ_LIVE
+    ? await listSantaClawzExecutionAgentsForSession(session, { includeEndpoint })
+    : { executionAgents: [], source: getSantaClawzSourceStatus({ productMode: MAGIC_CITY_SANTACLAWZ_MODE, operatorDisabled: true }) };
   const santaClawzExecutionAgents = (santaClawzResult.executionAgents || [])
     .map((agent) => normalizeSantaClawzExecutionAgentForApi(agent));
   return {
@@ -10048,6 +10554,8 @@ function rankedExecutionAgentsForQuery(executionAgents = [], { query = '', kind 
 
 async function pickPreferredExecutionAgent(session, requestedAgentId = '') {
   const requested = String(requestedAgentId || session?.preferredExecutionAgentId || '').trim();
+  if (!MAGIC_CITY_SANTACLAWZ_LIVE && requested.startsWith('santaclawz:')) return null;
+  if (requested.startsWith('santaclawz:') && !isApprovedSantaClawzAgentId(requested)) return null;
   if (requested.startsWith('santaclawz:')) {
     const exactSantaClawzAgent = await getSantaClawzExecutionAgentByMagicId(requested, {
       includeEndpoint: true,
@@ -10485,8 +10993,16 @@ function filterAndSortAgentHubViews(agentViews, { query = '', laneFilter = '' } 
 }
 
 async function listAgentHubViews({ query = '', laneFilter = '' } = {}) {
-  const localAgentViews = listAgents().map(buildAgentHubView);
-  const santaClawzResult = await listSantaClawzAgentRows({ query, laneFilter, limit: 120 });
+  const localAgentViews = listAgents()
+    .map(buildAgentHubView)
+    .filter((agent) => {
+      const isSantaClawz = String(agent?.agentId || '').startsWith('santaclawz:')
+        || String(agent?.metadata?.source || '').toLowerCase() === 'santaclawz';
+      return !isSantaClawz || isApprovedSantaClawzAgentId(agent?.agentId || '');
+    });
+  const santaClawzResult = MAGIC_CITY_SANTACLAWZ_LIVE
+    ? await listSantaClawzAgentRows({ query, laneFilter, limit: 120 })
+    : { agents: [], source: getSantaClawzSourceStatus({ productMode: MAGIC_CITY_SANTACLAWZ_MODE, operatorDisabled: true }) };
   const santaClawzAgentViews = santaClawzResult.agents.map(buildAgentHubView);
   return {
     agents: filterAndSortAgentHubViews([
@@ -10691,7 +11207,10 @@ function getPublicPersistenceStatus() {
       algorithm: persistence.atRestEncryption?.algorithm ?? null
     },
     singleWriterRequired: Boolean(persistence.singleWriterRequired),
-    writerLockAcquired: Boolean(persistence.writerLockAcquired)
+    writerLockAcquired: Boolean(persistence.writerLockAcquired),
+    lastWriteAt: persistence.lastWriteAt || null,
+    lastWriteMetrics: persistence.lastWriteMetrics || null,
+    writeFailureCount: Number(persistence.writeFailureCount || 0)
   };
 }
 
@@ -11096,6 +11615,7 @@ function requireOwnedProofContext(req, context) {
 
 function resolveZekoNetworkLabel() {
   const config = getAnchorConfig();
+  if (config.offchain) return 'offchain';
   const networkId = String(config.networkId || 'zeko:testnet');
   return networkId.startsWith('zeko:') ? networkId : `zeko:${networkId}`;
 }
@@ -11138,17 +11658,19 @@ function buildExecutionVerificationSummary({
   error
 }) {
   const missionBoundary = anchorPayload?.missionBoundary ?? null;
+  const mbaRegistrySubmission = submission?.mbaMissionRegistry ?? submission?.relay?.response ?? null;
   const protocolRegistryAnchor = missionBoundary?.portableReceiptId && missionBoundary?.protocolCapabilityHash
     ? buildMbaRegistryAnchor({
-        sequence: 0,
+        sequence: mbaRegistrySubmission?.sequence ?? 0,
         missionIdHash: strip0x(missionBoundary.protocolMissionIdHash || missionBoundary.missionIdHash || anchorPayload?.publicInputs?.protocolMissionIdHash || ''),
         capabilityHash: strip0x(missionBoundary.protocolCapabilityHash),
         statementHash: strip0x(zkProof?.publicInput?.statementHash ?? anchorPayload?.statementHash ?? ''),
         receiptIdHash: mbaSha256Hex(missionBoundary.portableReceiptId),
         nullifier: strip0x(missionBoundary.portableReceiptNullifier || missionBoundary.protocolNullifier || ''),
-        previousRoot: '0',
+        previousRoot: mbaRegistrySubmission?.previousRegistryRoot ?? '0',
+        newRoot: mbaRegistrySubmission?.registryRoot ?? undefined,
         networkId: anchorPayload?.network ?? resolveZekoNetworkLabel(),
-        registryAddress: anchorConfig?.registryPublicKey || anchorConfig?.registryAddress || null,
+        registryAddress: mbaRegistrySubmission?.registryAddress ?? anchorConfig?.mbaMissionRegistry?.registryAddress ?? anchorConfig?.registryPublicKey ?? anchorConfig?.registryAddress ?? null,
         txHash: submission?.txHash || null,
         anchoredAt: generatedAt ?? new Date().toISOString()
       })
@@ -11165,6 +11687,7 @@ function buildExecutionVerificationSummary({
     anchorStatus: error ? 'failed' : (submission?.status ?? (anchorPayload ? 'prepared' : null)),
     submitMode: submission?.submitMode ?? submission?.mode ?? anchorConfig?.mode ?? null,
     network: anchorPayload?.network ?? resolveZekoNetworkLabel(),
+    offchainTargetNetwork: anchorConfig?.offchainTargetNetwork ?? null,
     statementHash: zkProof?.publicInput?.statementHash ?? anchorPayload?.statementHash ?? null,
     verificationKeyHash: anchorPayload?.verificationKeyHash ?? null,
     anchorPayloadHash: submission?.payloadHash ?? null,
@@ -11373,6 +11896,7 @@ function buildQueuedExecutionVerificationSummary({
     anchorStatus: anchorStatus ?? submission?.status ?? 'queued',
     submitMode: submission?.submitMode ?? submission?.mode ?? anchorConfig?.mode ?? null,
     network: resolveZekoNetworkLabel(),
+    offchainTargetNetwork: anchorConfig?.offchainTargetNetwork ?? null,
     statementHash: null,
     verificationKeyHash: null,
     anchorPayloadHash: submission?.payloadHash ?? null,
@@ -11578,7 +12102,18 @@ async function processSponsoredExecutionVerification({ kind, id, reason, submiss
         payloadHash: submitResult.payloadHash,
         submitMode: submitResult.mode,
         relay: submitResult.relay ?? null,
-        networkId: submitResult.networkId
+        networkId: submitResult.networkId,
+        mbaMissionRegistry: submitResult.registryAddress
+          ? {
+              registryAddress: submitResult.registryAddress,
+              previousRegistryRoot: submitResult.previousRegistryRoot ?? null,
+              registryRoot: submitResult.registryRoot ?? null,
+              sequence: submitResult.registrySequence ?? null,
+              capabilityCommitment: submitResult.capabilityCommitment ?? null,
+              approvalCommitment: submitResult.approvalCommitment ?? null,
+              registryKey: submitResult.registryKey ?? null
+            }
+          : null
       }) ?? submission;
     }
 
@@ -12312,7 +12847,9 @@ async function forwardSantaClawzAgentSavedSignal({ agentId, savedByType = 'human
   const normalizedAgentId = String(agentId || '').trim();
   if (!normalizedAgentId.toLowerCase().startsWith('santaclawz:')) return null;
   const externalAgentId = externalSantaClawzAgentId(normalizedAgentId);
-  if (!externalAgentId) return null;
+  if (!isApprovedSantaClawzAgentId(externalAgentId)) {
+    return { skipped: true, reason: 'santaclawz_agent_not_approved' };
+  }
   try {
     const result = await requestSantaClawzJson(
       `/api/integrations/${encodeURIComponent(MAGIC_CITY_SAVED_AGENT_PLATFORM_ID)}/agents/${encodeURIComponent(externalAgentId)}/saved`,
@@ -12628,9 +13165,14 @@ function isDedicatedCodeAuditAgentCandidate(agent = {}) {
 function recentCodeAuditConversationText(intentInput = {}, limit = 8) {
   return (Array.isArray(intentInput.context) ? intentInput.context : [])
     .slice(-limit)
+    .filter((entry) => entry?.role === 'user')
     .map((entry) => String(entry?.content || '').trim())
     .filter(Boolean)
     .join('\n');
+}
+
+function hasPendingLiteralCodeAuditRequest(intentInput = {}) {
+  return isSantaClawzAuditOfferMessage(recentCodeAuditConversationText(intentInput));
 }
 
 function isCodeAuditConversationContinuation(value = '') {
@@ -12682,105 +13224,46 @@ async function buildCodeAuditChatIntake(intentInput = {}) {
 }
 
 async function buildSantaClawzAgentFollowUp(intentInput = {}) {
-  const matchText = collectAgentMatchText(intentInput);
-  const directMatchText = [
-    intentInput.metadata?.prompt,
-    intentInput.prompt
-  ].filter(Boolean).join(' ') || matchText;
+  if (!MAGIC_CITY_SANTACLAWZ_LIVE) return null;
+  const currentUserMessage = String(intentInput.metadata?.prompt || intentInput.prompt || '');
+  const directAuditRequest = isSantaClawzAuditOfferMessage(currentUserMessage);
   const codeAuditIntake = await buildCodeAuditChatIntake(intentInput);
-  const codeAuditRequest = Boolean(codeAuditIntake) || isCodeAuditAgentChatRequest(directMatchText);
-  const magicInternetRequest = isMagicInternetPurchaseRequest(matchText);
-  const kind = codeAuditRequest ? 'developer' : executionKindForCapability(intentInput.capability);
+  const continuingAuditRequest = !directAuditRequest
+    && hasPendingLiteralCodeAuditRequest(intentInput)
+    && Boolean(codeAuditIntake);
+  if (!directAuditRequest && !continuingAuditRequest) return null;
+  if (isMagicInternetPurchaseRequest(currentUserMessage)) return null;
   const source = getSantaClawzSourceStatus();
-  const basePayload = {
-    prompt: 'Hire an agent for deeper insight and task execution.',
-    addAgentUrl: SANTACLAWZ_AGENT_ACTIVATE_URL,
-    source,
-    ...(codeAuditIntake ? { chatIntake: codeAuditIntake } : {})
-  };
-  const queryTokens = tokenizeAgentMatchText(matchText);
-  const directQueryTokens = tokenizeAgentMatchText(directMatchText);
-  if (magicInternetRequest) {
-    return {
-      ...basePayload,
-      available: false,
-      agents: [],
-      reason: 'handled_by_magic_internet_agent'
-    };
-  }
-  const generalResult = await listExecutionAgentsForSession(
-    { handoffData: { kind: null } },
-    { includeEndpoint: false }
+  const executionAgent = await getSantaClawzExecutionAgentByMagicId(
+    `santaclawz:${SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID}`,
+    { includeEndpoint: false, force: true }
   );
-  const generalRankedAgents = rankSantaClawzFollowUpEntries(generalResult.executionAgents, {
-    queryTokens: directQueryTokens,
-    matchText: directMatchText
-  });
-  if (generalRankedAgents.length > 0) {
-    const agents = generalRankedAgents
-      .slice(0, 5)
-      .map((entry) => formatSantaClawzFollowUpAgent(entry.agent, { queryMatchScore: entry.queryMatchScore }));
+  const agent = executionAgent ? formatSantaClawzFollowUpAgent(executionAgent, { queryMatchScore: 100 }) : null;
+  if (!agent) {
     return {
-      ...basePayload,
-      available: true,
-      kind: kind || null,
-      exploreUrl: generalResult.sources?.santaclawz?.exploreUrl || source.exploreUrl,
-      agent: agents[0] || null,
-      agents,
-      source: generalResult.sources?.santaclawz || source,
-      reason: 'query_matched_santaclawz_directory'
-    };
-  }
-  if (!kind) {
-    return {
-      ...basePayload,
+      prompt: 'Code Audit Agent is temporarily unavailable.',
       available: false,
-      exploreUrl: generalResult.sources?.santaclawz?.exploreUrl || source.exploreUrl,
+      kind: 'developer',
       agent: null,
       agents: [],
-      source: generalResult.sources?.santaclawz || source,
-      reason: 'no_workflow_lane_or_strong_agent_match'
-    };
-  }
-  const result = await listSantaClawzExecutionAgentsForSession(
-    { handoffData: { kind } },
-    { includeEndpoint: false, limit: 50 }
-  );
-  const rankedAgents = rankSantaClawzFollowUpEntries(result.executionAgents, {
-    queryTokens,
-    matchText,
-    codeAuditOnly: codeAuditRequest
-  });
-  const agents = rankedAgents
-    .slice(0, 5)
-    .map((entry) => formatSantaClawzFollowUpAgent(entry.agent, { queryMatchScore: entry.queryMatchScore }));
-  const agent = agents[0] || null;
-  if (!agent) {
-    const unavailableCodeAuditIntake = codeAuditRequest && codeAuditIntake?.repositoryAccess?.status === 'public'
-      ? {
-          ...codeAuditIntake,
-          message: `Verified public GitHub repository for Code Audit Agent: ${codeAuditIntake.githubUrl}\n\nThe dedicated Code Audit Agent is temporarily unavailable. Magic City will not substitute another paid agent or reserve credits; Hire will return when the dedicated runtime passes its delivery checks.`
-        }
-      : codeAuditIntake;
-    return {
-      ...basePayload,
-      ...(unavailableCodeAuditIntake ? { chatIntake: unavailableCodeAuditIntake } : {}),
-      available: false,
-      kind,
-      exploreUrl: result.source?.exploreUrl || getSantaClawzSourceStatus().exploreUrl,
-      agents: [],
-      source: result.source,
-      reason: codeAuditRequest ? 'dedicated_code_audit_agent_unavailable' : 'no_live_hireable_agent'
+      source,
+      reason: 'dedicated_code_audit_agent_unavailable'
     };
   }
   return {
-    ...basePayload,
+    prompt: 'Hire Code Audit Agent for this task.',
     available: true,
-    kind,
-    prompt: 'Hire an agent for deeper insight and task execution.',
+    kind: 'developer',
     agent,
-    agents,
-    source: result.source
+    agents: [agent],
+    source,
+    ...(codeAuditIntake ? { chatIntake: codeAuditIntake } : {}),
+    autoOpenExecutionSheet: Boolean(
+      continuingAuditRequest
+      && codeAuditIntake?.required === false
+      && codeAuditIntake?.githubUrl
+    ),
+    reason: continuingAuditRequest ? 'pending_code_audit_continuation' : 'literal_audit_keyword'
   };
 }
 
@@ -12881,8 +13364,18 @@ function randomNonceHex(bytes = 32) {
 }
 
 function externalSantaClawzAgentId(agentId = '') {
-  const normalized = String(agentId || '').trim();
-  return normalized.startsWith('santaclawz:') ? normalized.slice('santaclawz:'.length) : normalized;
+  return normalizeExternalSantaClawzAgentId(agentId);
+}
+
+function assertApprovedSantaClawzAgent(agentId = '') {
+  const externalId = externalSantaClawzAgentId(agentId);
+  if (!isApprovedSantaClawzAgentId(externalId)) {
+    throw createHttpError('santaclawz_agent_not_approved', 403, {
+      agentId: externalId || null,
+      approvedAgentIds: getSantaClawzApprovedExternalAgentIds()
+    });
+  }
+  return externalId;
 }
 
 function findSantaClawzX402PaymentRequirement(payload) {
@@ -13232,6 +13725,36 @@ function assertDirectX402PayloadMatchesLinkedWallet({ authUser, paymentPayload }
   }
 }
 
+function sameEvmAddress(left = '', right = '') {
+  const normalizedLeft = normalizeEvmAddress(left);
+  const normalizedRight = normalizeEvmAddress(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function assertDirectX402PayloadMatchesPreparedContract({ directPayment, paymentPayload }) {
+  const requirementValidation = validateSantaClawzPaymentRequirement(
+    directPayment?.paymentRequirement,
+    { ok: true, expected: directPayment?.runtimeContract?.expected }
+  );
+  if (!requirementValidation.ok) {
+    throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+  }
+  const expected = requirementValidation.summary;
+  const sellerAuthorization = paymentPayload?.authorization?.typedData?.message || paymentPayload?.payload?.authorization || {};
+  const feeAuthorization = paymentPayload?.feeAuthorization?.typedData?.message || paymentPayload?.payload?.feeAuthorization?.authorization || {};
+  if (
+    String(paymentPayload.requestId || '') !== String(directPayment.paymentRequirement?.requestId || '')
+    || String(paymentPayload.amount || '') !== expected.grossAtomic
+    || !sameEvmAddress(paymentPayload.payTo, expected.sellerPayTo)
+    || !sameEvmAddress(sellerAuthorization.to, expected.sellerPayTo)
+    || String(sellerAuthorization.value || '') !== expected.sellerAtomic
+    || !sameEvmAddress(feeAuthorization.to, expected.protocolFeePayTo)
+    || String(feeAuthorization.value || '') !== expected.protocolFeeAtomic
+  ) {
+    throw createHttpError('santaclawz_signed_payment_contract_mismatch', 409);
+  }
+}
+
 function buildSantaClawzTaskPromptForSession(session) {
   const taskPackage = session?.taskPackage || buildExecutionTaskPackage(session);
   const compact = {
@@ -13260,6 +13783,43 @@ function buildSantaClawzRequesterContact(authUser, req) {
   if (authUser?.email) return `magic-city:${authUser.email}`;
   const ip = String(req.socket?.remoteAddress || 'anonymous').replace(/[^a-zA-Z0-9:._-]/g, '').slice(0, 80);
   return `magic-city:${ip || 'anonymous'}`;
+}
+
+function buildSantaClawzJobPrivacyForSession(session = {}) {
+  const requested = String(
+    session?.finalSelections?.jobPrivacy
+    || session?.selections?.jobPrivacy
+    || session?.intent?.privacyMode
+    || session?.privacy?.mode
+    || 'private'
+  ).trim().toLowerCase();
+  const visibility = requested === 'plain' ? 'public' : requested;
+  if (!['public', 'private'].includes(visibility)) {
+    throw createHttpError('santaclawz_privacy_mode_unsupported', 409, {
+      requestedPrivacyMode: visibility || null
+    });
+  }
+  return {
+    visibility
+  };
+}
+
+function buildSantaClawzHireBody({ taskPrompt, requesterContact, jobContext, jobPrivacy }) {
+  return sanitizeMetadata({
+    taskPrompt,
+    requesterContact,
+    jobContext,
+    jobPrivacy
+  });
+}
+
+function requireImmutableSantaClawzHireBody(directPayment = {}) {
+  const hireBody = directPayment?.hireBody;
+  const expectedDigest = String(directPayment?.hireBodyDigestSha256 || '').trim();
+  if (!hireBody || typeof hireBody !== 'object' || !expectedDigest || jsonDigestSha256(hireBody) !== expectedDigest) {
+    throw createHttpError('santaclawz_immutable_hire_body_missing', 409);
+  }
+  return hireBody;
 }
 
 function normalizePublicJobUrl(value = '') {
@@ -13519,9 +14079,18 @@ function getSantaClawzConciergeApiKey() {
 }
 
 function isSantaClawzConciergeEnabled() {
+  if (!MAGIC_CITY_SANTACLAWZ_LIVE) return false;
   const value = process.env.SANTACLAWZ_CONCIERGE_ENABLED;
-  if (value == null || value === '') return true;
+  if (value == null || value === '') return false;
   return !['0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase());
+}
+
+function assertSantaClawzLiveIntegration() {
+  if (MAGIC_CITY_SANTACLAWZ_LIVE) return;
+  throw createHttpError('santaclawz_integration_disabled', 409, {
+    mode: MAGIC_CITY_SANTACLAWZ_MODE,
+    detail: 'SantaClawz is temporarily unavailable in Magic City while its protocol deployment is being refreshed.'
+  });
 }
 
 function isSantaClawzConciergeConfigured() {
@@ -13531,12 +14100,20 @@ function isSantaClawzConciergeConfigured() {
 function buildSantaClawzEndpointUrl(endpoint, source = getSantaClawzSourceStatus()) {
   const raw = String(endpoint || '').trim();
   if (!raw) throw createHttpError('santaclawz_endpoint_required', 500);
+  const apiOrigin = new URL(source.apiBase).origin;
+  let resolved;
   try {
-    return new URL(raw).toString();
+    resolved = new URL(raw);
   } catch {
     const pathname = raw.startsWith('/') ? raw : `/${raw}`;
-    return new URL(pathname, `${source.apiBase}/`).toString();
+    resolved = new URL(pathname, `${source.apiBase}/`);
   }
+  if (!['https:', 'http:'].includes(resolved.protocol) || resolved.origin !== apiOrigin) {
+    throw createHttpError('santaclawz_endpoint_origin_not_approved', 502, {
+      host: resolved.host || null
+    });
+  }
+  return resolved.toString();
 }
 
 async function requestSantaClawzEndpointJson(endpoint, {
@@ -13545,7 +14122,7 @@ async function requestSantaClawzEndpointJson(endpoint, {
   timeoutMs = 10000,
   acceptedStatuses = [],
   headers = {},
-  includeApiKey = true,
+  includeApiKey = false,
   userAgent = 'magic-city-direct-x402/1.0'
 } = {}) {
   const source = getSantaClawzSourceStatus();
@@ -13563,6 +14140,7 @@ async function requestSantaClawzEndpointJson(endpoint, {
     }));
     const response = await fetch(url, {
       method,
+      redirect: 'error',
       signal: controller.signal,
       headers: {
         accept: 'application/json',
@@ -13616,12 +14194,113 @@ async function requestSantaClawzJson(pathname, options = {}) {
   return requestSantaClawzEndpointJson(pathname, options);
 }
 
+async function requestSantaClawzRuntimeContractPart(externalId, part, { timeoutMs = 8000 } = {}) {
+  const endpoint = part === 'ready'
+    ? `/api/agents/${encodeURIComponent(externalId)}/ready`
+    : `/api/agents/${encodeURIComponent(externalId)}/x402-plan`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await requestSantaClawzJson(endpoint, {
+        timeoutMs,
+        includeApiKey: false
+      });
+    } catch (error) {
+      if (!isSantaClawzRetryableRuntimeReadFailure(error)) throw error;
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, santaClawzRuntimeReadRetryDelayMs(error)));
+        continue;
+      }
+      const timeoutError = createHttpError(
+        part === 'ready' ? 'santaclawz_runtime_ready_timeout' : 'santaclawz_runtime_x402_plan_timeout',
+        503
+      );
+      timeoutError.cause = error;
+      throw timeoutError;
+    }
+  }
+  throw createHttpError('santaclawz_runtime_contract_unavailable', 503);
+}
+
+async function fetchSantaClawzArtifactBytes(endpoint, { timeoutMs = 12000, maxBytes = 5 * 1024 * 1024 } = {}) {
+  const url = buildSantaClawzEndpointUrl(endpoint);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      redirect: 'error',
+      signal: controller.signal,
+      headers: {
+        accept: 'application/octet-stream, text/plain, application/json, text/markdown',
+        'user-agent': 'magic-city-santaclawz-return-verifier/1.0'
+      }
+    });
+    if (!response.ok) throw createHttpError(`santaclawz_artifact_http_${response.status}`, 502);
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    if (declaredLength > maxBytes) throw createHttpError('santaclawz_artifact_too_large', 413);
+    const chunks = [];
+    let received = 0;
+    const reader = response.body?.getReader();
+    if (!reader) throw createHttpError('santaclawz_artifact_body_missing', 502);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        throw createHttpError('santaclawz_artifact_too_large', 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    if (!received) throw createHttpError('santaclawz_artifact_size_invalid', 413);
+    return Buffer.concat(chunks, received);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveSantaClawzReturnArtifactBytes({ deliverable, artifactManifestUrl, requestId }) {
+  const directUri = String(deliverable?.uri || '').trim();
+  if (directUri) return { bytes: await fetchSantaClawzArtifactBytes(directUri) };
+  if (!artifactManifestUrl) return null;
+
+  const manifestBytes = await fetchSantaClawzArtifactBytes(artifactManifestUrl, { maxBytes: 256 * 1024 });
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes.toString('utf8'));
+  } catch {
+    throw createHttpError('santaclawz_artifact_manifest_invalid', 502);
+  }
+  const manifestRequestId = String(manifest.requestId || manifest.request_id || '').trim();
+  if (manifestRequestId && manifestRequestId !== String(requestId || '').trim()) {
+    throw createHttpError('santaclawz_artifact_manifest_request_mismatch', 409);
+  }
+  const manifestName = String(manifest.filename || manifest.name || '').trim();
+  if (manifestName && manifestName !== String(deliverable?.name || '').trim()) {
+    throw createHttpError('santaclawz_artifact_manifest_name_mismatch', 409);
+  }
+  const manifestDigest = String(
+    manifest.artifactDigestSha256 || manifest.digestSha256 || manifest.sha256 || ''
+  ).trim().toLowerCase();
+  if (manifestDigest && manifestDigest !== String(deliverable?.sha256 || '').trim().toLowerCase()) {
+    throw createHttpError('santaclawz_artifact_manifest_hash_mismatch', 409);
+  }
+  let downloadUrl = String(
+    manifest.artifactDownloadUrl || manifest.downloadUrl || manifest.artifactUrl || manifest.uri || ''
+  ).trim();
+  if (!downloadUrl && /\/manifest(?:\?|$)/.test(artifactManifestUrl)) {
+    downloadUrl = artifactManifestUrl.replace(/\/manifest(?=\?|$)/, '/download');
+  }
+  if (!downloadUrl) return null;
+  return { bytes: await fetchSantaClawzArtifactBytes(downloadUrl) };
+}
+
 async function requestSantaClawzConciergeJson(pathname, options = {}) {
   const apiKey = getSantaClawzConciergeApiKey();
   if (!isSantaClawzConciergeEnabled()) throw createHttpError('santaclawz_concierge_disabled', 409);
   if (!apiKey) throw createHttpError('santaclawz_concierge_not_configured', 503);
   return requestSantaClawzEndpointJson(pathname, {
     ...options,
+    includeApiKey: false,
     timeoutMs: options.timeoutMs || 30000,
     headers: {
       ...(options.headers || {}),
@@ -13629,6 +14308,29 @@ async function requestSantaClawzConciergeJson(pathname, options = {}) {
     },
     userAgent: 'magic-city-concierge/1.0'
   });
+}
+
+async function fetchSantaClawzRuntimeContract(agentId) {
+  const externalId = assertApprovedSantaClawzAgent(agentId);
+  const [readyResponse, planResponse] = await Promise.all([
+    requestSantaClawzRuntimeContractPart(externalId, 'ready'),
+    requestSantaClawzRuntimeContractPart(externalId, 'x402_plan')
+  ]);
+  const validation = validateSantaClawzRuntimeContract({
+    agentId: externalId,
+    ready: readyResponse.payload,
+    x402Plan: planResponse.payload
+  });
+  if (!validation.ok) {
+    throw createHttpError(validation.reason || 'santaclawz_runtime_contract_invalid', 409, {
+      detail: validation.detail || validation.reason || 'The approved SantaClawz runtime contract is not currently safe to use.'
+    });
+  }
+  return {
+    ...validation,
+    readyDigestSha256: jsonDigestSha256(readyResponse.payload),
+    planDigestSha256: jsonDigestSha256(planResponse.payload)
+  };
 }
 
 function redactSantaClawzConciergePayload(payload) {
@@ -13835,16 +14537,22 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
   if (isSantaClawzConciergeConfigured()) {
     return prepareSantaClawzConciergeX402ForSession({ req, authUser, session, requestedAgentId, payerWalletAddress });
   }
-  const agentId = externalSantaClawzAgentId(
+  const agentId = assertApprovedSantaClawzAgent(
     requestedAgentId ||
     session?.externalExecutionHandoff?.agentId ||
     session?.preferredExecutionAgentId ||
     ''
   );
-  if (!agentId) throw createHttpError('santaclawz_agent_required', 409);
+  const runtimeContract = await fetchSantaClawzRuntimeContract(agentId);
   const taskPrompt = buildSantaClawzTaskPromptForSession(session);
   const requesterContact = buildSantaClawzRequesterContact(authUser, req);
   const jobContext = await assertSantaClawzJobContextReadyForSession(session, agentId);
+  const jobPrivacy = buildSantaClawzJobPrivacyForSession(session);
+  const hireBody = buildSantaClawzHireBody({ taskPrompt, requesterContact, jobContext, jobPrivacy });
+  const inputValidation = validateSantaClawzHireInputContract(hireBody, runtimeContract);
+  if (!inputValidation.ok) {
+    throw createHttpError(inputValidation.reason || 'santaclawz_hire_input_invalid', 409);
+  }
   const missionBoundAuth = session?.missionBoundAuth?.audience === 'magic_city_santaclawz_hire_orchestrator'
     ? session.missionBoundAuth
     : buildMissionCapability({
@@ -13863,16 +14571,19 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
       });
   const preflight = await requestSantaClawzJson(`/api/agents/${encodeURIComponent(agentId)}/hire`, {
     method: 'POST',
-    body: {
-      taskPrompt,
-      requesterContact,
-      jobContext
-    },
+    body: hireBody,
     acceptedStatuses: [400, 402, 409]
   });
   const paymentRequirement = findSantaClawzX402PaymentRequirement(preflight.payload);
-  const baseAccept = paymentRequirement ? findBaseFeeSplitAccept(paymentRequirement) : null;
-  if (!paymentRequirement || !baseAccept) {
+  const requirementValidation = paymentRequirement
+    ? validateSantaClawzPaymentRequirement(paymentRequirement, runtimeContract)
+    : null;
+  if (paymentRequirement && !requirementValidation?.ok) {
+    throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409, {
+      detail: requirementValidation.detail || 'The live x402 requirement no longer matches the approved Base USDC contract.'
+    });
+  }
+  if (!paymentRequirement) {
     const quoteRequired =
       preflight.payload?.requestType === 'quote_intake' ||
       preflight.payload?.pricingMode === 'quote-required' ||
@@ -13883,7 +14594,17 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
       agentId,
       taskPrompt,
       jobContext,
+      jobPrivacy,
       requesterContact,
+      hireBody,
+      hireBodyDigestSha256: jsonDigestSha256(hireBody),
+      runtimeContract: sanitizeMetadata({
+        checkedAt: runtimeContract.checkedAt,
+        staleAt: runtimeContract.staleAt,
+        readyDigestSha256: runtimeContract.readyDigestSha256,
+        planDigestSha256: runtimeContract.planDigestSha256,
+        expected: runtimeContract.expected
+      }),
       preparedAt: new Date().toISOString(),
       source: preflight.source,
       preflightStatus: preflight.status,
@@ -13911,7 +14632,17 @@ async function prepareSantaClawzDirectX402ForSessionOnce({ req, authUser, sessio
     agentId,
     taskPrompt,
     jobContext,
+    jobPrivacy,
     requesterContact,
+    hireBody,
+    hireBodyDigestSha256: jsonDigestSha256(hireBody),
+    runtimeContract: sanitizeMetadata({
+      checkedAt: runtimeContract.checkedAt,
+      staleAt: runtimeContract.staleAt,
+      readyDigestSha256: runtimeContract.readyDigestSha256,
+      planDigestSha256: runtimeContract.planDigestSha256,
+      expected: runtimeContract.expected
+    }),
     paymentRequirement,
     paymentRequirementDigestSha256: jsonDigestSha256(paymentRequirement),
     paymentRequirementSummary: describeSantaClawzPaymentRequirement(paymentRequirement),
@@ -13998,6 +14729,7 @@ function collectSantaClawzDeliveryArtifactsFromValue(value, artifacts = [], seen
   const deliveryKeys = [
     'artifacts',
     'resultArtifacts',
+    'result_artifacts',
     'deliverables',
     'outputs',
     'files',
@@ -14005,11 +14737,19 @@ function collectSantaClawzDeliveryArtifactsFromValue(value, artifacts = [], seen
     'links',
     'delivery',
     'resultPackage',
+    'result_package',
     'result',
     'output',
     'agentOutput',
+    'agent_output',
     'executionState',
-    'paymentState'
+    'execution_state',
+    'paymentState',
+    'payment_state',
+    'protocolReturn',
+    'protocol_return',
+    'verified_output',
+    'buyer_visible_outputs'
   ];
   for (const key of deliveryKeys) {
     if (value[key] != null) collectSantaClawzDeliveryArtifactsFromValue(value[key], artifacts, seen, depth + 1);
@@ -14025,7 +14765,11 @@ function extractSantaClawzDelivery(payload = {}) {
     payload?.verifiedOutput?.buyerVisibleOutputs,
     payload?.protocolReturn?.verifiedOutput?.buyerVisibleOutputs,
     payload?.paidExecution?.protocolReturn?.verifiedOutput?.buyerVisibleOutputs,
-    payload?.executionState?.delivery?.protocolVerifiedOutput?.buyerVisibleOutputs
+    payload?.executionState?.delivery?.protocolVerifiedOutput?.buyerVisibleOutputs,
+    payload?.verified_output?.buyer_visible_outputs,
+    payload?.protocol_return?.verified_output?.buyer_visible_outputs,
+    payload?.paid_execution?.protocol_return?.verified_output?.buyer_visible_outputs,
+    payload?.execution_state?.protocol_return?.verified_output?.buyer_visible_outputs
   ].find((entry) => Array.isArray(entry)) || [];
   const inlineOutputs = buyerVisibleOutputs
     .map((entry) => {
@@ -14112,6 +14856,25 @@ function materializeSantaClawzInlineArtifacts(sessionId, delivery = {}) {
   };
 }
 
+function santaClawzSourceDeliveryDigest(delivery = {}) {
+  return semanticSantaClawzStatusDigest({
+    summary: delivery?.summary || null,
+    inlineOutputs: Array.isArray(delivery?.inlineOutputs) ? delivery.inlineOutputs : [],
+    artifacts: (Array.isArray(delivery?.artifacts) ? delivery.artifacts : [])
+      .filter((artifact) => !String(artifact?.url || '').startsWith('/artifacts/'))
+  });
+}
+
+function materializeChangedSantaClawzDelivery(sessionId, existingDelivery = {}, incomingDelivery = {}) {
+  if (
+    santaClawzSourceDeliveryDigest(existingDelivery)
+    === santaClawzSourceDeliveryDigest(incomingDelivery)
+  ) {
+    return existingDelivery;
+  }
+  return materializeSantaClawzInlineArtifacts(sessionId, incomingDelivery);
+}
+
 async function fetchSantaClawzExecutionStateForDirectPayment(directPayment = {}) {
   let endpoint = String(
     directPayment.stateUrl ||
@@ -14168,9 +14931,79 @@ function isSantaClawzRequestTimeout(error) {
   return name === 'aborterror' || message.includes('aborted') || message.includes('aborterror');
 }
 
+function isSantaClawzRetryableRuntimeReadFailure(error) {
+  if (isSantaClawzRequestTimeout(error)) return true;
+  const statusCode = Number(error?.statusCode || 0);
+  const payload = error?.payload && typeof error.payload === 'object' ? error.payload : {};
+  const code = String(payload.code || '').trim().toLowerCase();
+  const message = String(payload.error || payload.message || error?.message || '').trim().toLowerCase();
+  return [502, 503, 504].includes(statusCode)
+    && payload.retryable === true
+    && (
+      code === 'x402_plan_temporarily_unavailable'
+      || message === 'x402_plan_cold_read_timeout'
+      || message === 'x402_plan_heartbeat_read_timeout'
+      || message === 'x402_plan_buyer_safety_read_timeout'
+    );
+}
+
+function isSantaClawzRuntimeContractReadFailure(error) {
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  return isSantaClawzRetryableRuntimeReadFailure(error)
+    || message === 'santaclawz_runtime_ready_timeout'
+    || message === 'santaclawz_runtime_x402_plan_timeout';
+}
+
+function santaClawzRuntimeReadRetryDelayMs(error) {
+  const requested = Number(error?.payload?.recommendedPollAfterMs);
+  if (!Number.isFinite(requested)) return 250;
+  return Math.max(100, Math.min(5000, Math.trunc(requested)));
+}
+
+function retainedSantaClawzRuntimeContract(directPayment, requestedAgentId, nowMs = Date.now()) {
+  const runtimeContract = directPayment?.runtimeContract;
+  const preparedAgentId = externalSantaClawzAgentId(directPayment?.agentId || '');
+  const expectedAgentId = externalSantaClawzAgentId(requestedAgentId || '');
+  const checkedAtMs = Date.parse(String(runtimeContract?.checkedAt || ''));
+  const staleAtMs = Date.parse(String(runtimeContract?.staleAt || ''));
+  if (
+    !runtimeContract?.expected
+    || !runtimeContract?.readyDigestSha256
+    || !runtimeContract?.planDigestSha256
+    || !preparedAgentId
+    || preparedAgentId !== expectedAgentId
+    || !Number.isFinite(checkedAtMs)
+    || !Number.isFinite(staleAtMs)
+    || checkedAtMs > nowMs
+    || staleAtMs <= nowMs
+  ) {
+    return null;
+  }
+  return {
+    ok: true,
+    agentId: preparedAgentId,
+    checkedAt: new Date(checkedAtMs).toISOString(),
+    staleAt: new Date(staleAtMs).toISOString(),
+    expected: runtimeContract.expected,
+    readyDigestSha256: runtimeContract.readyDigestSha256,
+    planDigestSha256: runtimeContract.planDigestSha256
+  };
+}
+
+async function currentSantaClawzRuntimeContract(directPayment, requestedAgentId) {
+  return retainedSantaClawzRuntimeContract(directPayment, requestedAgentId)
+    || fetchSantaClawzRuntimeContract(requestedAgentId);
+}
+
 const santaClawzSamePayloadRetriesInFlight = new Set();
+const santaClawzStatusRefreshCoordinator = createSantaClawzStatusRefreshCoordinator();
+
+function isSantaClawzHireSubmissionEnabled() {
+  return MAGIC_CITY_SANTACLAWZ_LIVE;
+}
 
 function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
+  if (!isSantaClawzHireSubmissionEnabled()) return false;
   const directPayment = session?.santaclawzDirectPayment || {};
   const digest = String(directPayment.paymentPayloadDigestSha256 || '').trim();
   const retryResume = directPayment.paymentState?.retryResume || {};
@@ -14207,6 +15040,13 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
 
   setImmediate(async () => {
     try {
+      if (!isSantaClawzHireSubmissionEnabled()) return;
+      const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
+      const runtimeContract = await currentSantaClawzRuntimeContract(directPayment, approvedAgentId);
+      const requirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, runtimeContract);
+      if (!requirementValidation.ok) {
+        throw createHttpError(requirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+      }
       const paymentPayload = await buildServerSignedSantaClawzX402PaymentPayload({
         paymentRequirement,
         sessionId: paymentRequirement.sessionId || directPayment.paymentRequirementSummary?.sessionId || session.id,
@@ -14217,16 +15057,22 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
       if (reconstructedDigest !== digest) {
         throw new Error('santaclawz_same_payload_digest_reconstruction_mismatch');
       }
+      const hireRequestBody = {
+        ...requireImmutableSantaClawzHireBody(directPayment),
+        paymentPayload
+      };
+      const hireRequestDigestSha256 = sha256HexDigest(JSON.stringify(hireRequestBody));
+      if (
+        directPayment.hireRequestDigestSha256
+        && hireRequestDigestSha256 !== directPayment.hireRequestDigestSha256
+      ) {
+        throw new Error('santaclawz_same_payload_hire_request_digest_mismatch');
+      }
       const hireEndpoint = directPayment.hireEndpoint
         || `/api/agents/${encodeURIComponent(externalSantaClawzAgentId(directPayment.agentId))}/hire`;
       const submit = await requestSantaClawzEndpointJson(hireEndpoint, {
         method: 'POST',
-        body: {
-          taskPrompt: directPayment.taskPrompt,
-          requesterContact: directPayment.requesterContact,
-          jobContext: directPayment.jobContext || buildSantaClawzJobContextForSession(session),
-          paymentPayload
-        },
+        body: hireRequestBody,
         timeoutMs: 90_000,
         acceptedStatuses: [202, 400, 402, 409, 500, 503]
       });
@@ -14273,7 +15119,10 @@ function scheduleSantaClawzCreditBackedSamePayloadRetry(session) {
   return true;
 }
 
-function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
+function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
+  expectedRequestId = '',
+  verifiedReturn = null
+} = {}) {
   const operational = [
     payload?.operationalStatus,
     payload?.hireRequest?.operationalStatus,
@@ -14307,12 +15156,20 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
   ].find((entry) => entry && typeof entry === 'object') || {};
   const agentStatus = payload?.agentStatus && typeof payload.agentStatus === 'object' ? payload.agentStatus : {};
   const retryResume = [payload?.retryResume, payload?.paymentState?.retryResume].find((entry) => entry && typeof entry === 'object') || {};
-  const returnRejection = [
+  const upstreamReturnRejection = [
     payload?.returnRejection,
     lifecycle?.returnRejection,
     payload?.executionState?.returnRejection,
     payload?.executionState?.lifecycle?.returnRejection
   ].find((entry) => entry && typeof entry === 'object') || null;
+  const returnValidation = verifiedReturn || validateSantaClawzCompletedReturn(payload, { expectedRequestId });
+  const returnVerificationPending = returnValidation.pending === true || returnValidation.retryable === true;
+  const malformedCurrentReturn = !returnVerificationPending
+    && returnValidation.reason !== 'santaclawz_return_missing'
+    && !returnValidation.ok;
+  const returnRejection = upstreamReturnRejection || (malformedCurrentReturn
+    ? { code: returnValidation.reason, message: 'SantaClawz returned a result package that did not satisfy the current verified return contract.' }
+    : null);
   const agentExecutionStatus = operational.agentExecutionStatus || payload.agentExecutionStatus || payload.executionState?.status || payload.status || (delivery.artifacts.length ? 'completed' : 'not_confirmed');
   const returnRejected = Boolean(returnRejection)
     || [paymentStatus, relayDeliveryStatus, agentExecutionStatus, payload?.paymentState?.paymentStatus]
@@ -14341,13 +15198,15 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     'partially_settled'
   ].includes(String(paymentStatus));
   const paymentAccepted = paymentAuthorized && !terminalFailure;
+  const protocolState = String(protocolLifecycle.protocolState || payload.protocolState || payload.executionState?.protocolState || '').toUpperCase();
+  const paymentFinality = String(protocolLifecycle.paymentFinality || payload.paymentFinality || payload.executionState?.paymentFinality || '').toLowerCase();
   const settlementSettled = [
     'settled',
     'already_settled',
-    'seller_settled',
-    'protocol_fee_settled',
-    'partially_settled'
-  ].includes(String(settlementStatus)) || ['settled', 'paid', 'already_settled', 'execution_completed'].includes(String(paymentStatus));
+    'fully_settled'
+  ].includes(String(settlementStatus).toLowerCase())
+    || paymentFinality === 'settled'
+    || protocolState === 'DELIVERED_SETTLED';
   const relayDelivered = [
     'forwarded',
     'recorded',
@@ -14369,6 +15228,7 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     && !terminalFailure
     && paymentAccepted
     && settlementSettled
+    && returnValidation.ok
     && (relayDelivered || deliveryAvailable || lifecycleCompleted)
     && (agentCompleted || deliveryAvailable || lifecycleCompleted);
   const protocolAllowsFreshPayment = protocolLifecycle?.buyerAnswer?.canCreateFreshPayment === true
@@ -14412,12 +15272,27 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     settlementStatus,
     relayDeliveryStatus,
     agentExecutionStatus,
-    protocolState: protocolLifecycle.protocolState || payload.protocolState || payload.executionState?.protocolState || null,
-    paymentFinality: protocolLifecycle.paymentFinality || payload.paymentFinality || payload.executionState?.paymentFinality || null,
+    protocolState: protocolState || null,
+    paymentFinality: paymentFinality || null,
     terminal,
     terminalFailure,
     returnRejected,
     returnRejection,
+    returnVerificationPending,
+    returnValidation: returnValidation.ok
+      ? {
+          ok: true,
+          schemaVersion: 'santaclawz-return/1.0',
+          requestId: returnValidation.requestId,
+          packageHash: returnValidation.packageHash,
+          deliverableCount: returnValidation.deliverables.length
+        }
+      : {
+          ok: false,
+          reason: returnValidation.reason,
+          pending: returnVerificationPending,
+          retryable: returnValidation.retryable === true
+        },
     incidentId,
     failureReason,
     protocolAllowsFreshPayment,
@@ -14429,6 +15304,8 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}) {
     inlineOutputCount: delivery.inlineOutputs.length,
     nextAction: completed
       ? 'none'
+      : returnVerificationPending
+        ? 'retry_return_verification'
       : terminalFailure
         ? (agentFixRequired ? 'retry_new_job_after_agent_fix' : 'inspect_terminal_failure')
         : paymentAccepted
@@ -14572,7 +15449,7 @@ function returnSantaClawzCreditsForTerminalFailure(session, reason = 'santaclawz
   };
 }
 
-async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {}) {
+async function refreshSantaClawzPaidSessionStatusOnce(session) {
   if (session?.executionCancellation?.cancelledAt) {
     return {
       session,
@@ -14623,14 +15500,9 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
   const existingDelivery = sessionForStatus.santaclawzDirectPayment?.delivery || {};
   const existingOutputCount = Number(existingDelivery.inlineOutputs?.length || 0)
     + Number(existingDelivery.artifacts?.length || 0);
-  if (sessionForStatus.status === 'fulfilled' && existingOutputCount > 0 && !force) {
+  if (sessionForStatus.status === 'fulfilled' && existingOutputCount > 0) {
     return { session: sessionForStatus, refreshed: false };
   }
-  const lastStatusAt = Date.parse(sessionForStatus.santaclawzDirectPayment?.lastStatusAt || '');
-  if (!force && Number.isFinite(lastStatusAt) && Date.now() - lastStatusAt < 4000) {
-    return { session: sessionForStatus, refreshed: false };
-  }
-
   const source = getSantaClawzSourceStatus();
   try {
     const status = await requestSantaClawzJson(`/api/x402/payment-state?paymentPayloadDigestSha256=${encodeURIComponent(digest)}`, {
@@ -14651,11 +15523,21 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
     const combinedStatusPayload = executionState?.payload
       ? sanitizeMetadata({ ...status.payload, executionState: executionState.payload })
       : status.payload;
-    const delivery = materializeSantaClawzInlineArtifacts(
+    const delivery = materializeChangedSantaClawzDelivery(
       sessionForStatus.id,
+      existingDelivery,
       extractSantaClawzDelivery(combinedStatusPayload)
     );
-    const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload);
+    const expectedReturnRequestId = sessionForStatus.santaclawzDirectPayment?.submittedRequestId || '';
+    const verifiedReturn = await verifySantaClawzCompletedReturn(combinedStatusPayload, {
+      expectedRequestId: expectedReturnRequestId,
+      expectedInputDigestSha256: sessionForStatus.santaclawzDirectPayment?.hireRequestDigestSha256 || '',
+      resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
+    });
+    const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload, {
+      expectedRequestId: expectedReturnRequestId,
+      verifiedReturn
+    });
     const runtimeHealth = recordSantaClawzRuntimeOutcome(sessionForStatus, summary);
     if (runtimeHealth?.status === 'quarantined') {
       summary.runtimeIncidentObserved = true;
@@ -14664,7 +15546,6 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
       || sessionForStatus.santaclawzDirectPayment?.sponsor === 'magic_city_credits';
     const nextDirectPayment = sanitizeMetadata({
       ...(sessionForStatus.santaclawzDirectPayment || {}),
-      lastStatusAt: new Date().toISOString(),
       lastStatusError: null,
       paymentStateUrl: `${source.apiBase}/api/x402/payment-state?paymentPayloadDigestSha256=${encodeURIComponent(digest)}`,
       submittedRequestId,
@@ -14838,22 +15719,78 @@ async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {
         ]
       });
     }
-    const updated = updateConnectorSession(sessionForStatus.id, withTaskPackage(sessionForStatus, sessionPatch));
+    const currentSemanticState = {
+      status: sessionForStatus.status,
+      santaclawzDirectPayment: sessionForStatus.santaclawzDirectPayment,
+      creditReservation: sessionForStatus.creditReservation,
+      fulfillment: sessionForStatus.fulfillment,
+      failedAt: sessionForStatus.failedAt,
+      fulfilledAt: sessionForStatus.fulfilledAt,
+      executionTrace: sessionForStatus.executionTrace
+    };
+    const nextSemanticState = {
+      status: sessionPatch.status ?? sessionForStatus.status,
+      santaclawzDirectPayment: sessionPatch.santaclawzDirectPayment,
+      creditReservation: sessionPatch.creditReservation ?? sessionForStatus.creditReservation,
+      fulfillment: sessionPatch.fulfillment ?? sessionForStatus.fulfillment,
+      failedAt: sessionPatch.failedAt ?? sessionForStatus.failedAt,
+      fulfilledAt: sessionPatch.fulfilledAt ?? sessionForStatus.fulfilledAt,
+      executionTrace: sessionPatch.executionTrace ?? sessionForStatus.executionTrace
+    };
+    const changed = hasSemanticSantaClawzStatusChanged(currentSemanticState, nextSemanticState);
+    const updated = changed
+      ? updateConnectorSession(sessionForStatus.id, withTaskPackage(sessionForStatus, sessionPatch))
+      : sessionForStatus;
     if (!summary.completed && !summary.paymentAccepted && !summary.terminalFailure) {
       scheduleSantaClawzCreditBackedSamePayloadRetry(updated || sessionForStatus);
     }
-    return { session: updated || sessionForStatus, refreshed: true, status, executionState, summary, delivery };
+    return {
+      session: updated || sessionForStatus,
+      refreshed: true,
+      persisted: changed,
+      status,
+      executionState,
+      summary,
+      delivery
+    };
   } catch (error) {
+    const nextError = error?.message || 'santaclawz_status_unavailable';
+    if (sessionForStatus.santaclawzDirectPayment?.lastStatusError === nextError) {
+      return { session: sessionForStatus, refreshed: false, persisted: false, error };
+    }
     const nextDirectPayment = sanitizeMetadata({
       ...(sessionForStatus.santaclawzDirectPayment || {}),
-      lastStatusAt: new Date().toISOString(),
-      lastStatusError: error?.message || 'santaclawz_status_unavailable'
+      lastStatusError: nextError
     });
     const updated = updateConnectorSession(sessionForStatus.id, withTaskPackage(sessionForStatus, {
       santaclawzDirectPayment: nextDirectPayment
     }));
-    return { session: updated || sessionForStatus, refreshed: false, error };
+    return { session: updated || sessionForStatus, refreshed: false, persisted: true, error };
   }
+}
+
+async function refreshSantaClawzPaidSessionStatus(session, { force = false } = {}) {
+  const digest = String(session?.santaclawzDirectPayment?.paymentPayloadDigestSha256 || '').trim();
+  const key = digest && session?.id ? `${session.id}:${digest}` : '';
+  const result = await santaClawzStatusRefreshCoordinator.run(
+    key,
+    () => refreshSantaClawzPaidSessionStatusOnce(session),
+    { force }
+  );
+  if (result?.skipped) {
+    return {
+      session: getConnectorSession(session.id) || session,
+      refreshed: false,
+      persisted: false,
+      cached: true
+    };
+  }
+  const resultStatus = String(result?.session?.status || '').toLowerCase();
+  const terminalFailure = result?.session?.santaclawzDirectPayment?.summary?.terminalFailure === true;
+  if (resultStatus === 'fulfilled' || terminalFailure) {
+    santaClawzStatusRefreshCoordinator.clear(key);
+  }
+  return result;
 }
 
 async function issueSantaClawzEnrollmentTicket({ body = {}, authUser, origin }) {
@@ -15115,6 +16052,7 @@ function finalizeActionForIntent({ intent, actionRun, execution, candidateAgent,
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', buildRequestBaseUrl(req));
   const urlPath = url.pathname;
+  const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
 
   try {
     if (req.method === 'GET' && urlPath === '/health') {
@@ -15122,13 +16060,17 @@ const server = http.createServer(async (req, res) => {
       const persistenceReady = persistence.ready
         && persistence.healthy
         && (!persistence.singleWriterRequired || persistence.writerLockAcquired);
-      return sendJson(res, persistenceReady ? 200 : 503, {
+      return sendAdvisoryJson(res, persistenceReady ? 200 : 503, {
         status: persistenceReady ? 'ok' : 'degraded',
         service: 'agent-verification',
         now: new Date().toISOString(),
         productionPersistenceRequired: MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE,
         persistence
       });
+    }
+
+    if (req.method === 'GET' && urlPath === '/network/zeko/status') {
+      return sendJson(res, 200, await getZekoNetworkStatus());
     }
 
     if (req.method === 'GET' && urlPath === '/developer/config') {
@@ -16009,7 +16951,8 @@ const server = http.createServer(async (req, res) => {
       }
       const nativeRunnerDevice = assertActiveNativeRunnerBearer(req);
       if (nativeRunnerDevice) {
-        await sweepConnectorSessionExecutionWatchdog();
+        nativeRunnerRequestTiming?.mark('authenticated');
+        const watchdogMutated = await sweepConnectorSessionExecutionWatchdog();
         const nativeRunnerActorIds = Array.from(nativeRunnerDeviceActorIds(nativeRunnerDevice));
         let sessions = listConnectorSessions(100)
           .filter((session) => nativeRunnerActorIds.some((pluginId) =>
@@ -16029,9 +16972,23 @@ const server = http.createServer(async (req, res) => {
             || isActiveExtensionClaimForDevice(session, nativeRunnerDevice)
           );
         }
-        touchNativeRunnerDevice(nativeRunnerDevice, {
+        const reportedExtensionVersion = String(req.headers['x-magic-city-runner-extension-version'] || '').trim().slice(0, 64);
+        const reportedExtensionId = String(req.headers['x-magic-city-runner-extension-id'] || '').trim().slice(0, 128);
+        const metadataPatch = (isChromeExtensionRunnerRequest(req) && (reportedExtensionVersion || reportedExtensionId))
+          ? {
+              metadata: sanitizeMetadata({
+                ...(nativeRunnerDevice.metadata || {}),
+                ...(reportedExtensionVersion ? { extensionVersion: reportedExtensionVersion } : {}),
+                ...(reportedExtensionId ? { extensionId: reportedExtensionId } : {}),
+                runnerSurface: 'chrome_extension_executor'
+              })
+            }
+          : {};
+        updateNativeRunnerDeviceEphemeral(nativeRunnerDevice.id, {
+          lastSeenAt: new Date().toISOString(),
           lastPollAt: new Date().toISOString(),
-          lastQueueCount: sessions.length
+          lastQueueCount: sessions.length,
+          ...metadataPatch
         });
         if (sessions.length > 20) {
           recordNativeRunnerActivity(nativeRunnerDevice, {
@@ -16048,7 +17005,9 @@ const server = http.createServer(async (req, res) => {
             queueCount: sessions.length
           }));
         }
-        return sendJson(res, 200, {
+        nativeRunnerRequestTiming?.mark('responseReady', { queueCount: sessions.length });
+        const sendPollResponse = watchdogMutated ? sendJson : sendAdvisoryJson;
+        return sendPollResponse(res, 200, {
           sessions: isChromeExtensionRunnerRequest(req)
             ? sessions.map((session) => formatConnectorSessionForExtension(session))
             : sessions
@@ -16094,6 +17053,13 @@ const server = http.createServer(async (req, res) => {
         String(body.capability || body.kind || '').toLowerCase() === 'agent-execution' ||
         String(body.kind || '').toLowerCase() === 'agent'
       );
+      const clientRequestId = normalizeExecutionClientRequestId(body.clientRequestId);
+      const existingAgentSession = hasSelectedExecutionAgent
+        ? findAgentExecutionSessionByClientRequestId(auth?.authUser || null, clientRequestId, preferredExecutionAgentId)
+        : null;
+      if (existingAgentSession) {
+        return sendJson(res, 200, { session: existingAgentSession, reused: true });
+      }
       const session = connectorId && !hasSelectedExecutionAgent
         ? buildDirectConnectorSession({
             req,
@@ -16109,7 +17075,8 @@ const server = http.createServer(async (req, res) => {
             profileSummary: body.profileSummary || {},
             authUser: auth?.authUser || null,
             preferredExecutionAgentId,
-            selectedAgent: body.selectedAgent || null
+            selectedAgent: body.selectedAgent || null,
+            clientRequestId
           });
       return sendJson(res, 201, { session });
     }
@@ -16120,19 +17087,26 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const auth = getAuthenticatedContext(req);
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
-      await sweepConnectorSessionExecutionWatchdog({ sessionId });
+      const watchdogMutated = await sweepConnectorSessionExecutionWatchdog({ sessionId });
       let latestSession = getConnectorSession(sessionId) ?? session;
-      if (latestSession.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
+      let santaClawzPersisted = false;
+      if (MAGIC_CITY_SANTACLAWZ_MODE !== 'disabled' && latestSession.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
         const refreshed = await refreshSantaClawzPaidSessionStatus(latestSession);
         latestSession = refreshed.session || latestSession;
+        santaClawzPersisted = refreshed.persisted === true;
       }
-      const hydrated = latestSession.taskPackage
-        ? latestSession
-        : updateConnectorSession(latestSession.id, { taskPackage: buildExecutionTaskPackage(latestSession) });
-      return sendJson(res, 200, { session: hydrated });
+      const taskPackageHydrated = !latestSession.taskPackage;
+      const hydrated = taskPackageHydrated
+        ? updateConnectorSession(latestSession.id, { taskPackage: buildExecutionTaskPackage(latestSession) })
+        : latestSession;
+      const sendSessionResponse = watchdogMutated || santaClawzPersisted || taskPackageHydrated
+        ? sendJson
+        : sendAdvisoryJson;
+      return sendSessionResponse(res, 200, { session: hydrated });
     }
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/santaclawz-x402\/prepare$/.test(urlPath)) {
+      assertSantaClawzLiveIntegration();
       const sessionId = urlPath.split('/')[3];
       const session = getConnectorSession(sessionId);
       if (!session) return notFound(res);
@@ -16182,6 +17156,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/santaclawz-credit-backed\/submit$/.test(urlPath)) {
+      assertSantaClawzLiveIntegration();
       const sessionId = urlPath.split('/')[3];
       const session = getConnectorSession(sessionId);
       if (!session) return notFound(res);
@@ -16192,14 +17167,6 @@ const server = http.createServer(async (req, res) => {
         || session.externalExecutionHandoff?.custody === 'magic_city_credit_backed'
         || session.paymentOrchestration?.x402Facilitation === 'magic_city_credit_backed';
       if (!creditBacked) return sendJson(res, 409, { error: 'credit_backed_santaclawz_not_enabled_for_session', session });
-      if (!getSantaClawzApiKey()) {
-        return sendJson(res, 503, {
-          error: 'santaclawz_api_key_not_configured',
-          message: 'Credits are reserved, but Magic City staging is missing a SantaClawz hire API key, so it cannot submit this paid SantaClawz hire.',
-          requiredSecret: 'SANTACLAWZ_API_KEY',
-          session
-        });
-      }
       if (session.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
         const refreshed = await refreshSantaClawzPaidSessionStatus(session, { force: true });
         return sendJson(res, 200, {
@@ -16253,7 +17220,8 @@ const server = http.createServer(async (req, res) => {
             sessionForSubmit,
             'santaclawz_preflight_failed_before_payment'
           );
-          const failureMessage = isSantaClawzRequestTimeout(error)
+          const runtimeReadFailure = isSantaClawzRuntimeContractReadFailure(error);
+          const failureMessage = runtimeReadFailure
             ? 'SantaClawz preflight timed out before payment. Reserved credits were returned; retry is safe.'
             : `SantaClawz preflight failed before payment: ${error?.message || 'preflight_failed'}`;
           updateConnectorSession(sessionId, withTaskPackage(sessionForSubmit, {
@@ -16269,13 +17237,13 @@ const server = http.createServer(async (req, res) => {
                 nextHumanAction: 'Retry the same agent. No SantaClawz payment was submitted.',
                 artifacts: [],
                 extraResult: {
-                  error: isSantaClawzRequestTimeout(error) ? 'santaclawz_preflight_timeout' : 'santaclawz_preflight_failed',
+                  error: runtimeReadFailure ? 'santaclawz_preflight_timeout' : 'santaclawz_preflight_failed',
                   latestFailureReason: failureMessage
                 }
               })
             }
           }));
-          error.statusCode = isSantaClawzRequestTimeout(error) ? 503 : (error.statusCode || 502);
+          error.statusCode = runtimeReadFailure ? 503 : (error.statusCode || 502);
           throw error;
         }
         directPayment = prepared.directPayment;
@@ -16290,6 +17258,13 @@ const server = http.createServer(async (req, res) => {
           session: getConnectorSession(sessionId) || sessionForSubmit,
           directPayment
         });
+      }
+      const approvedAgentId = assertApprovedSantaClawzAgent(directPayment.agentId);
+      requireImmutableSantaClawzHireBody(directPayment);
+      const currentRuntimeContract = await currentSantaClawzRuntimeContract(directPayment, approvedAgentId);
+      const currentRequirementValidation = validateSantaClawzPaymentRequirement(paymentRequirement, currentRuntimeContract);
+      if (!currentRequirementValidation.ok) {
+        throw createHttpError(currentRequirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
       }
       const summaryForCap = describeSantaClawzPaymentRequirement(paymentRequirement);
       const requirementUsdCents = usdcRequirementToCents(summaryForCap);
@@ -16332,6 +17307,11 @@ const server = http.createServer(async (req, res) => {
         issuedAtIso: paymentPayloadIssuedAtIso
       });
       const paymentPayloadDigestSha256 = santaClawzPaymentPayloadDigestSha256(paymentPayload);
+      const hireRequestBody = {
+        ...requireImmutableSantaClawzHireBody(directPayment),
+        paymentPayload
+      };
+      const hireRequestDigestSha256 = sha256HexDigest(JSON.stringify(hireRequestBody));
       const hireEndpoint = directPayment.hireEndpoint || `/api/agents/${encodeURIComponent(externalSantaClawzAgentId(directPayment.agentId))}/hire`;
       const x402RequestId = paymentPayload.requestId || directPayment.paymentRequirement?.requestId || null;
       const source = getSantaClawzSourceStatus();
@@ -16345,6 +17325,7 @@ const server = http.createServer(async (req, res) => {
         paymentPayloadIssuedAtIso,
         paymentPayloadDigestSha256,
         paymentPayloadDigestAlgorithm: 'santaclawz-json-stringify-v1',
+        hireRequestDigestSha256,
         x402RequestId,
         submittedRequestId: null,
         submitStatus: 202,
@@ -16365,12 +17346,7 @@ const server = http.createServer(async (req, res) => {
       try {
         submit = await requestSantaClawzEndpointJson(hireEndpoint, {
           method: 'POST',
-          body: {
-            taskPrompt: directPayment.taskPrompt,
-            requesterContact: directPayment.requesterContact || buildSantaClawzRequesterContact(auth.authUser, req),
-            jobContext: directPayment.jobContext || buildSantaClawzJobContextForSession(sessionForSubmit),
-            paymentPayload
-          },
+          body: hireRequestBody,
           timeoutMs: 20000,
           acceptedStatuses: [202, 400, 402, 409, 500, 503]
         });
@@ -16413,7 +17389,15 @@ const server = http.createServer(async (req, res) => {
         sessionForSubmit.id,
         extractSantaClawzDelivery(combinedSubmitPayload)
       );
-      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload);
+      const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || '',
+        expectedInputDigestSha256: hireRequestDigestSha256,
+        resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
+      });
+      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || '',
+        verifiedReturn
+      });
       const runtimeHealth = recordSantaClawzRuntimeOutcome({
         ...sessionForSubmit,
         santaclawzDirectPayment: directPayment
@@ -16607,6 +17591,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/santaclawz-x402\/submit$/.test(urlPath)) {
+      assertSantaClawzLiveIntegration();
       const sessionId = urlPath.split('/')[3];
       const session = getConnectorSession(sessionId);
       if (!session) return notFound(res);
@@ -16660,6 +17645,13 @@ const server = http.createServer(async (req, res) => {
       if (!directPayment?.taskPrompt || !directPayment?.agentId) {
         return sendJson(res, 409, { error: 'santaclawz_payment_not_prepared', session: getConnectorSession(sessionId) || session });
       }
+      assertApprovedSantaClawzAgent(directPayment.agentId);
+      const currentRuntimeContract = await currentSantaClawzRuntimeContract(directPayment, directPayment.agentId);
+      const currentRequirementValidation = validateSantaClawzPaymentRequirement(directPayment.paymentRequirement, currentRuntimeContract);
+      if (!currentRequirementValidation.ok) {
+        throw createHttpError(currentRequirementValidation.reason || 'santaclawz_payment_requirement_changed', 409);
+      }
+      assertDirectX402PayloadMatchesPreparedContract({ directPayment, paymentPayload });
 
       let sessionForDirectSubmit = enforceMissionToolBoundary({
         req,
@@ -16680,10 +17672,16 @@ const server = http.createServer(async (req, res) => {
       const source = getSantaClawzSourceStatus();
       const submittedAt = new Date().toISOString();
       const paymentStateUrl = `${source.apiBase}/api/x402/payment-state?paymentPayloadDigestSha256=${encodeURIComponent(paymentPayloadDigestSha256)}`;
+      const hireRequestBody = {
+        ...requireImmutableSantaClawzHireBody(directPayment),
+        paymentPayload
+      };
+      const hireRequestDigestSha256 = sha256HexDigest(JSON.stringify(hireRequestBody));
       const pendingDirectPayment = sanitizeMetadata({
         ...directPayment,
         paymentPayloadDigestSha256,
         paymentPayloadDigestAlgorithm: 'santaclawz-json-stringify-v1',
+        hireRequestDigestSha256,
         x402RequestId,
         submittedRequestId: null,
         submitStatus: 202,
@@ -16704,12 +17702,7 @@ const server = http.createServer(async (req, res) => {
       try {
         submit = await requestSantaClawzEndpointJson(hireEndpoint, {
           method: 'POST',
-          body: {
-            taskPrompt: directPayment.taskPrompt,
-            requesterContact: directPayment.requesterContact || buildSantaClawzRequesterContact(auth.authUser, req),
-            jobContext: directPayment.jobContext || buildSantaClawzJobContextForSession(sessionForDirectSubmit),
-            paymentPayload
-          },
+          body: hireRequestBody,
           timeoutMs: 20000,
           acceptedStatuses: [202, 400, 402, 409, 500, 503]
         });
@@ -16751,7 +17744,15 @@ const server = http.createServer(async (req, res) => {
         sessionForDirectSubmit.id,
         extractSantaClawzDelivery(combinedSubmitPayload)
       );
-      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload);
+      const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || '',
+        expectedInputDigestSha256: hireRequestDigestSha256,
+        resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
+      });
+      const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
+        expectedRequestId: submittedRequestId || '',
+        verifiedReturn
+      });
       const runtimeHealth = recordSantaClawzRuntimeOutcome({
         ...sessionForDirectSubmit,
         santaclawzDirectPayment: directPayment
@@ -16906,8 +17907,22 @@ const server = http.createServer(async (req, res) => {
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
       const digest = String(session.santaclawzDirectPayment?.paymentPayloadDigestSha256 || '').trim();
       if (!digest) return sendJson(res, 409, { error: 'x402_payment_not_submitted', session });
-      const refreshed = await refreshSantaClawzPaidSessionStatus(session, { force: true });
-      return sendJson(res, 200, {
+      if (MAGIC_CITY_SANTACLAWZ_MODE === 'disabled') {
+        return sendJson(res, 200, {
+          ok: false,
+          upstreamStatus: null,
+          session,
+          directPayment: session.santaclawzDirectPayment,
+          summary: session.santaclawzDirectPayment?.summary || null,
+          paymentState: session.santaclawzDirectPayment?.paymentState || null,
+          executionState: session.santaclawzDirectPayment?.executionState || null,
+          delivery: session.santaclawzDirectPayment?.delivery || null,
+          statusWarning: 'santaclawz_integration_disabled'
+        });
+      }
+      const refreshed = await refreshSantaClawzPaidSessionStatus(session);
+      const sendStatusResponse = refreshed.persisted ? sendJson : sendAdvisoryJson;
+      return sendStatusResponse(res, 200, {
         ok: !refreshed.error,
         upstreamStatus: refreshed.status?.status || null,
         session: refreshed.session || session,
@@ -17426,24 +18441,26 @@ const server = http.createServer(async (req, res) => {
         row?.authUserId === auth.authUser.id
         || (requesterHash && row?.requesterHash === requesterHash)
       );
+      const requestedDeviceMissing = Boolean(deviceId && !ownedDevices.some((row) => row.id === deviceId));
+      const preferredDeviceId = requestedDeviceMissing ? '' : deviceId;
       const device = deviceId
-        ? ownedDevices.find((row) => row.id === deviceId)
+        ? ownedDevices.find((row) => row.id === deviceId) || ownedDevices[0] || null
         : ownedDevices[0] || null;
       const readiness = buildNativeRunnerReadiness({
         devices: ownedDevices,
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-        preferredDeviceId: deviceId
+        preferredDeviceId
       });
       const checkoutReadiness = buildNativeRunnerReadiness({
         devices: ownedDevices,
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-        preferredDeviceId: deviceId,
+        preferredDeviceId,
         requireExecutableWorker: true
       });
       const nativeHelperReadiness = buildNativeRunnerReadiness({
         devices: ownedDevices,
         pluginId: NATIVE_RUNNER_PLUGIN_ID,
-        preferredDeviceId: deviceId,
+        preferredDeviceId,
         requireExecutableWorker: true
       });
       const statusDevice = readiness.device?.id
@@ -17463,6 +18480,8 @@ const server = http.createServer(async (req, res) => {
           ready: false,
           checkoutReady: false,
           executableReady: false,
+          requestedDeviceId: deviceId || null,
+          requestedDeviceMissing,
           readiness,
           checkoutReadiness,
           nativeHelperReadiness
@@ -17482,6 +18501,8 @@ const server = http.createServer(async (req, res) => {
         ready: readiness.ready,
         checkoutReady: checkoutReadiness.ready,
         executableReady: checkoutReadiness.executableReady,
+        requestedDeviceId: deviceId || null,
+        requestedDeviceMissing,
         readiness,
         checkoutReadiness,
         nativeHelperReadiness
@@ -17969,12 +18990,40 @@ const server = http.createServer(async (req, res) => {
         ''
       ).trim();
       const isBrowserSession = String(session.handoffData?.kind || '').trim() === 'browser';
+      const extensionCheckoutProfileRequested = Object.prototype.hasOwnProperty.call(body, 'extensionCheckoutProfileEnabled');
+      const extensionFinalSubmitRequested = Object.prototype.hasOwnProperty.call(body, 'extensionFinalSubmitEnabled');
+      // A retry is not a new authorization request. Keep the signed mission's
+      // execution features unless the user explicitly changes them.
+      const extensionCheckoutProfileEnabled = isBrowserSession && (extensionCheckoutProfileRequested
+        ? body.extensionCheckoutProfileEnabled === true
+        : session.extensionCheckoutProfileEnabled === true);
+      const extensionFinalSubmitEnabled = isBrowserSession && (extensionFinalSubmitRequested
+        ? body.extensionFinalSubmitEnabled === true
+        : session.extensionFinalSubmitEnabled === true);
       let selections = hydrateBrowserExecutionSelections(
         session,
         sanitizeMetadata(body.selections ?? session.selections ?? {})
       );
       const finalSubmitResumeRequested = isBrowserSession && body.resumeFinalSubmit === true;
       const checkoutReconcileResumeRequested = isBrowserSession && body.resumeCheckoutReconcile === true;
+      const existingFinalApprovalPolicy = String(
+        session.finalSelections?.finalApprovalPolicy
+        || session.selections?.finalApprovalPolicy
+        || ''
+      ).trim().toLowerCase();
+      const previousPlanAuthorizedAutoSubmit = session.extensionMissionPlan?.limits?.stopBeforeFinalSubmit === false;
+      // A repair action may reuse automatic submit only when it was already
+      // part of this stored mission. Never let the retry request escalate a
+      // review-only session into a spending authority.
+      const checkoutReconcileAutoSubmitAuthorized = checkoutReconcileResumeRequested
+        && (existingFinalApprovalPolicy === 'auto_submit_after_verified_checkout' || previousPlanAuthorizedAutoSubmit);
+      if (checkoutReconcileAutoSubmitAuthorized) {
+        selections = sanitizeMetadata({
+          ...selections,
+          checkoutRunnerStopBeforeFinalSubmit: false,
+          finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+        });
+      }
       if (finalSubmitResumeRequested && checkoutReconcileResumeRequested) {
         return sendJson(res, 400, {
           error: 'browser_resume_mode_conflict',
@@ -18002,7 +19051,7 @@ const server = http.createServer(async (req, res) => {
           finalApprovalPolicy: 'auto_submit_after_verified_checkout'
         });
       }
-      const finalSubmitApprovalReceipt = finalSubmitResumeRequested
+      let finalSubmitApprovalReceipt = finalSubmitResumeRequested
         ? buildFinalSubmitApprovalReceipt({
             req,
             session: {
@@ -18032,12 +19081,13 @@ const server = http.createServer(async (req, res) => {
           'payment_required',
           'needs_payment',
           'checkout_profile_mismatch',
+          'address_verification_required',
           'review_ready',
           'final_approval_required',
           'needs_final_approval'
         ].includes(stopState);
         if (
-          String(session.status || '').trim().toLowerCase() !== 'fulfilled'
+          !['fulfilled', 'failed'].includes(String(session.status || '').trim().toLowerCase())
           || !checkoutNeedsReconcile
           || String(session.preferredExecutionAgentId || '').trim() !== RUNNER_EXTENSION_PLUGIN_ID
           || !checkoutReconcileUrl
@@ -18062,10 +19112,14 @@ const server = http.createServer(async (req, res) => {
       if (session.handoffData?.kind === 'food') {
         localPrivateInputs.zipCode = resolveFoodZipCode(session, localPrivateInputs);
       }
+      const sessionWithSavedPublicInputs = updateConnectorSession(sessionId, {
+        selections,
+        finalSelections: selections
+      }) || session;
       const sessionWithPrivateInputs = {
-        ...session,
+        ...sessionWithSavedPublicInputs,
         localPrivateContext: {
-          ...(isBrowserSession ? stripBrowserLocalPrivateContext(session.localPrivateContext) : session.localPrivateContext ?? {}),
+          ...(isBrowserSession ? stripBrowserLocalPrivateContext(sessionWithSavedPublicInputs.localPrivateContext) : sessionWithSavedPublicInputs.localPrivateContext ?? {}),
           ...localPrivateInputs
         }
       };
@@ -18153,7 +19207,6 @@ const server = http.createServer(async (req, res) => {
         && !preferredExecutionAgent
         && isSantaClawzConciergeConfigured();
       const directSantaClawzX402Payment = completionMode === 'agent_checkout' && (paidSantaClawzExecutionAgent || santaClawzConciergeAvailable);
-      const santaClawzApiKeyConfigured = Boolean(getSantaClawzApiKey());
       const santaclawzPaymentPreference = String(
         body.santaclawzPaymentPreference ||
         selections.santaclawzPaymentPreference ||
@@ -18164,6 +19217,10 @@ const server = http.createServer(async (req, res) => {
       const magicCityBuiltInDirectWalletPayment = magicCityBuiltInExecutionAgent
         && normalizeMagicCityBuiltInFundingMode(selections.paymentFundingMode || paymentOrchestration?.fundingMode || session.selections?.paymentFundingMode || '') === 'direct_base_usdc_x402';
       if (directSantaClawzX402Payment) {
+        const approvedAgentId = assertApprovedSantaClawzAgent(selectedExecutionAgentIdForRun || preferredExecutionAgent?.pluginId || '');
+        if (santaClawzConciergeAvailable) {
+          throw createHttpError('santaclawz_concierge_disabled', 409);
+        }
         await assertSantaClawzJobContextReadyForSession({
           ...sessionWithPrivateInputs,
           selections,
@@ -18197,43 +19254,30 @@ const server = http.createServer(async (req, res) => {
         effectiveExecutionAgentId: effectiveExecutionAgentId || null,
         selectedExecutionAgentId: selectedExecutionAgentIdForRun || preferredExecutionAgent?.pluginId || null,
         santaClawzPaid: directSantaClawzX402Payment,
-        santaClawzApiKeyConfigured,
         paymentRail: executionPaymentPreview?.paymentRail || executionPaymentPreview?.fundingMode || null,
         requiredCredits: executionPaymentPreview?.requiredCredits || 0
       }));
-      if (directSantaClawzX402Payment && !santaClawzApiKeyConfigured) {
-        console.warn('[agent-verification] santaclawz paid execution blocked: api key missing', JSON.stringify({
-          sessionId,
-          selectedExecutionAgentId: selectedExecutionAgentIdForRun || preferredExecutionAgent?.pluginId || null
-        }));
-        const latestSession = getConnectorSession(sessionId) || session;
-        return sendJson(res, 503, {
-          error: 'santaclawz_api_key_not_configured',
-          message: 'Magic City can see this SantaClawz agent, but staging is missing a SantaClawz hire API key, so it cannot submit the paid hire yet.',
-          requiredSecret: 'SANTACLAWZ_API_KEY',
-          paymentOrchestration: executionPaymentPreview,
-          session: {
-            ...latestSession,
-            paymentOrchestration: executionPaymentPreview || latestSession.paymentOrchestration || null
-          }
-        });
-      }
       let extensionDispatchDeviceId = null;
+      let missionPlanPreview = null;
+      let extensionPlanForRun = null;
+      let freshAutoSubmitAuthorized = false;
       if (
         completionMode === 'agent_checkout'
         && isBrowserSession
         && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun)
       ) {
-        const missionPlanPreview = buildBrowserExtensionMissionPlan({
+        missionPlanPreview = buildBrowserExtensionMissionPlan({
           ...sessionWithPrivateInputs,
           selections,
           finalSelections: selections,
           preferredExecutionAgentId: selectedExecutionAgentIdForRun,
-          extensionCheckoutProfileEnabled: Boolean(body.extensionCheckoutProfileEnabled),
-          extensionFinalSubmitEnabled: Boolean(body.extensionFinalSubmitEnabled),
+          extensionCheckoutProfileEnabled,
+          extensionFinalSubmitEnabled,
           extensionFinalSubmitResume: finalSubmitResumeRequested,
           extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
-          extensionCheckoutReconcileUrl: checkoutReconcileUrl
+          extensionCheckoutReconcileUrl: checkoutReconcileUrl,
+          selections,
+          finalSelections: selections
         });
         const missionPlanValidation = validateBrowserExtensionPlan(missionPlanPreview);
         if (!missionPlanValidation.valid) {
@@ -18247,6 +19291,28 @@ const server = http.createServer(async (req, res) => {
               ...(getConnectorSession(sessionId) || session),
               selections
             }
+          });
+        }
+        const storedPlan = validateBrowserExtensionPlan(session.extensionMissionPlan || null);
+        const preserveStoredPlan = storedPlan.valid
+          && !finalSubmitResumeRequested
+          && !checkoutReconcileResumeRequested;
+        extensionPlanForRun = preserveStoredPlan ? storedPlan.plan : missionPlanPreview;
+        freshAutoSubmitAuthorized = !finalSubmitResumeRequested
+          && !checkoutReconcileResumeRequested
+          && extensionPlanForRun.limits?.stopBeforeFinalSubmit === false
+          && extensionFinalSubmitEnabled;
+        if (freshAutoSubmitAuthorized) {
+          finalSubmitApprovalReceipt = buildAutoSubmitMissionApprovalReceipt({
+            req,
+            session: {
+              ...session,
+              selections,
+              finalSelections: selections
+            },
+            selections,
+            authUser: creditAuthUser,
+            extensionPlan: extensionPlanForRun
           });
         }
       }
@@ -18382,7 +19448,9 @@ const server = http.createServer(async (req, res) => {
               finalSelections: selections,
               paymentOrchestration,
               preferredExecutionAgentId: selectedExecutionAgentIdForRun,
-              extensionFinalSubmitEnabled: Boolean(body.extensionFinalSubmitEnabled),
+              extensionMissionPlan: extensionPlanForRun,
+              extensionFinalSubmitEnabled,
+              extensionCheckoutProfileEnabled,
               extensionFinalSubmitResume: finalSubmitResumeRequested,
               extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
               extensionCheckoutReconcileUrl: checkoutReconcileUrl,
@@ -18438,7 +19506,9 @@ const server = http.createServer(async (req, res) => {
               : 'Execution requested')
           : 'Checkout opened',
         detail: checkoutReconcileResumeRequested
-          ? 'Magic City will reopen the prepared checkout and reconcile only the saved delivery and card cues. It will not submit an order.'
+          ? (checkoutReconcileAutoSubmitAuthorized
+            ? 'Magic City will reopen the prepared checkout, re-verify saved delivery and card cues, then submit only if final review still matches the original authorized order.'
+            : 'Magic City will reopen the prepared checkout and reconcile only the saved delivery and card cues. It will not submit an order.')
           : completionMode === 'agent_checkout'
           ? (directPersonalAgentTravelHandoff
               ? `${userAgentProfile?.name || 'Your Agent'} is now the preferred travel checkout continuation layer. Magic City will keep the funding and task package aligned while your agent handles browser continuity and live supplier steps.`
@@ -18463,13 +19533,15 @@ const server = http.createServer(async (req, res) => {
           : 'human_checkout',
         createdAt: new Date().toISOString()
       });
-      if (finalSubmitResumeRequested) {
+      if (finalSubmitApprovalReceipt) {
         nextTrace.push({
           pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-          label: 'Final order approved',
+          label: finalSubmitResumeRequested ? 'Final order approved' : 'One-order authority issued',
           detail: finalSubmitApprovalReceipt?.approvalHash
-            ? `The user approved one verified checkout submit. Approval ${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)}.`
-            : 'The user approved one final order submit from the verified Magic City checkout review.',
+            ? (finalSubmitResumeRequested
+              ? `The user approved one verified checkout submit. Approval ${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)}.`
+              : `This Run authorized one submit after the signed checkout plan verifies. Approval ${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)}.`)
+            : 'Magic City authorized one final order submit from the verified checkout review.',
           state: 'final_submit_authorized',
           approval: finalSubmitApprovalReceipt
             ? {
@@ -18486,7 +19558,9 @@ const server = http.createServer(async (req, res) => {
         nextTrace.push({
           pluginId: RUNNER_EXTENSION_PLUGIN_ID,
           label: 'Saved checkout details approved',
-          detail: 'The user approved a narrow continuation to select the saved address and existing merchant card cue. No final order action is included.',
+          detail: checkoutReconcileAutoSubmitAuthorized
+            ? 'The user resumed the same auto-submit mission. Magic City will verify the saved address, selected card, delivery, and final review before one order-submit action.'
+            : 'The user approved a narrow continuation to select the saved address and existing merchant card cue. No final order action is included.',
           state: 'checkout_reconcile_authorized',
           createdAt: new Date().toISOString()
         });
@@ -18515,6 +19589,16 @@ const server = http.createServer(async (req, res) => {
             nativeRunnerDeviceId: extensionDispatchDeviceId
           })
         : null;
+      // A checkout-reconciliation continuation is confined to the preserved
+      // merchant tab. It can re-observe/select saved address and card cues, but
+      // never adds items. A final submit is permitted only when the stored
+      // mission already authorized auto-submit. A previous false mismatch may
+      // already have released the original execution hold, so this recovery
+      // must never create a second credit reservation.
+      const checkoutReconcileWithoutAdditionalCharge = checkoutReconcileResumeRequested
+        && !directSantaClawzX402Payment
+        && String(session.handoffData?.kind || '').trim() === 'browser'
+        && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun);
       if (extensionSitePermissionPause) nextTrace.push({
         pluginId: selectedExecutionAgentIdForRun,
         ...extensionSitePermissionPause
@@ -18551,7 +19635,7 @@ const server = http.createServer(async (req, res) => {
         paymentRail: directSantaClawzX402Payment
           ? (santaclawzDirectWalletPayment ? 'base_usdc_x402' : 'magic_city_credits_to_base_usdc_x402')
           : paymentOrchestration?.paymentRail || paymentOrchestration?.fundingMode || '',
-        spendCredits: paymentOrchestration?.requiredCredits || 0,
+        spendCredits: checkoutReconcileWithoutAdditionalCharge ? 0 : (paymentOrchestration?.requiredCredits || 0),
         dataAccess: Object.keys(localPrivateInputs).length || browserLocalCheckoutProfileReady ? ['local_vault'] : [],
         userApproved: true,
         detail: directSantaClawzX402Payment
@@ -18559,11 +19643,16 @@ const server = http.createServer(async (req, res) => {
           : finalSubmitResumeRequested
             ? `Magic City approved a fresh, one-time final-submit capability for the verified browser checkout${finalSubmitApprovalReceipt?.approvalHash ? ` (${finalSubmitApprovalReceipt.approvalHash.slice(0, 14)})` : ''}.`
             : checkoutReconcileResumeRequested
-              ? 'Magic City approved a fresh, checkout-only capability to select saved delivery and payment cues. No final submit is authorized.'
+              ? (checkoutReconcileAutoSubmitAuthorized
+                ? 'Magic City renewed the same one-order checkout capability. It may submit only after the saved address, card, delivery, and final review verify again.'
+                : 'Magic City approved a fresh, checkout-only capability to select saved delivery and payment cues. No final submit is authorized.')
             : 'Magic City approved the bounded Magic Internet Agent execution start.'
       });
       let creditReservation = session.creditReservation ?? null;
-      if (paymentOrchestration && Number(paymentOrchestration.requiredCredits || 0) > 0 && (!creditAuthUser || !requesterId)) {
+      if (!checkoutReconcileWithoutAdditionalCharge
+        && paymentOrchestration
+        && Number(paymentOrchestration.requiredCredits || 0) > 0
+        && (!creditAuthUser || !requesterId)) {
         console.warn('[agent-verification] execution credit auth missing', JSON.stringify({
           sessionId,
           kind: session.handoffData?.kind || null,
@@ -18579,7 +19668,41 @@ const server = http.createServer(async (req, res) => {
           session: getConnectorSession(sessionId) || session
         });
       }
-      if (paymentOrchestration && Number(paymentOrchestration.requiredCredits || 0) > 0 && requesterId) {
+      if (checkoutReconcileWithoutAdditionalCharge) {
+        const existingLock = getEscrowLock(sessionId);
+        const continuationRequesterHash = existingLock?.userHash
+          || session.creditReservation?.requesterHash
+          || session.requesterHash
+          || (requesterId ? hashIdentifier(requesterId) : null);
+        const existingHoldMatchesSession = existingLock?.status === 'locked'
+          && (!continuationRequesterHash || existingLock.userHash === continuationRequesterHash);
+        if (existingHoldMatchesSession) {
+          creditReservation = {
+            sessionId,
+            requesterId: requesterId || session.creditReservation?.requesterId || null,
+            requesterHash: existingLock.userHash,
+            status: 'locked',
+            requiredCredits: paymentOrchestration?.requiredCredits || 0,
+            amountUnits: existingLock.amount,
+            reservedAt: existingLock.createdAt,
+            account: formatUserAccountForApi(getUserAccount(existingLock.userHash)),
+            continuation: 'reused_existing_hold'
+          };
+        } else {
+          creditReservation = {
+            ...(session.creditReservation || {}),
+            sessionId,
+            requesterId: requesterId || session.creditReservation?.requesterId || null,
+            requesterHash: continuationRequesterHash,
+            status: 'continuation_no_additional_hold',
+            requiredCredits: paymentOrchestration?.requiredCredits || session.creditReservation?.requiredCredits || 0,
+            amountUnits: 0,
+            continuation: 'checkout_reconcile',
+            continuedAt: new Date().toISOString(),
+            account: continuationRequesterHash ? formatUserAccountForApi(getUserAccount(continuationRequesterHash)) : null
+          };
+        }
+      } else if (paymentOrchestration && Number(paymentOrchestration.requiredCredits || 0) > 0 && requesterId) {
         const userHash = hashIdentifier(requesterId);
         const amountUnits = toUnits(paymentOrchestration.requiredCredits);
         const existingLock = getEscrowLock(sessionId);
@@ -18708,21 +19831,26 @@ const server = http.createServer(async (req, res) => {
         squarePaymentLink: paymentOrchestration?.fundingMode === 'direct_square' ? session.squarePaymentLink ?? null : null,
         missionBoundAuth: missionBoundAuthForExecution,
         missionRuntimeHolder: resetExpiredBrowserMission ? null : session.missionRuntimeHolder ?? null,
-        extensionMissionPlan: resetExpiredBrowserMission ? null : session.extensionMissionPlan ?? null,
-        extensionMissionPlanState: resetExpiredBrowserMission ? null : session.extensionMissionPlanState ?? null,
+        // Persist the exact plan that was validated and (when enabled) bound to
+        // the one-order approval. Rebuilding it later from mutable session
+        // defaults can change its hash between Run, claim, and final_submit.
+        extensionMissionPlan: extensionPlanForRun || (resetExpiredBrowserMission ? null : session.extensionMissionPlan ?? null),
+        extensionMissionPlanState: extensionPlanForRun
+          ? ((resetExpiredBrowserMission || retryingFailedSession || finalSubmitResumeRequested || checkoutReconcileResumeRequested)
+            ? initialBrowserExtensionPlanState(extensionPlanForRun)
+            : getExtensionMissionPlanStateForSession(session, extensionPlanForRun))
+          : (resetExpiredBrowserMission ? null : session.extensionMissionPlanState ?? null),
         extensionFinalSubmitResume: finalSubmitResumeRequested,
         extensionCheckoutReconcileResume: checkoutReconcileResumeRequested,
         extensionCheckoutReconcileUrl: checkoutReconcileResumeRequested ? checkoutReconcileUrl : null,
         extensionFinalSubmitEnabled: isBrowserSession
           && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun)
-          && Boolean(body.extensionFinalSubmitEnabled),
+          && extensionFinalSubmitEnabled,
         extensionCheckoutProfileEnabled: isBrowserSession
           && isDeclarativeExtensionExecutionAgentId(selectedExecutionAgentIdForRun)
-          && Boolean(body.extensionCheckoutProfileEnabled),
+          && extensionCheckoutProfileEnabled,
         extensionRunDispatch,
-        finalSubmitApproval: finalSubmitResumeRequested
-          ? finalSubmitApprovalReceipt
-          : session.finalSubmitApproval ?? null,
+        finalSubmitApproval: finalSubmitApprovalReceipt || session.finalSubmitApproval || null,
         creditReservation,
         merchantSettlement,
         personalAgentProfile: userAgentProfile,
@@ -18803,6 +19931,7 @@ const server = http.createServer(async (req, res) => {
         extensionFinalSubmitEnabled: nextSessionState.extensionFinalSubmitEnabled,
         extensionCheckoutProfileEnabled: nextSessionState.extensionCheckoutProfileEnabled,
         extensionRunDispatch: nextSessionState.extensionRunDispatch,
+        finalSubmitApproval: nextSessionState.finalSubmitApproval,
         creditReservation,
         merchantSettlement,
         personalAgentProfile: userAgentProfile,
@@ -18820,6 +19949,12 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const refreshedSession = getConnectorSession(sessionId) ?? updated;
+      // Do not hold the browser launch on an on-chain transaction. The runner
+      // receives this same session field at each signed checkpoint and checks
+      // it only at the one irreversible final-submit action.
+      if (freshAutoSubmitAuthorized && FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
+        void beginFinalSubmitChainAuthorization(sessionId);
+      }
 	      if (completionMode === 'agent_checkout') {
 	        const kind = String(session.handoffData?.kind || '').trim();
 	        if (!directPersonalAgentHandoff && !directSantaClawzX402Payment) {
@@ -18997,19 +20132,106 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { released: true, session: updated });
     }
 
+    if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/final-submit-chain-authorization$/.test(urlPath)) {
+      const sessionId = urlPath.split('/')[3];
+      const session = getConnectorSession(sessionId);
+      if (!session) return notFound(res);
+      const body = await readBody(req);
+      requireFields(body, ['pluginId', 'planHash', 'actionId']);
+      requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
+        return sendJson(res, 409, { error: 'final_submit_chain_agent_mismatch' });
+      }
+      if (!FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
+        const plan = getExtensionMissionPlanForSession(session);
+        const action = plan?.actions?.find((item) => item?.type === 'final_submit' && item?.id === String(body.actionId || '')) || null;
+        if (!plan || plan.planHash !== String(body.planHash || '') || !action) {
+          return sendJson(res, 409, { error: 'final_submit_chain_authorization_scope_mismatch' });
+        }
+        const bypass = localFinalSubmitChainBypass({
+          sessionId,
+          planHash: plan.planHash,
+          actionId: action.id,
+          network: getAnchorConfig().networkId
+        }, 'chain_gate_disabled', 'Zeko final-submit gating is temporarily disabled. Magic City will continue with the signed local one-order authorization.');
+        return sendJson(res, 200, {
+          ready: true,
+          bypassed: true,
+          authorization: bypass,
+          session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId)
+        });
+      }
+      const current = session.finalSubmitChainAuthorization || null;
+      if (!current
+        || current.planHash !== String(body.planHash || '')
+        || current.actionId !== String(body.actionId || '')
+        || current.sessionId !== sessionId) {
+        return sendJson(res, 409, { error: 'final_submit_chain_authorization_scope_mismatch' });
+      }
+      const task = current.status === 'preparing'
+        ? (finalSubmitChainAuthorizationTasks.get(sessionId) || beginFinalSubmitChainAuthorization(sessionId))
+        : null;
+      if (current.status === 'preparing' && task) {
+        await Promise.race([
+          task.catch(() => null),
+          new Promise((resolve) => setTimeout(resolve, FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS))
+        ]);
+      }
+      const refreshed = getConnectorSession(sessionId) || session;
+      const authorization = finalSubmitChainAuthorizationForRunner(refreshed.finalSubmitChainAuthorization);
+      if (authorization?.status === 'anchored') {
+        return sendJson(res, 200, {
+          ready: true,
+          authorization,
+          session: formatConnectorSessionForRunnerResponse(req, refreshed, body.pluginId)
+        });
+      }
+      if (authorization?.status === 'unavailable' && authorization.bypassAllowed === true) {
+        return sendJson(res, 200, {
+          ready: true,
+          bypassed: true,
+          authorization,
+          session: formatConnectorSessionForRunnerResponse(req, refreshed, body.pluginId)
+        });
+      }
+      return sendJson(res, 409, {
+        error: authorization?.status === 'failed'
+          ? 'final_submit_chain_authorization_failed'
+          : 'final_submit_chain_authorization_pending',
+        authorization,
+        session: formatConnectorSessionForRunnerResponse(req, refreshed, body.pluginId)
+      });
+    }
+
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/checkpoint$/.test(urlPath)) {
       const sessionId = urlPath.split('/')[3];
       const session = getConnectorSession(sessionId);
       if (!session) return notFound(res);
       const body = await readBody(req);
+      nativeRunnerRequestTiming?.mark('bodyRead');
       requireFields(body, ['pluginId', 'label']);
       const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      nativeRunnerRequestTiming?.mark('authenticated');
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'checkpoint_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
       const browser = body.browser ? sanitizeMetadata(body.browser) : null;
+      const runnerTiming = body.runnerTiming && typeof body.runnerTiming === 'object'
+        ? sanitizeMetadata(body.runnerTiming)
+        : null;
       const missionAction = String(body.missionAction || body.action || '').trim()
         || (browser?.url || browser?.currentUrl ? 'read_public_page' : 'inspect');
+      const checkpointRequestHash = isChromeExtensionDeclarativeRunnerRequest(req)
+        ? extensionCheckpointRequestHash(body, { browser, runnerTiming, missionAction })
+        : null;
+      if (isExactExtensionCheckpointReplay(session, checkpointRequestHash)) {
+        nativeRunnerRequestTiming?.mark('responseReady', { checkpointLabel: String(body.label), replayed: true });
+        return sendJson(res, 200, {
+          updated: true,
+          replayed: true,
+          session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId)
+        });
+      }
       const extensionPlan = isChromeExtensionDeclarativeRunnerRequest(req)
         ? enforceExtensionMissionPlanStep(session, body, missionAction)
         : null;
@@ -19054,6 +20276,8 @@ const server = http.createServer(async (req, res) => {
         detail: checkpointDetail,
         state: checkpointState,
         browser,
+        runnerTiming,
+        ...(checkpointRequestHash ? { checkpointRequestHash } : {}),
         extensionPlan: extensionPlan?.binding || null,
         createdAt: checkpointCreatedAt
       });
@@ -19071,6 +20295,7 @@ const server = http.createServer(async (req, res) => {
         executionLive: browser
           ? {
               ...browser,
+              ...(runnerTiming ? { runnerTiming } : {}),
               ...checkpointLive
             }
           : checkpointState === 'permission_required'
@@ -19091,6 +20316,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      nativeRunnerRequestTiming?.mark('responseReady', { checkpointLabel });
       return sendJson(res, 200, {
         updated: true,
         session: formatConnectorSessionForRunnerResponse(req, updated, body.pluginId)
@@ -19103,27 +20329,19 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const body = await readBody(req);
       requireFields(body, ['pluginId']);
-      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      requirePluginApiKeyOrNativeRunner(req, {
+        body,
+        session,
+        pluginId: body.pluginId,
+        advisory: true
+      });
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'runner_status_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
       if (!['queued', 'confirmed', 'claimed', 'executing'].includes(String(session.status || '').toLowerCase())) {
         return sendJson(res, 409, { error: 'execution_not_active', session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId) });
       }
-      if (pluginAuth.type === 'native_runner') {
-        touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice, {
-          lastSeenAt: new Date().toISOString()
-        });
-        recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {
-          action: 'runner_status',
-          status: 'success',
-          source: 'native_runner',
-          sessionId,
-          pluginId: body.pluginId,
-          capability: 'inspect'
-        });
-      }
-      return sendJson(res, 200, {
+      return sendAdvisoryJson(res, 200, {
         active: true,
         session: formatConnectorSessionForRunnerResponse(req, session, body.pluginId)
       });
@@ -19204,9 +20422,11 @@ const server = http.createServer(async (req, res) => {
         const session = getConnectorSession(sessionId);
         if (!session) return notFound(res);
         const body = await readBody(req);
+        nativeRunnerRequestTiming?.mark('bodyRead');
         requireFields(body, ['pluginId']);
         const declarativeExtensionClaim = isChromeExtensionDeclarativeRunnerRequest(req);
         const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+        nativeRunnerRequestTiming?.mark('authenticated');
         const plugin = getPluginRegistration(body.pluginId);
         if (!plugin || plugin.status !== 'active') {
           return sendJson(res, 404, { error: 'plugin_not_found' });
@@ -19315,6 +20535,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      nativeRunnerRequestTiming?.mark('responseReady', { claimAccepted: true });
       return sendJson(res, 200, {
         claimed: true,
         session: formatConnectorSessionForRunnerResponse(req, updated, plugin.pluginId),
@@ -19362,6 +20583,20 @@ const server = http.createServer(async (req, res) => {
         ? evaluateBrowserExtensionFulfillment({ status: requestedFulfillmentStatus, result: body.result ?? {} })
         : null;
       const fulfillmentStatus = extensionFulfillmentEvaluation?.status || requestedFulfillmentStatus;
+      // An Amazon confirmation is irreversible. A delayed retry can report a
+      // stale checkout-picker state after the order is complete; it must not
+      // downgrade the terminal session or release its proof trail.
+      if (isChromeExtensionDeclarativeRunnerRequest(req)
+        && connectorSessionHasConfirmedBrowserOrder(session)
+        && fulfillmentStatus === 'failed') {
+        return sendJson(res, 200, {
+          fulfilled: true,
+          failed: false,
+          ignoredStaleTerminalReport: true,
+          session: formatConnectorSessionForRunnerResponse(req, session, plugin.pluginId),
+          plugin
+        });
+      }
       const fulfillmentProofEligible = extensionFulfillmentEvaluation?.proofEligible !== false;
       const rejectedExtensionFulfillment = Boolean(extensionFulfillmentEvaluation && !extensionFulfillmentEvaluation.accepted);
       if (rejectedExtensionFulfillment) {
@@ -19798,6 +21033,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/execution-agents/santaclawz/preflight-snapshots/refresh') {
+      assertSantaClawzLiveIntegration();
       const auth = getAuthenticatedContext(req);
       requireAdminAccess(req, auth?.authUser || null);
       const result = await refreshSantaClawzPreflightSnapshots({ force: true });
@@ -19872,8 +21108,11 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/plugins/register') {
       const body = await readBody(req);
+      nativeRunnerRequestTiming?.mark('bodyRead');
       requireFields(body, ['pluginId', 'ownerAgentId', 'kind', 'endpoint']);
-      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, pluginId: body.pluginId });
+      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, pluginId: body.pluginId, advisory: true });
+      nativeRunnerRequestTiming?.mark('authenticated');
+      const nativeRunnerSeenAt = new Date().toISOString();
       if (pluginAuth.type === 'native_runner') {
         if (!nativeRunnerDeviceCanActAsPlugin(pluginAuth.nativeRunnerDevice, body.ownerAgentId)) {
           return sendJson(res, 403, { error: 'native_runner_owner_mismatch' });
@@ -19882,7 +21121,7 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 403, { error: 'native_runner_kind_mismatch' });
         }
       }
-      const plugin = upsertPluginRegistration({
+      const requestedRegistration = {
         pluginId: body.pluginId,
         ownerAgentId: body.ownerAgentId,
         kind: body.kind,
@@ -19897,11 +21136,29 @@ const server = http.createServer(async (req, res) => {
           nativeRunnerDeviceId: pluginAuth.nativeRunnerDevice?.id || null,
           ...(body.metadata ?? {})
         })
-      });
+      };
+      const existingPlugin = getPluginRegistration(body.pluginId);
+      if (nativeRunnerRegistrationMatches(existingPlugin, requestedRegistration)) {
+        if (pluginAuth.type === 'native_runner') {
+          updateNativeRunnerDeviceEphemeral(pluginAuth.nativeRunnerDevice.id, {
+            lastSeenAt: nativeRunnerSeenAt,
+            metadata: sanitizeMetadata({
+              ...(pluginAuth.nativeRunnerDevice.metadata || {}),
+              extensionVersion: body.metadata?.version || pluginAuth.nativeRunnerDevice.metadata?.extensionVersion || null,
+              extensionId: body.metadata?.extensionId || pluginAuth.nativeRunnerDevice.metadata?.extensionId || null,
+              runnerSurface: 'chrome_extension_executor'
+            })
+          });
+        }
+        nativeRunnerRequestTiming?.mark('responseReady', { registrationReused: true });
+        return sendAdvisoryJson(res, 200, { plugin: existingPlugin, registrationReused: true });
+      }
+      const plugin = upsertPluginRegistration(requestedRegistration);
       if (pluginAuth.type === 'native_runner') {
         const isExtensionExecutor = isDeclarativeExtensionExecutionAgentId(plugin.pluginId);
         const registeredDevice = isExtensionExecutor
           ? updateNativeRunnerDevice(pluginAuth.nativeRunnerDevice.id, {
+              lastSeenAt: nativeRunnerSeenAt,
               metadata: sanitizeMetadata({
                 ...(pluginAuth.nativeRunnerDevice.metadata || {}),
                 extensionVersion: body.metadata?.version || pluginAuth.nativeRunnerDevice.metadata?.extensionVersion || null,
@@ -19909,7 +21166,9 @@ const server = http.createServer(async (req, res) => {
                 runnerSurface: 'chrome_extension_executor'
               })
             }) || pluginAuth.nativeRunnerDevice
-          : pluginAuth.nativeRunnerDevice;
+          : touchNativeRunnerDevice(pluginAuth.nativeRunnerDevice, {
+              lastSeenAt: nativeRunnerSeenAt
+            });
         recordNativeRunnerActivity(registeredDevice, {
           action: 'plugin_registered',
           status: 'success',
@@ -19922,6 +21181,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
       }
+      nativeRunnerRequestTiming?.mark('responseReady', { registrationReused: false });
       return sendJson(res, 201, { plugin });
     }
 
@@ -20139,6 +21399,9 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req, 16 * 1024);
       const agentId = decodeURIComponent(urlPath.split('/')[3] || '');
       if (!agentId) return sendJson(res, 400, { error: 'agent_id_required' });
+      if (req.method === 'POST' && agentId.toLowerCase().startsWith('santaclawz:') && !isApprovedSantaClawzAgentId(agentId)) {
+        return sendJson(res, 403, { error: 'santaclawz_agent_not_approved' });
+      }
       const savedByType = body.savedByType === 'agent' || body.savedByType === 'app' ? body.savedByType : 'human';
       const savedByHash = buildSavedAgentActorHash(req, auth, body);
       const metadata = sanitizeMetadata({
@@ -20163,12 +21426,14 @@ const server = http.createServer(async (req, res) => {
             metadata
           });
       if (!result.ok) return sendJson(res, 400, { error: result.error || 'agent_saved_signal_failed' });
-      const santaclawz = await forwardSantaClawzAgentSavedSignal({
-        agentId,
-        savedByType,
-        savedByHash,
-        saved: req.method === 'POST'
-      });
+      const santaclawz = MAGIC_CITY_SANTACLAWZ_LIVE
+        ? await forwardSantaClawzAgentSavedSignal({
+          agentId,
+          savedByType,
+          savedByHash,
+          saved: req.method === 'POST'
+        })
+        : { skipped: true, reason: 'santaclawz_integration_disabled' };
       return sendJson(res, 200, {
         ok: true,
         saved: req.method === 'POST',
@@ -20182,7 +21447,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && /^\/agent-hub\/agents\/[^/]+$/.test(urlPath)) {
       ensureSeededAgentsReady();
       const agentId = decodeURIComponent(urlPath.split('/')[3] || '');
-      const agent = getAgent(agentId) || await getSantaClawzAgentRowByMagicId(agentId);
+      if (agentId.toLowerCase().startsWith('santaclawz:') && !isApprovedSantaClawzAgentId(agentId)) return notFound(res);
+      const agent = getAgent(agentId) || (MAGIC_CITY_SANTACLAWZ_LIVE ? await getSantaClawzAgentRowByMagicId(agentId) : null);
       if (!agent) return notFound(res);
       const view = buildAgentHubView(agent);
       const primaryLane = Array.isArray(view.supportedLanes) ? view.supportedLanes[0] : '';
@@ -20198,6 +21464,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/agent-hub/enrollment-ticket') {
+      assertSantaClawzLiveIntegration();
+      if (!MAGIC_CITY_SANTACLAWZ_ENROLLMENT_ENABLED) {
+        return sendJson(res, 409, { error: 'santaclawz_enrollment_not_available' });
+      }
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
       const body = await readBody(req);
@@ -20257,11 +21527,11 @@ const server = http.createServer(async (req, res) => {
           runtimeEndpoint: endpoint,
           walletEnabled: Boolean(body.walletEnabled),
           allowWallet: Boolean(body.walletEnabled),
-          marketplaceReady: body.marketplaceReady !== false,
-          santaclawzPowered: true,
+          marketplaceReady: MAGIC_CITY_SANTACLAWZ_LIVE && body.marketplaceReady !== false,
+          santaclawzPowered: MAGIC_CITY_SANTACLAWZ_LIVE,
           zekoPowered: true,
-          registrationMode: 'magic_city_to_santaclawz',
-          enrollmentCommand: 'pnpm enroll:agent -- --serve',
+          registrationMode: MAGIC_CITY_SANTACLAWZ_LIVE ? 'magic_city_to_santaclawz' : 'magic_city_local_only',
+          enrollmentCommand: MAGIC_CITY_SANTACLAWZ_LIVE ? 'pnpm enroll:agent -- --serve' : null,
           createdViaHub: true
         }
       });
@@ -21790,7 +23060,18 @@ const server = http.createServer(async (req, res) => {
           payloadHash: result.payloadHash,
           submitMode: result.mode,
           relay: result.relay ?? null,
-          networkId: result.networkId
+          networkId: result.networkId,
+          mbaMissionRegistry: result.registryAddress
+            ? {
+                registryAddress: result.registryAddress,
+                previousRegistryRoot: result.previousRegistryRoot ?? null,
+                registryRoot: result.registryRoot ?? null,
+                sequence: result.registrySequence ?? null,
+                capabilityCommitment: result.capabilityCommitment ?? null,
+                approvalCommitment: result.approvalCommitment ?? null,
+                registryKey: result.registryKey ?? null
+              }
+            : null
         });
 
         if (receipt) {

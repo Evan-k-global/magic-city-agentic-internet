@@ -1,5 +1,8 @@
 (() => {
-  if (globalThis.__magicCityExecutorInstalled) return;
+  // Each executeScript call gets a fresh lexical scope, but the extension's
+  // isolated world survives. Reinstall the current handler on every command
+  // while keeping only one runtime listener below; otherwise an earlier
+  // executor closure can answer a later command with stale page state.
   globalThis.__magicCityExecutorInstalled = true;
 
   const FINAL_ACTION_PATTERN = /place (your )?order|confirm purchase|complete purchase|pay now|submit order|buy now|confirm and pay/i;
@@ -11,12 +14,20 @@
   const DECLINE_OFFER_PATTERN = /^(?:no thanks|not now|skip|decline|continue without(?: prime| trial| offer| add-ons?)?|continue to checkout|continue without benefits|maybe later|keep my current delivery|do not add|no,? thanks|i'?ll pass)$/i;
   const POSITIVE_OFFER_PATTERN = /(?:get|join|start|try|add|accept|yes|claim).*(?:prime|trial|membership|free one-day|protection|warranty)|subscribe\s*&\s*save/i;
   const SELECTED_CANDIDATE_TTL_MS = 2 * 60 * 1000;
+  const RECENT_BROWSER_ACTIONS_LIMIT = 12;
+  const BROWSER_ACTION_RECEIPTS_STORAGE_KEY = 'magic_city_browser_action_receipts_v1';
+  const recentBrowserActions = loadBrowserActionReceipts();
+  let activeActionContext = null;
   const US_STATE_CODES = {
     alabama: 'al', alaska: 'ak', arizona: 'az', arkansas: 'ar', california: 'ca', colorado: 'co', connecticut: 'ct', delaware: 'de', florida: 'fl', georgia: 'ga', hawaii: 'hi', idaho: 'id', illinois: 'il', indiana: 'in', iowa: 'ia', kansas: 'ks', kentucky: 'ky', louisiana: 'la', maine: 'me', maryland: 'md', massachusetts: 'ma', michigan: 'mi', minnesota: 'mn', mississippi: 'ms', missouri: 'mo', montana: 'mt', nebraska: 'ne', nevada: 'nv', 'new hampshire': 'nh', 'new jersey': 'nj', 'new mexico': 'nm', 'new york': 'ny', 'north carolina': 'nc', 'north dakota': 'nd', ohio: 'oh', oklahoma: 'ok', oregon: 'or', pennsylvania: 'pa', 'rhode island': 'ri', 'south carolina': 'sc', 'south dakota': 'sd', tennessee: 'tn', texas: 'tx', utah: 'ut', vermont: 'vt', virginia: 'va', washington: 'wa', 'west virginia': 'wv', wisconsin: 'wi', wyoming: 'wy'
   };
 
   function visible(element) {
     if (!element) return false;
+    // Merchant checkout panels commonly remain mounted while their parent is
+    // hidden. A child can retain dimensions in some layouts, but it is never a
+    // valid target while an ancestor is explicitly hidden from the user.
+    if (element.hidden || element.closest?.('[hidden], [aria-hidden="true"]')) return false;
     const style = window.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 4 && rect.height > 4;
@@ -43,10 +54,18 @@
     ].filter(Boolean).join(' '));
   }
 
-  function ariaLabelledText(element) {
-    const ids = String(element?.getAttribute?.('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+  function ariaReferenceText(element, attribute = 'aria-labelledby') {
+    const ids = String(element?.getAttribute?.(attribute) || '').split(/\s+/).filter(Boolean);
     if (!ids.length) return '';
     return compactText(ids.map((id) => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || '').join(' '), 240);
+  }
+
+  function ariaLabelledText(element) {
+    return ariaReferenceText(element, 'aria-labelledby');
+  }
+
+  function ariaDescribedText(element) {
+    return ariaReferenceText(element, 'aria-describedby');
   }
 
   function visibleControlLabel(element, limit = 180) {
@@ -75,12 +94,116 @@
     ].filter(Boolean).join(' '), 600);
   }
 
+  // Keep a compact, non-sensitive trace of merchant clicks. It is deliberately
+  // categorical: no address text, card number, or merchant-page body is kept.
+  function loadBrowserActionReceipts() {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(BROWSER_ACTION_RECEIPTS_STORAGE_KEY) || '[]');
+      if (!Array.isArray(stored)) return [];
+      return stored.slice(-RECENT_BROWSER_ACTIONS_LIMIT).map((entry) => ({
+        actionId: String(entry?.actionId || '').slice(0, 96),
+        actionType: String(entry?.actionType || '').slice(0, 64),
+        intent: String(entry?.intent || '').slice(0, 64),
+        receiptScope: String(entry?.receiptScope || '').slice(0, 192),
+        kind: String(entry?.kind || '').slice(0, 64),
+        phase: String(entry?.phase || '').slice(0, 64),
+        controlTag: String(entry?.controlTag || '').slice(0, 32),
+        controlType: String(entry?.controlType || '').slice(0, 32),
+        path: String(entry?.path || '').slice(0, 240),
+        at: entry?.at || null
+      })).filter((entry) => entry.kind && entry.at);
+    } catch {
+      return [];
+    }
+  }
+
+  function persistBrowserActionReceipts() {
+    try {
+      sessionStorage.setItem(BROWSER_ACTION_RECEIPTS_STORAGE_KEY, JSON.stringify(recentBrowserActions.slice(-RECENT_BROWSER_ACTIONS_LIMIT)));
+    } catch {
+      // The in-memory receipt still accompanies the current browser response.
+    }
+  }
+
+  function currentBrowserActionReceipts() {
+    const receiptsByIdentity = new Map();
+    for (const receipt of [...loadBrowserActionReceipts(), ...recentBrowserActions]) {
+      if (!receipt?.kind || !receipt?.at) continue;
+      const identity = [
+        receipt.actionId || '',
+        receipt.receiptScope || '',
+        receipt.kind || '',
+        receipt.phase || '',
+        receipt.at || ''
+      ].join('|');
+      receiptsByIdentity.set(identity, receipt);
+    }
+    return [...receiptsByIdentity.values()]
+      .sort((left, right) => String(left.at || '').localeCompare(String(right.at || '')))
+      .slice(-RECENT_BROWSER_ACTIONS_LIMIT);
+  }
+
+  function browserClickKind(element, validatedLabel = '') {
+    const directLabel = compactText([
+      element?.getAttribute?.('aria-label'),
+      element?.getAttribute?.('title'),
+      element?.value,
+      element?.innerText,
+      element?.textContent
+    ].filter(Boolean).join(' '), 80);
+    if (/(?:^|\s)(?:x|×|close|cancel|done)(?:\s|$)/i.test(directLabel)) return 'pickup_overlay_close';
+    const text = compactText(`${validatedLabel}\n${visibleControlLabel(element, 180)}\n${controlDescriptor(element)}`, 400);
+    if (/\bplace(?: your)? order|submit order|confirm and pay\b/i.test(text)) return 'final_order';
+    if (/\buse this payment method\b/i.test(text)) return 'payment_confirm';
+    if (/\bdeliver to this address|use this address\b/i.test(text)) return 'address_confirm';
+    if (/\bdefault to this (?:delivery address|address) and payment method\b/i.test(text)) return 'merchant_checkout_default';
+    return 'safe_browser_click';
+  }
+
+  function recordBrowserClick(element, context = activeActionContext, { kind = '', phase = '', validatedLabel = '' } = {}) {
+    const receipt = {
+      actionId: String(context?.actionId || '').slice(0, 96),
+      actionType: String(context?.actionType || '').slice(0, 64),
+      intent: String(context?.intent || '').slice(0, 64),
+      receiptScope: String(context?.receiptScope || '').slice(0, 192),
+      kind: kind || browserClickKind(element, validatedLabel),
+      ...(phase ? { phase: String(phase).slice(0, 64) } : {}),
+      controlTag: String(element?.tagName || '').toLowerCase().slice(0, 32),
+      controlType: String(element?.getAttribute?.('type') || '').toLowerCase().slice(0, 32),
+      path: String(location.pathname || '').slice(0, 240),
+      at: new Date().toISOString()
+    };
+    recentBrowserActions.push(receipt);
+    if (recentBrowserActions.length > RECENT_BROWSER_ACTIONS_LIMIT) {
+      recentBrowserActions.splice(0, recentBrowserActions.length - RECENT_BROWSER_ACTIONS_LIMIT);
+    }
+    persistBrowserActionReceipts();
+    return receipt;
+  }
+
   function normalized(value = '') {
     return compactText(value, 600).toLowerCase();
   }
 
   function normalizeMatchText(value = '') {
     return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function canonicalProductTitle(value = '') {
+    return compactText(value, 500)
+      .replace(/\s*(?:\|\s*\.{0,3}\s*)?opens in (?:a )?new tab\s*$/i, '')
+      .trim();
+  }
+
+  function productTitleFromRow(row, link = null) {
+    const titleLink = link || row?.querySelector?.('a[href*="/dp/"], a[href*="/gp/product/"]') || null;
+    const candidates = [
+      titleLink?.getAttribute?.('aria-label'),
+      titleLink?.querySelector?.('.a-truncate-full')?.textContent,
+      row?.querySelector?.('.sc-product-title, [data-testid*="title" i], h2, h3')?.textContent,
+      titleLink?.textContent
+    ];
+    return candidates.map(canonicalProductTitle).find(Boolean) || '';
   }
 
   const ADDRESS_TOKEN_ALIASES = {
@@ -156,8 +279,143 @@
     return dialogs.at(-1) || null;
   }
 
+  function waitForPaint(milliseconds = 60) {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  function isPickupChooserRoot(root = null) {
+    if (!root) return false;
+    const text = compactText(root.innerText || root.textContent || '', 5000);
+    return /\b(?:select a pickup location|find pickup locations near|pick up here|amazon locker|amazon counter|whole foods market)\b/i.test(text)
+      && !/\b(?:add|edit|enter)\s+(?:a\s+)?(?:new\s+)?(?:delivery|shipping)?\s*address\b|\bstreet address\b|\bzip code\b/i.test(text);
+  }
+
+  // Amazon's pickup sheet is not consistently exposed as a semantic dialog.
+  // Find a visible, bounded overlay by its own pickup content, never by the
+  // checkout page that happens to contain a nearby "FREE pickup" disclosure.
+  function visiblePickupChooserRoots() {
+    const candidates = new Set();
+    const selectors = [
+      'dialog[open]', '[aria-modal="true"]', '[role="dialog"]',
+      '.a-popover', '.a-modal-scroller', '[class*="popover" i]', '[class*="modal" i]'
+    ];
+    for (const selector of selectors) {
+      document.querySelectorAll(selector).forEach((node) => candidates.add(node));
+    }
+    document.querySelectorAll('h1, h2, h3, [role="heading"], button, [role="button"]').forEach((node) => {
+      const text = compactText(node.innerText || node.textContent || '', 240);
+      if (!/select a pickup location|find pickup locations near|pick up here|amazon locker|amazon counter|whole foods market/i.test(text)) return;
+      let parent = node.parentElement;
+      for (let depth = 0; parent && parent !== document.body && depth < 7; depth += 1, parent = parent.parentElement) {
+        candidates.add(parent);
+      }
+    });
+    return Array.from(candidates)
+      .filter((node) => node && node !== document.body && visible(node) && isPickupChooserRoot(node))
+      .sort((left, right) => {
+        const score = (node) => {
+          const text = compactText(node.innerText || node.textContent || '', 1500);
+          const hasClose = Array.from(node.querySelectorAll('button, a, [role="button"]'))
+            .some((control) => /^(?:x|×|close|cancel)$/i.test(compactText(visibleControlLabel(control, 80) || textFor(control), 80)));
+          const structuralSignal = /select a pickup location|find pickup locations near/i.test(text);
+          const style = getComputedStyle(node);
+          const positioned = /fixed|absolute/i.test(style.position || '');
+          return (hasClose ? 100 : 0) + (structuralSignal ? 40 : 0) + (positioned ? 20 : 0);
+        };
+        const scoreDifference = score(right) - score(left);
+        if (scoreDifference) return scoreDifference;
+        const depth = (node) => {
+          let value = 0;
+          for (let current = node; current && current !== document.body; current = current.parentElement) value += 1;
+          return value;
+        };
+        return depth(right) - depth(left);
+      });
+  }
+
+  function checkoutFinalProgressControlVisible() {
+    return Array.from(document.querySelectorAll('button, a, input[type="submit"], input[type="button"], [role="button"], .a-button, .a-button-inner'))
+      .some((control) => visible(control) && (
+        FINAL_ORDER_PATTERN.test(visibleControlLabel(control, 220) || textFor(control))
+        || /\buse this payment method\b/i.test(visibleControlLabel(control, 220) || textFor(control))
+        || /\bdeliver to this address\b/i.test(visibleControlLabel(control, 220) || textFor(control))
+      ));
+  }
+
+  function nonBlockingCheckoutPickupModal() {
+    const modal = visiblePickupChooserRoots()[0] || null;
+    if (!modal) return null;
+    const checkoutish = /\/checkout|\/buy|\/gp\/buy/i.test(String(location.pathname || ''));
+    if (!checkoutish || !checkoutFinalProgressControlVisible()) return null;
+    return modal;
+  }
+
+  async function closeNonBlockingCheckoutPickupModal() {
+    const modal = nonBlockingCheckoutPickupModal();
+    if (!modal) return { closed: false, reason: 'not_visible' };
+    const closeControl = Array.from(modal.querySelectorAll('button, a, input[type="button"], [role="button"]'))
+      .filter(visible)
+      .map((control, index) => {
+        // Amazon's close button may inherit the entire pickup sheet through
+        // its parent. Score the button's own label, never the sheet text.
+        const directLabel = compactText([
+          control.getAttribute?.('aria-label'),
+          control.getAttribute?.('title'),
+          control.value,
+          control.innerText,
+          control.textContent
+        ].filter(Boolean).join(' '), 120);
+        const label = compactText(visibleControlLabel(control, 120) || directLabel, 120);
+        const descriptor = compactText(controlDescriptor(control), 240);
+        const directClose = /(?:^|\s)(?:x|×|close|cancel|done)(?:\s|$)/i.test(directLabel);
+        const closeish = directClose || /\b(?:close|cancel)\b/i.test(`${directLabel}\n${descriptor}`);
+        const risky = !directClose && /\b(?:pick up here|use this pickup|select pickup|place(?: your)? order|use this payment method|deliver to this address)\b/i.test(`${label}\n${descriptor}`);
+        return { control, score: (directClose ? 1000 : closeish ? 100 : 0) - (risky ? 500 : 0), index };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index)[0]?.control;
+    const clickedCloseControl = Boolean(closeControl && immediateSafeClick(closeControl, { allowPickupOverlay: true }));
+    const method = clickedCloseControl ? 'close_control' : 'escape';
+    if (!clickedCloseControl) {
+      try {
+        modal.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
+      } catch {
+        return { closed: false, reason: 'close_failed' };
+      }
+    }
+    // Do not claim success simply because a close event was dispatched. The
+    // next checkout primitive must see the overlay gone before it can act.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await waitForPaint(70);
+      if (!visiblePickupChooserRoots().length) return { closed: true, method };
+    }
+    return { closed: false, closeRequested: true, reason: 'pickup_overlay_still_visible' };
+  }
+
   function interactionRoot() {
+    if (nonBlockingCheckoutPickupModal()) return document;
     return activeModalRoot() || document;
+  }
+
+  function pickupOrLockerControl(control = null) {
+    if (!control) return false;
+    // Use the control's own text here. Its parent may contain unrelated
+    // checkout copy such as "FREE pickup available nearby", which must not
+    // make a legitimate Shipping speed Change link look like pickup.
+    const directText = compactText([
+      control.innerText,
+      control.textContent,
+      control.value,
+      control.getAttribute?.('aria-label'),
+      control.getAttribute?.('title'),
+      control.getAttribute?.('data-testid'),
+      control.getAttribute?.('href')
+    ].filter(Boolean).join('\n'), 600);
+    // This is intentionally an absolute veto for a home-delivery mission.
+    // The direct control label is safe to inspect: unlike a parent container,
+    // it cannot accidentally inherit unrelated pickup disclosure copy.
+    return /\b(?:pick\s*up|pickup|amazon locker|amazon counter|whole foods|amazon fresh|local market)\b/i.test(directText);
   }
 
   function interactiveControls(root = null) {
@@ -310,12 +568,218 @@
     return input?.closest?.('label, [role="radio"], [role="option"], li, [data-testid*="address" i], [data-testid*="payment" i], [data-testid*="delivery" i], [id*="address" i], [id*="payment" i], [id*="delivery" i], [class*="address" i], [class*="payment" i], [class*="delivery" i]') || nearbyContainer(input);
   }
 
+  function visibleChoiceInput(input) {
+    return Boolean(input && (visible(input) || visible(radioContainer(input)) || visible(input.parentElement)));
+  }
+
+  function cardEndingMentions(value = '') {
+    const text = String(value || '');
+    const matches = [
+      ...text.matchAll(/(?:ending|ends in|last(?:\s*4)?|card)\D{0,24}(\d{4})(?!\d)/gi),
+      ...text.matchAll(/\b(?:visa|mastercard|amex|american express|discover)\D{0,32}(\d{4})(?!\d)/gi)
+    ];
+    return [...new Set(matches.map((match) => match[1]).filter(Boolean))];
+  }
+
+  function paymentChoiceContext(input, expectedLast4 = '') {
+    const expected = String(expectedLast4 || '').replace(/\D/g, '').slice(-4);
+    let fallback = null;
+    let node = input;
+    // Amazon's inputs are sometimes nested under a large payment container
+    // without an associated label. Walk outward and use the smallest visible
+    // row that names exactly one saved card, never the whole payment section.
+    for (let depth = 0; node && depth < 9; depth += 1) {
+      const text = compactText([
+        node.innerText || node.textContent || '',
+        node.getAttribute?.('aria-label') || '',
+        node.getAttribute?.('data-testid') || ''
+      ].filter(Boolean).join('\n'), 1400);
+      const endings = cardEndingMentions(text);
+      const paymentLike = /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text);
+      const hasExpected = !expected || endings.includes(expected);
+      if (paymentLike && endings.length && hasExpected) {
+        const candidate = { node, text, endings };
+        if (!expected || endings.length === 1 || endings.every((ending) => ending === expected)) return candidate;
+        fallback ||= candidate;
+      }
+      node = node.parentElement;
+    }
+    return fallback;
+  }
+
+  function paymentChoiceClickTarget(input, context = null) {
+    if (!input) return null;
+    const expected = String(context?.endings?.[0] || '').replace(/\D/g, '').slice(-4);
+    const candidates = [
+      input.labels?.[0],
+      input.closest?.('label, [role="radio"], [role="option"], [data-testid*="payment" i], [id*="payment" i], [class*="payment" i], [class*="card" i]'),
+      context?.node,
+      radioContainer(input),
+      input.parentElement
+    ].filter(Boolean);
+    for (const candidate of candidates) {
+      if (!visible(candidate) || candidate.disabled || candidate.getAttribute?.('aria-disabled') === 'true') continue;
+      const endings = cardEndingMentions(compactText([
+        candidate.innerText || candidate.textContent || '',
+        candidate.getAttribute?.('aria-label') || '',
+        ariaLabelledText(candidate)
+      ].filter(Boolean).join('\n'), 1400));
+      // A broad checkout section can mention several cards. A row click is
+      // safe only when this exact visible target names the intended card.
+      if (expected && (!endings.includes(expected) || endings.some((ending) => ending !== expected))) continue;
+      return candidate;
+    }
+    return input;
+  }
+
+  function selectPaymentChoiceInput(input, context = null) {
+    if (!input || input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) return false;
+    if (input.checked || input.getAttribute?.('aria-checked') === 'true') return true;
+    const target = paymentChoiceClickTarget(input, context);
+    try {
+      target?.scrollIntoView?.({ block: 'center', inline: 'center' });
+      // Amazon's saved-card radios can be represented by a sibling row. Click
+      // that row first, then use the native input only as a narrow fallback.
+      if (target && target !== input) target.click();
+      if (!input.checked && input.getAttribute?.('aria-checked') !== 'true') input.click();
+      return Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true');
+    } catch {
+      return false;
+    }
+  }
+
+  function addressPickerScope(input) {
+    let node = input;
+    for (let depth = 0; node && depth < 12; depth += 1) {
+      const text = compactText([
+        node.innerText || node.textContent || '',
+        node.getAttribute?.('aria-label') || '',
+        ariaLabelledText(node)
+      ].filter(Boolean).join('\n'), 12000);
+      const choiceCount = Array.from(node.querySelectorAll?.('input[type="radio"]') || [])
+        .filter((choice) => visibleChoiceInput(choice)).length;
+      if (choiceCount >= 2 && /select a (?:delivery|shipping) address|delivery addresses|shipping addresses/i.test(text)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function isAmazonAddressPickerHost() {
+    const host = String(location.hostname || '').toLowerCase();
+    // Loopback is used only by the packaged extension fixture. Production
+    // address reconciliation remains intentionally Amazon-specific.
+    return /(^|\.)amazon\.com$/.test(host) || host === '127.0.0.1' || host === 'localhost';
+  }
+
+  function amazonAddressRowContext(input) {
+    if (!isAmazonAddressPickerHost()) return null;
+    const scope = addressPickerScope(input);
+    const anchor = radioContainer(input);
+    if (!scope || !anchor) return null;
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorCenterY = (anchorRect.top + anchorRect.bottom) / 2;
+    if (!Number.isFinite(anchorCenterY)) return null;
+
+    // Amazon's address picker frequently renders the radio and its text in
+    // separate columns. Read the one visible address-sized element on the
+    // same visual row; never scan the entire address book for a match.
+    const candidates = Array.from(scope.querySelectorAll('div, li, p, span, address, section'))
+      .filter((node) => node !== scope && visible(node))
+      .map((node) => ({
+        node,
+        text: compactText(node.innerText || node.textContent || '', 1200)
+      }))
+      .filter(({ node, text }) => {
+        if (!addressChoiceText(text)) return false;
+        const visibleRadios = Array.from(node.querySelectorAll('input[type="radio"]'))
+          .filter((choice) => visibleChoiceInput(choice)).length;
+        // A detail element can describe one address but must not aggregate
+        // the whole selector or another radio row.
+        return visibleRadios === 0 && (text.match(/\b\d{5}(?:\s*\d{4})?\b/g) || []).length === 1;
+      })
+      .filter(({ node, text }) => !Array.from(node.querySelectorAll('div, li, p, span, address, section'))
+        .some((child) => child !== node
+          && visible(child)
+          && addressChoiceText(compactText(child.innerText || child.textContent || '', 1200))
+          && compactText(child.innerText || child.textContent || '', 1200) !== text));
+
+    const closest = candidates
+      .map(({ node, text }) => {
+        const rect = node.getBoundingClientRect();
+        const distance = anchorCenterY < rect.top
+          ? rect.top - anchorCenterY
+          : anchorCenterY > rect.bottom
+            ? anchorCenterY - rect.bottom
+            : 0;
+        return { node, text, distance };
+      })
+      .filter(({ distance }) => distance <= 72)
+      .sort((left, right) => left.distance - right.distance
+        || left.node.getBoundingClientRect().width - right.node.getBoundingClientRect().width);
+    const match = closest[0];
+    return match ? { ...match, source: 'amazon_visual_row' } : null;
+  }
+
+  function addressChoiceContext(input) {
+    const label = input?.labels?.[0];
+    if (label) {
+      const text = compactText(label.innerText || label.textContent || '', 1200);
+      if (addressChoiceText(text)) return { node: label, text, source: 'label' };
+    }
+    // Amazon's real picker may keep the radio in one column and the address
+    // detail in a sibling column. ARIA references are the most precise link;
+    // use them before inspecting layout containers.
+    const ariaText = compactText([
+      input?.getAttribute?.('aria-label') || '',
+      ariaLabelledText(input),
+      ariaDescribedText(input)
+    ].filter(Boolean).join('\n'), 1200);
+    if (addressChoiceText(ariaText)) return { node: input, text: ariaText, source: 'aria' };
+    const amazonVisualRow = amazonAddressRowContext(input);
+    if (amazonVisualRow) return amazonVisualRow;
+    let node = input;
+    // Walk only to a row with exactly one visible choice. Never use an address
+    // book as fallback: its text can make an unrelated checked radio look like
+    // the saved address.
+    for (let depth = 0; node && depth < 10; depth += 1) {
+      const choiceCount = Array.from(node.querySelectorAll?.('input[type="radio"]') || [])
+        .filter((choice) => visibleChoiceInput(choice)).length;
+      const siblingText = Array.from(node.children || [])
+        .filter((child) => child !== input && !child.contains?.(input))
+        .map((child) => child.innerText || child.textContent || '')
+        .join('\n');
+      const text = compactText([
+        node.innerText || node.textContent || '',
+        siblingText,
+        node.getAttribute?.('aria-label') || '',
+        ariaLabelledText(node),
+        ariaDescribedText(node),
+        node.getAttribute?.('data-testid') || ''
+      ].filter(Boolean).join('\n'), 1400);
+      if (choiceCount <= 1 && addressChoiceText(text)) return { node, text, source: 'row' };
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function selectAddressChoiceInput(input) {
+    if (!input || input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) return false;
+    if (input.checked || input.getAttribute?.('aria-checked') === 'true') return true;
+    try {
+      radioContainer(input)?.scrollIntoView?.({ block: 'center', inline: 'center' });
+      input.click();
+      return Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true');
+    } catch {
+      return false;
+    }
+  }
+
   function last4FromText(value = '') {
     const text = String(value || '');
     const patterns = [
-      /(?:ending|ends in|last(?:\s*4)?|card)\D{0,24}(\d{4})/i,
-      /\b(?:visa|mastercard|amex|american express|discover)\D{0,32}(\d{4})\b/i,
-      /\b(\d{4})\b/
+      /(?:ending|ends in|last(?:\s*4)?|card)\D{0,24}(\d{4})(?!\d)/i,
+      /\b(?:visa|mastercard|amex|american express|discover)\D{0,32}(\d{4})(?!\d)/i,
+      /(?<!\d)(\d{4})(?!\d)/
     ];
     for (const pattern of patterns) {
       const match = text.match(pattern);
@@ -327,8 +791,8 @@
   function selectedCardLast4() {
     const root = interactionRoot();
     const checked = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => input.checked && visible(paymentChoiceClickTarget(input)))
-      .map((input) => compactText(radioContainer(input)?.innerText || '', 500))
+      .filter((input) => input.checked && visibleChoiceInput(input))
+      .map((input) => paymentChoiceContext(input)?.text || compactText(radioContainer(input)?.innerText || '', 500))
       .find((text) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && /\d{4}/.test(text));
     if (checked) return last4FromText(checked);
 
@@ -360,10 +824,10 @@
     if (!expected) return false;
     const root = interactionRoot();
     const paymentChoices = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visible(paymentChoiceClickTarget(input)))
+      .filter((input) => visibleChoiceInput(input))
       .map((input) => ({
         input,
-        text: compactText([
+        text: paymentChoiceContext(input, expected)?.text || compactText([
           radioContainer(input)?.innerText || '',
           input.labels?.[0]?.innerText || '',
           input.getAttribute?.('aria-label') || '',
@@ -396,7 +860,10 @@
     const candidateZip = addressZip5(text);
     const candidateUnit = addressUnit(text);
     if (!candidateTokens.has(expected.houseNumber) || candidateZip !== expected.zip) return false;
-    if ((expected.unit || candidateUnit) && expected.unit !== candidateUnit) return false;
+    // The unit is a useful tie-breaker when both sources have one. It must not
+    // invalidate the same street/ZIP when Amazon puts a suite on its own line
+    // or the local vault intentionally omits it.
+    if (expected.unit && candidateUnit && expected.unit !== candidateUnit) return false;
     const matchedTokens = expected.streetTokens.filter((token) => candidateTokens.has(token));
     const coverage = matchedTokens.length / expected.streetTokens.length;
     const hasDistinctiveStreetToken = expected.streetTokens
@@ -410,24 +877,97 @@
     const hasAddressShape = /\b\d{5}(?:\s*\d{4})?\b/.test(text)
       || /\bunited states\b|\bphone number\b/.test(text);
     const paymentOrDeliverySpeed = /\b(?:visa|mastercard|amex|american express|discover|card ending|payment method|fastest|one day|amazon day|delivery option)\b/.test(text);
-    return Boolean(hasAddressShape && !paymentOrDeliverySpeed);
+    const pickupLocation = /\b(?:pickup locations?|amazon locker|locker|counter location|free pickup)\b/.test(text);
+    return Boolean(hasAddressShape && !paymentOrDeliverySpeed && !pickupLocation);
+  }
+
+  function closedDeliverySummaryObservation(profile = {}) {
+    // The final-review delivery summary remains meaningful even if an
+    // unrelated pickup overlay is mounted above it.
+    const root = document;
+    const candidates = Array.from(root.querySelectorAll([
+      'h1', 'h2', 'h3', '[role="heading"]',
+      '[aria-label*="delivery" i]', '[aria-label*="shipping" i]',
+      '[data-testid*="delivery" i]', '[data-testid*="shipping" i]',
+      '[id*="delivery" i]', '[id*="shipping" i]',
+      '[class*="delivery" i]', '[class*="shipping" i]'
+    ].join(','))).filter(visible);
+    for (const candidate of candidates) {
+      let node = candidate;
+      for (let depth = 0; node && depth < 4; depth += 1) {
+        const text = compactText(node.innerText || node.textContent || '', 1800);
+        // This is deliberately a closed-summary signal, not a generic address
+        // search. The address chooser has "Select a delivery address" and must
+        // continue to rely on its selected radio row.
+        if (/\b(?:delivering|shipping)\s+to\b/i.test(text)) {
+          return {
+            visible: true,
+            matches: addressLooksLikeProfile(text, profile)
+          };
+        }
+        node = node.parentElement;
+      }
+    }
+    return { visible: false, matches: false };
+  }
+
+  function visibleAddressChoices() {
+    return Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
+      .filter((input) => visibleChoiceInput(input))
+      .filter((input) => !visiblePickupChooserRoots().some((root) => root.contains(input)))
+      .map((input) => ({ input, context: addressChoiceContext(input) }))
+      .filter(({ context }) => Boolean(context));
+  }
+
+  function selectedVisibleAddressChoiceMatches(profile = {}) {
+    return observeSelectedAddress(profile).status === 'matched';
+  }
+
+  function observeSelectedAddress(profile = {}) {
+    const rawVisibleChoices = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
+      .filter((input) => visibleChoiceInput(input));
+    const visibleChoices = visibleAddressChoices();
+    const addressPickerVisible = /select a (?:delivery|shipping) address|delivery addresses|shipping addresses/i.test(pagePlainText(12000));
+    const closedSummary = closedDeliverySummaryObservation(profile);
+    if (addressPickerVisible && rawVisibleChoices.length && !visibleChoices.length) {
+      return {
+        status: 'unverified',
+        source: 'address_picker',
+        diagnostics: {
+          visibleChoiceCount: rawVisibleChoices.length,
+          selectedChoiceCount: rawVisibleChoices.filter((input) => input.checked || input.getAttribute?.('aria-checked') === 'true').length,
+          readableSelectedChoiceCount: 0,
+          matchingSelectedChoiceCount: 0
+        }
+      };
+    }
+    if (visibleChoices.length) {
+      const selectedChoices = visibleChoices.filter(({ input }) => input.checked || input.getAttribute?.('aria-checked') === 'true');
+      const readableSelectedChoices = selectedChoices.filter(({ context }) => addressChoiceText(context?.text || ''));
+      const matchingSelectedChoices = readableSelectedChoices.filter(({ context }) => addressLooksLikeProfile(context.text, profile));
+      const directMismatchObserved = readableSelectedChoices
+        .some(({ context }) => context?.source !== 'ordinal_layout');
+      return {
+        status: matchingSelectedChoices.length ? 'matched' : directMismatchObserved ? 'mismatched' : closedSummary.matches ? 'matched' : 'unverified',
+        source: matchingSelectedChoices.length || directMismatchObserved || !closedSummary.matches ? 'address_picker' : 'checkout_summary',
+        diagnostics: {
+          visibleChoiceCount: visibleChoices.length,
+          selectedChoiceCount: selectedChoices.length,
+          readableSelectedChoiceCount: readableSelectedChoices.length,
+          matchingSelectedChoiceCount: matchingSelectedChoices.length,
+          selectedChoiceSources: readableSelectedChoices.map(({ context }) => context?.source || 'unknown')
+        }
+      };
+    }
+    return {
+      status: closedSummary.visible ? (closedSummary.matches ? 'matched' : 'mismatched') : 'unverified',
+      source: 'checkout_summary',
+      diagnostics: { visibleChoiceCount: 0, selectedChoiceCount: 0, readableSelectedChoiceCount: 0, matchingSelectedChoiceCount: 0 }
+    };
   }
 
   function selectedAddressMatches(profile = {}) {
-    const visibleChoices = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter(visible)
-      .map((input) => ({ input, text: compactText(radioContainer(input)?.innerText || '', 900) }));
-    const addressChoices = visibleChoices.filter(({ text }) => {
-      return addressChoiceText(text);
-    });
-    // On an address picker, only the checked row is authoritative. Looking at
-    // the whole page would incorrectly treat any listed vault address as selected.
-    if (addressChoices.length) {
-      return addressChoices.some(({ input, text }) => input.checked && addressLooksLikeProfile(text, profile));
-    }
-    // Once the picker closes, the rendered delivery summary becomes the source
-    // of truth. It is safe to compare its public text to the local fingerprint.
-    return addressLooksLikeProfile(pagePlainText(12000), profile);
+    return observeSelectedAddress(profile).status === 'matched';
   }
 
   function searchControl() {
@@ -786,6 +1326,25 @@
         const candidate = add(root.querySelector(selector), 'amazon_post_add_go_to_cart');
         if (candidate) return candidate;
       }
+    }
+    // Amazon's current search-result cart flyout is not consistently marked
+    // as a dialog or side-cart. It commonly lives under these EWC containers
+    // beside the page, with the native button nested under presentation spans.
+    // Restrict this to an exact cart label inside a visible cart summary so a
+    // page-wide "Cart" disclosure can never become a navigation target.
+    const flyoutRoots = roots.flatMap((root) => Array.from(root.querySelectorAll([
+      '#nav-flyout-ewc',
+      '#ewc-content',
+      '[id*="nav-flyout" i][id*="cart" i]',
+      '[id*="ewc" i]'
+    ].join(','))))
+      .filter((root) => visible(root) && /\b(?:subtotal|cart)\b/i.test(compactText(root.innerText || root.textContent || '', 1200)));
+    for (const root of flyoutRoots) {
+      const control = interactiveControls(root).find((candidate) =>
+        /^(?:go to cart|view cart|view shopping cart)$/i.test(compactText(visibleControlLabel(candidate), 120))
+      );
+      const candidate = add(control, 'amazon_nav_cart_flyout');
+      if (candidate) return candidate;
     }
     const previewRoots = roots.flatMap((root) => Array.from(root.querySelectorAll([
       '#attach-sidesheet-view-cart-button',
@@ -1260,6 +1819,37 @@
     }).filter(Boolean);
   }
 
+  function cartRowQuantity(row) {
+    const directValue = [
+      row?.getAttribute?.('data-quantity'),
+      row?.querySelector?.('select[name*="quantity" i], select[data-a-selector*="quantity" i]')?.value,
+      row?.querySelector?.('input[name*="quantity" i], input[data-a-selector*="quantity" i]')?.value,
+      row?.querySelector?.('[data-a-selector*="quantity" i] .a-dropdown-prompt, [aria-label*="quantity" i]')?.textContent
+    ].map((value) => String(value || '').trim()).find((value) => /^\d+$/.test(value));
+    if (directValue) return Number(directValue);
+    const rowText = compactText(row?.innerText || row?.textContent || '', 1800);
+    const match = rowText.match(/\b(?:quantity|qty)\s*(?::|\(|x)?\s*(\d+)\b/i);
+    return match ? Number(match[1]) : null;
+  }
+
+  function activeCartItemEvidence() {
+    return activeCartFulfillmentRows().slice(0, 4).map((row) => {
+      const link = row.querySelector?.('a[href*="/dp/"], a[href*="/gp/product/"]') || null;
+      const href = String(link?.href || '');
+      const asinFromUrl = href.match(/\/(?:dp|gp\/product)\/([A-Za-z0-9_-]{6,32})(?:[/?#]|$)/i)?.[1] || '';
+      const asin = String(row.getAttribute?.('data-asin') || row.querySelector?.('[data-asin]')?.getAttribute?.('data-asin') || asinFromUrl).trim().slice(0, 32);
+      const rowText = compactText(row.innerText || row.textContent || '', 1800);
+      const title = compactText(productTitleFromRow(row, link) || canonicalProductTitle(rowText), 180);
+      const price = priceFromText(rowText);
+      return {
+        asin: asin || null,
+        title: title || null,
+        quantity: cartRowQuantity(row),
+        price: Number.isFinite(price) && price > 0 ? price : null
+      };
+    }).filter((item) => item.asin || item.title);
+  }
+
   function findAmazonProceedToCheckoutControl() {
     const selectors = [
       '#sc-buy-box-ptc-button input[name="proceedToRetailCheckout"]',
@@ -1314,7 +1904,7 @@
     return {
       url: location.href,
       title: compactText(document.title, 180),
-      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      interactionLayer: activeModalRoot() && !nonBlockingCheckoutPickupModal() ? 'modal' : 'page',
       loginRequired: hasVisibleLoginField() || /hello\s*,?\s*sign in|sign in/i.test(accountText),
       amazonAccountState: /hello\s*,?\s*sign in|sign in/i.test(accountText) ? 'signed_out' : 'signed_in',
       amazonFulfillmentFilterAvailable: false,
@@ -1364,6 +1954,7 @@
         cartNonPrimeItems: cartFulfillment.nonPrimeItems,
         totalEvidence,
         cartItemCount: Number.isFinite(cartCount) ? cartCount : null,
+        cartItems: activeCartItemEvidence(),
         itemHints: activeCartItemHints(),
         nextAction: proceed ? 'Opening checkout' : 'Find checkout button',
         optionalOfferVisible: false,
@@ -1471,7 +2062,7 @@
     return {
       url: location.href,
       title: compactText(document.title, 180),
-      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      interactionLayer: activeModalRoot() && !nonBlockingCheckoutPickupModal() ? 'modal' : 'page',
       loginRequired: hasVisibleLoginField() || LOGIN_PATTERN.test(pageText) || amazonPreference.accountState === 'signed_out',
       amazonAccountState: amazonPreference.accountState,
       amazonFulfillmentFilterAvailable: amazonPreference.available,
@@ -1507,7 +2098,7 @@
     return {
       url: location.href,
       title: compactText(document.title, 180),
-      interactionLayer: activeModalRoot() ? 'modal' : 'page',
+      interactionLayer: activeModalRoot() && !nonBlockingCheckoutPickupModal() ? 'modal' : 'page',
       loginRequired,
       paymentRequired: false,
       finalApprovalVisible: false,
@@ -1573,6 +2164,7 @@
     const cartFulfillment = classification.surface === 'cart'
       ? cartPrimeFulfillmentEvidence(rawPageText)
       : { observed: false, itemCount: 0, allPrimeFreeEligible: null, allPrimeEligible: null, ineligibleItems: [], nonPrimeItems: [] };
+    const cartItems = classification.surface === 'cart' ? activeCartItemEvidence() : [];
     const productDeliveredAmount = totalEvidence.kind === 'product_price'
       && Number.isFinite(totalEvidence.amount)
       && productDelivery.known
@@ -1611,18 +2203,57 @@
     const expectedAddressText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
     const hasAddressPreset = Boolean(expectedAddressText);
     const hasCardPreset = Boolean(expectedLast4);
-    const addressMatch = checkoutOpen ? selectedAddressMatches(profile) : false;
-    const addressSelectionVisible = checkoutOpen && /delivering to|delivery address|shipping address|ship to|use this address|add a new address|change address/i.test(rawPageText);
-    const addressMismatch = Boolean(addressSelectionVisible && expectedAddressText && !addressMatch);
-    const addressConfirmationRequired = Boolean(checkoutOpen && findAddressConfirmControl());
+    let addressObservation = checkoutOpen && hasAddressPreset
+      ? observeSelectedAddress(profile)
+      // An address profile is not an address-verification problem while the
+      // shopper is still on a catalog or cart surface. Emitting "unverified"
+      // here made the runner stop after add-to-cart before checkout existed.
+      : { status: 'not_requested', source: 'none', diagnostics: {} };
+    const closedDeliverySummary = checkoutOpen && hasAddressPreset
+      ? closedDeliverySummaryObservation(profile)
+      : { visible: false, matches: false };
+    // A closed "Delivering to" summary on Amazon's final review is the
+    // authoritative delivery identity. An unreadable address picker or a
+    // mounted pickup sheet must not regress that verified state back to an
+    // address mismatch.
+    if (classification.state === 'final_review' && closedDeliverySummary.visible && closedDeliverySummary.matches) {
+      addressObservation = {
+        status: 'matched',
+        source: 'checkout_summary_final_review',
+        diagnostics: {
+          ...addressObservation.diagnostics,
+          finalReviewSummaryMatched: true
+        }
+      };
+    }
+    // A closed "Delivering to" summary and an open address picker both contain
+    // address language. Only the picker exposes a pending address selection.
+    // Never let a mounted-but-inactive picker turn a verified summary into a
+    // second address-confirmation loop.
+    const addressPickerOpen = checkoutOpen && addressObservation.source === 'address_picker';
+    const addressMatch = addressObservation.status === 'matched';
+    // Do not conflate an unreadable Amazon row with a different address. Only
+    // a readable, selected row that fails the exact fingerprint is a mismatch.
+    const addressMismatch = Boolean(addressPickerOpen && addressObservation.status === 'mismatched');
+    const addressConfirmationRequired = Boolean(addressPickerOpen && findAddressConfirmControl());
     const paymentMethodConfirmationRequired = Boolean(checkoutOpen && findPaymentMethodConfirmControl());
     const shippingFormOpen = checkoutOpen && shippingAddressFormVisible(checkoutFields);
     const deliveryState = checkoutOpen
       ? deliverySelectionState()
       : { required: false, confirmed: false, selectedPrice: null, bestPrice: null };
+    // On Amazon's final-review surface the delivery radio group is often no
+    // longer mounted. Its checkout order summary is the authoritative source
+    // at that point: a $0 shipping line confirms the retained free delivery
+    // choice without reopening any delivery or pickup UI.
+    const deliveryConfirmed = Boolean(
+      deliveryState.confirmed
+      || classification.state === 'final_review'
+        && shippingTotalEvidence.authoritative
+        && shippingTotalEvidence.amount === 0
+    );
     const addressConfirmed = Boolean(checkoutOpen && (!hasAddressPreset || addressMatch && !addressConfirmationRequired && !shippingFormOpen));
     const cardConfirmed = Boolean(checkoutOpen && (!hasCardPreset || cardMatches && !sensitiveField && !paymentMethodConfirmationRequired));
-    const checkoutProfileVerified = Boolean(checkoutOpen && addressConfirmed && cardConfirmed && deliveryState.confirmed);
+    const checkoutProfileVerified = Boolean(checkoutOpen && addressConfirmed && cardConfirmed && deliveryConfirmed);
     const finalReviewReady = Boolean(
       classification.state === 'final_review'
       && checkoutProfileVerified
@@ -1672,19 +2303,24 @@
       cartNonPrimeItems: cartFulfillment.nonPrimeItems,
       totalEvidence,
       cartItemCount: Number.isFinite(cartItemCount) ? cartItemCount : null,
+      cartItems,
       itemHints,
       nextAction: optionalOfferVisible ? 'Decline optional offer' : paymentNeedsHuman ? 'Payment needs you in Chrome' : nextAction,
       optionalOfferVisible,
       selectedCardLast4: currentLast4,
       expectedCardLast4: expectedLast4,
       cardMatches,
-      addressMatches: addressSelectionVisible ? addressMatch : null,
+      addressMatches: addressObservation.status === 'matched' ? true : addressObservation.status === 'mismatched' ? false : null,
+      addressVerification: addressObservation.status,
+      addressVerificationSource: addressObservation.source,
+      addressVerificationDiagnostics: addressObservation.diagnostics,
+      finalReviewDeliverySummaryMatches: classification.state === 'final_review' && closedDeliverySummary.matches,
       addressConfirmationRequired,
       paymentMethodConfirmationRequired,
       addressConfirmed,
       cardConfirmed,
-      deliveryConfirmed: deliveryState.confirmed,
-      deliverySelectionRequired: deliveryState.required,
+      deliveryConfirmed,
+      deliverySelectionRequired: deliveryConfirmed ? false : deliveryState.required,
       deliveryFreeAvailable: deliveryState.freeAvailable ?? null,
       selectedDeliveryPrice: deliveryState.selectedPrice,
       checkoutOpen,
@@ -1692,6 +2328,7 @@
       finalReviewReady,
       paymentNeedsHuman,
       paymentIssue,
+      browserActionReceipts: currentBrowserActionReceipts(),
       availableActions: controls
         .filter((label) => /cart|checkout|continue|shipping|address|payment|place|order/i.test(label))
         .slice(0, 4)
@@ -1701,14 +2338,19 @@
   function scheduleSafeClick(element) {
     if (!visible(element) || element.disabled) return false;
     const label = textFor(element);
-    if (FINAL_ACTION_PATTERN.test(label)) return false;
+    if (FINAL_ACTION_PATTERN.test(label) || pickupOrLockerControl(element)) return false;
     element.scrollIntoView({ block: 'center', inline: 'center' });
     // Let the runtime serialize the signed response before a merchant
     // navigation can unload this content-script message channel.
+    const actionContext = activeActionContext;
+    // Yield once so the extension message carrying final_submit_intent can
+    // serialize, but do not leave a long window for MV3 or the page lifecycle
+    // to tear down this content script before the already-authorized click.
     setTimeout(() => {
       if (!visible(element) || element.disabled) return;
       try {
         element.click();
+        recordBrowserClick(element, actionContext);
       } catch {
         // The next inspection step reports a safe handoff when navigation fails.
       }
@@ -1716,17 +2358,126 @@
     return true;
   }
 
-  function immediateSafeClick(element) {
+  function immediateSafeClick(element, { allowPickupOverlay = false, allowFinalAction = false } = {}) {
     if (!visible(element) || element.disabled) return false;
     const label = textFor(element);
-    if (FINAL_ACTION_PATTERN.test(label)) return false;
+    if ((!allowFinalAction && FINAL_ACTION_PATTERN.test(label)) || (!allowPickupOverlay && pickupOrLockerControl(element))) return false;
     element.scrollIntoView({ block: 'center', inline: 'center' });
     try {
       element.click();
+      recordBrowserClick(element);
       return true;
     } catch {
       return false;
     }
+  }
+
+  function scheduleFinalOrderClick(control) {
+    const clickTarget = control?.clickTarget || control;
+    const wrapper = control?.wrapper || clickTarget;
+    const validatedLabel = compactText(control?.validatedLabel || visibleControlLabel(wrapper, 220), 220);
+    const nativeSubmitTarget = Boolean(clickTarget?.matches?.('input[type="submit"], input[type="button"], button'));
+    // Amazon's native submit input can be visually collapsed inside the
+    // visible a-button wrapper. The wrapper carries the user-visible label;
+    // an enabled native descendant remains the correct click target.
+    if (!visible(wrapper) || (!visible(clickTarget) && !nativeSubmitTarget) || clickTarget.disabled) return null;
+    // The wrapper is the element whose visible Amazon text was verified. The
+    // nested native input can legitimately have no standalone accessible name.
+    // Never discard that verified context and reclassify the nested input.
+    if (!FINAL_ACTION_PATTERN.test(validatedLabel) || pickupOrLockerControl(wrapper) || pickupOrLockerControl(clickTarget)) return null;
+    clickTarget.scrollIntoView({ block: 'center', inline: 'center' });
+
+    // A merchant navigation can destroy this content-script context before a
+    // synchronous click result reaches the background worker. Persist the
+    // categorical receipt first, return it with the action result, then make
+    // the one already-authorized merchant click after the message serializes.
+    const intentReceipt = recordBrowserClick(clickTarget, activeActionContext, {
+      kind: 'final_order',
+      phase: 'final_submit_intent',
+      validatedLabel
+    });
+    const actionContext = activeActionContext;
+    let resolveDispatch;
+    const dispatchReady = new Promise((resolve) => {
+      resolveDispatch = resolve;
+    });
+    setTimeout(async () => {
+      if (!visible(wrapper) || (!visible(clickTarget) && !nativeSubmitTarget) || clickTarget.disabled) {
+        resolveDispatch({ receipt: null, reason: 'The final order control became unavailable before its click was dispatched.' });
+        return;
+      }
+      try {
+        // Persist this just before invocation. It survives an Amazon
+        // navigation so a control-plane timeout cannot replay the order.
+        const dispatchReceipt = recordBrowserClick(clickTarget, actionContext, {
+          kind: 'final_order',
+          phase: 'click_dispatched',
+          validatedLabel
+        });
+        // Best-effort out-of-band handoff for the post-dispatch receipt. The
+        // background keeps this scoped receipt long enough to include it in
+        // the signed checkpoint even if Amazon unloads this document at once.
+        // It carries no merchant text, address, or payment data.
+        const dispatchHandoff = chrome.runtime.sendMessage({
+          type: 'MAGIC_CITY_FINAL_ORDER_DISPATCHED',
+          receipt: dispatchReceipt
+        }).catch(() => null);
+        // Give the background a short, bounded opportunity to durably retain
+        // the dispatch receipt before Amazon can unload this document. A
+        // missed acknowledgement never blocks the already-authorized click.
+        const handoff = await Promise.race([
+          dispatchHandoff,
+          new Promise((resolve) => setTimeout(() => resolve(null), 320))
+        ]);
+        // Return only after the immutable action receipt exists. The plan
+        // response can now checkpoint the dispatch before the merchant page
+        // starts navigating, preventing a timeout from replaying the click.
+        resolveDispatch({
+          receipt: dispatchReceipt,
+          handoffSaved: Boolean(handoff?.result?.saved || handoff?.saved)
+        });
+        setTimeout(() => {
+          if (!visible(wrapper) || (!visible(clickTarget) && !nativeSubmitTarget) || clickTarget.disabled) return;
+          try {
+            recordBrowserClick(clickTarget, actionContext, {
+              kind: 'final_order',
+              phase: 'native_click_invoked',
+              validatedLabel
+            });
+            clickTarget.click();
+          } catch {
+            // The next observer reports a terminal failure; never replay.
+          }
+        }, 50);
+      } catch {
+        resolveDispatch({ receipt: null, reason: 'The final order dispatch receipt could not be recorded.' });
+      }
+    }, 0);
+    return { intentReceipt, dispatchReady };
+  }
+
+  function priorFinalOrderReceipt(actionId = '', receiptScope = '', receipts = [], phase = '') {
+    const normalizedActionId = String(actionId || '').trim();
+    const normalizedScope = String(receiptScope || '').trim();
+    const normalizedPhase = String(phase || '').trim();
+    return (Array.isArray(receipts) ? receipts : []).find((receipt) => (
+      receipt
+      && receipt.kind === 'final_order'
+      && (!normalizedPhase || receipt.phase === normalizedPhase)
+      && (!normalizedActionId || String(receipt.actionId || '') === normalizedActionId)
+      && (!normalizedScope || String(receipt.receiptScope || '') === normalizedScope)
+    )) || null;
+  }
+
+  function finalOrderReceiptsFor(state = {}) {
+    // The page snapshot can be created just before a navigation or a fresh
+    // executor injection. Read the durable tab-local receipts again at the
+    // irreversible boundary so a persisted intent can never be replayed.
+    return [...(
+      Array.isArray(state?.browserActionReceipts)
+        ? state.browserActionReceipts
+        : []
+    ), ...currentBrowserActionReceipts()];
   }
 
   function dispatchInput(element, value) {
@@ -2102,26 +2853,32 @@
     const selected = [];
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     const shippingText = normalizeMatchText(`${profile.streetAddress || profile.shippingStreetAddress || ''} ${profile.zipCode || profile.shippingZipCode || ''}`);
+    // A merchant can render several variants of one address (for example,
+    // different saved suites). If the currently checked row already matches
+    // the vault's address identity, preserve that user/merchant selection
+    // instead of clicking a later approximate sibling.
+    const selectedShippingAddressAlreadyMatches = Boolean(shippingText) && selectedVisibleAddressChoiceMatches(profile);
     const candidateInputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visible(paymentChoiceClickTarget(input)));
+      .filter((input) => visibleChoiceInput(input));
     for (const input of candidateInputs) {
-      const container = radioContainer(input);
-      const text = compactText(container?.innerText || '', 1000);
-      if (expectedLast4 && !input.checked && /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && last4FromText(text) === expectedLast4) {
-        const target = paymentChoiceClickTarget(input);
-        if (immediateSafeClick(target)) {
+      const paymentChoice = expectedLast4 ? paymentChoiceContext(input, expectedLast4) : null;
+      const addressChoice = shippingText ? addressChoiceContext(input) : null;
+      if (expectedLast4 && !input.checked && paymentChoice?.endings?.includes(expectedLast4)) {
+        if (selectPaymentChoiceInput(input, paymentChoice)) {
           selected.push('matching payment card');
         }
         continue;
       }
-      if (shippingText && !input.checked
-        && addressChoiceText(text)
-        && addressLooksLikeProfile(text, profile)) {
-        immediateSafeClick(input);
-        selected.push('matching delivery address');
+      if (shippingText && !selectedShippingAddressAlreadyMatches && !input.checked
+        && addressChoice
+        && addressLooksLikeProfile(addressChoice.text, profile)) {
+        if (selectAddressChoiceInput(input)) {
+          selected.push('matching delivery address');
+        }
       }
     }
     const selectedKinds = new Set(selected);
+    if (selectedShippingAddressAlreadyMatches) selectedKinds.add('matching delivery address');
     const riskyPattern = /\b(add a credit|add credit|add debit|add a new card|card number|security code|cvv|cvc|gift card|promo code|add a new address|add new address|new address|prime|trial|subscribe)\b/i;
     for (const control of interactiveControls()) {
       const label = textFor(control);
@@ -2150,7 +2907,10 @@
     }
     if (expectedLast4 && !selectedKinds.has('matching payment card')) {
       const matchingPaymentChoice = findMatchingStoredPaymentChoice(profile);
-      if (matchingPaymentChoice && immediateSafeClick(matchingPaymentChoice.target)) {
+      if (matchingPaymentChoice && selectPaymentChoiceInput(
+        matchingPaymentChoice.input,
+        matchingPaymentChoice.context
+      )) {
         // Amazon often updates the checked radio and summary asynchronously.
         // Record the safe click now; fillCheckoutProfile re-observes before it
         // confirms the card or decides that the mismatch remains.
@@ -2163,9 +2923,9 @@
 
   function savedPaymentChoiceVisible() {
     return Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visible(paymentChoiceClickTarget(input)))
+      .filter((input) => visibleChoiceInput(input))
       .some((input) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(
-        compactText(radioContainer(input)?.innerText || '', 700)
+        paymentChoiceContext(input)?.text || compactText(radioContainer(input)?.innerText || '', 700)
       ));
   }
 
@@ -2184,70 +2944,23 @@
     return entries[0] || null;
   }
 
-  function paymentChoiceClickTarget(control) {
-    if (!control) return null;
-    if (String(control.tagName || '').toLowerCase() === 'input') {
-      return control.labels?.[0]
-        || control.closest?.('label, [role="radio"], [role="option"], [data-testid*="payment" i], [id*="payment" i], [class*="payment" i]')
-        || control;
-    }
-    return control;
-  }
-
   function findMatchingStoredPaymentChoice(profile = {}) {
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     if (!expectedLast4) return null;
-    const candidates = [];
-    const seen = new Set();
-    const add = (control, index) => {
-      const target = paymentChoiceClickTarget(control);
-      if (!target || seen.has(target)) return;
-      seen.add(target);
-      if (!visible(target) || target.disabled || target.getAttribute?.('aria-disabled') === 'true') return;
-      const label = textFor(target);
-      const descriptor = controlDescriptor(target);
-      const localText = compactText([
-        label,
-        descriptor,
-        control?.labels?.[0]?.innerText || '',
-        control?.closest?.('label, [role="radio"], [role="option"]')?.innerText || ''
-      ].filter(Boolean).join('\n'), 1200);
-      const context = compactText([
-        localText,
-        sectionTextForControl(target),
-        sameRowTextForControl(target),
-        nearbyTextForControl(target)
-      ].filter(Boolean).join('\n'), 3200);
-      // Match and risk-check the card row itself. Amazon's surrounding payment
-      // section contains every saved card plus Add Card, which otherwise makes
-      // the first card or the add-card text invalidate an exact last-four match.
-      const hasExpectedCard = last4FromText(localText) === expectedLast4;
-      const paymentLike = /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(localText);
-      const unsafe = /\b(?:add a credit|add credit|add debit|add a new card|card number|security code|cvv|cvc|gift card|voucher|promo code)\b/i.test(localText)
-        || FINAL_ACTION_PATTERN.test(label);
-      const selectable = /\b(?:select|choose|use|paying with|ending|card|payment)\b/i.test(localText)
-        || String(control?.type || '').toLowerCase() === 'radio'
-        || target.getAttribute?.('role') === 'radio';
-      if (!hasExpectedCard || !paymentLike || unsafe || !selectable) return;
-      candidates.push({ target, label, index, score: 240 + (target.getAttribute?.('role') === 'radio' ? 20 : 0) });
-    };
-    const controls = Array.from(interactionRoot().querySelectorAll([
-      'input[type="radio"]',
-      'input[type="checkbox"]',
-      'label',
-      '[role="radio"]',
-      '[role="option"]',
-      '[role="button"]',
-      'button',
-      'a'
-    ].join(',')));
-    controls.forEach((control, index) => add(control, index));
-    candidates.sort((left, right) => right.score - left.score || left.index - right.index);
-    if (!candidates.length) return null;
-    if (candidates.length > 1 && candidates[0].score === candidates[1].score) {
-      return null;
+    const inputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'));
+    for (const input of inputs) {
+      if (input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) continue;
+      const context = paymentChoiceContext(input, expectedLast4);
+      if (!context?.endings?.includes(expectedLast4)) continue;
+      return {
+        input,
+        context,
+        target: paymentChoiceClickTarget(input, context),
+        label: compactText(context.text, 180),
+        score: 280
+      };
     }
-    return candidates[0];
+    return null;
   }
 
   function findPaymentMethodConfirmControl() {
@@ -2411,6 +3124,11 @@
   }
 
   function findCheckoutCorrectionControl(kind = '', summary = {}) {
+    // Amazon's final-review surfaces contain several delivery-adjacent
+    // disclosures (pickup, locker, Whole Foods, local market). They are not
+    // shipping selectors. Shipping is changed only through a verified radio
+    // row below, never through a generic "delivery" control.
+    if (kind === 'delivery') return null;
     const sectionBound = findSectionBoundChangeControl(kind);
     if (sectionBound) return sectionBound;
     const isPayment = kind === 'payment';
@@ -2510,6 +3228,10 @@
     return /\b(try|join|start|get)\s+prime\b|\bprime\b[\s\S]{0,80}\b(trial|membership|auto-renew|renews|month|sign up|subscribe)\b|\btrial\b|\bauto-renew\b|\bmembership\b/i.test(String(text || ''));
   }
 
+  function pickupDeliveryOption(text = '') {
+    return /\b(?:pickup|pick up|locker|counter|whole foods|amazon fresh|local market)\b/i.test(String(text || ''));
+  }
+
   function deliverySpeedRank(text = '') {
     const value = String(text || '').toLowerCase();
     if (/\b(today|same day)\b/.test(value)) return 0;
@@ -2523,45 +3245,108 @@
     return 9;
   }
 
-  function selectPreferredDeliveryOption({ primeRequired = false } = {}) {
-    const options = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
-      .filter((input) => visible(input))
+  function homeDeliveryOnly(fulfillmentMode = '') {
+    return String(fulfillmentMode || '').trim() !== 'pickup_allowed';
+  }
+
+  function shippingSpeedSections() {
+    const headings = Array.from(interactionRoot().querySelectorAll('h1, h2, h3, h4, [role="heading"]'))
+      .filter(visible)
+      .filter((heading) => /^shipping speed$/i.test(compactText(heading.innerText || heading.textContent || '', 120)));
+    const sections = [];
+    for (const heading of headings) {
+      let node = heading.parentElement;
+      for (let depth = 0; node && node !== document.body && depth < 6; depth += 1, node = node.parentElement) {
+        const text = compactText(node.innerText || node.textContent || '', 3600);
+        const controls = Array.from(node.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]'));
+        const radios = Array.from(node.querySelectorAll('input[type="radio"]'));
+        if (!/\bshipping speed\b/i.test(text) || pickupDeliveryOption(text)) continue;
+        if (controls.length || radios.length) {
+          sections.push(node);
+          break;
+        }
+      }
+    }
+    return [...new Set(sections)];
+  }
+
+  function deliveryOptionEntries({ includeHidden = false, fulfillmentMode = '' } = {}) {
+    const sections = shippingSpeedSections();
+    if (!sections.length) return [];
+    const inputs = [...new Set(sections.flatMap((section) => Array.from(section.querySelectorAll('input[type="radio"]'))))]
+      .filter((input) => includeHidden || visibleChoiceInput(input));
+    return inputs
       .map((input) => {
-        const container = radioContainer(input);
-        const text = compactText(container?.innerText || '', 1000);
-        const shippingish = /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text);
+        const container = input.labels?.[0] || radioContainer(input) || input.parentElement;
+        const text = compactText(container?.innerText || container?.textContent || '', 1000);
+        const shippingish = /\b(delivery|shipping|arrives|receive|get it|standard|free|one.?day|fastest)\b/i.test(text);
         const subscriptionish = promotionalDeliveryOption(text);
+        const pickupish = pickupDeliveryOption(text);
         const price = shippingPriceFromText(text);
-        return { input, text, price, speedRank: deliverySpeedRank(text), shippingish, subscriptionish };
+        return { input, container, text, price, speedRank: deliverySpeedRank(text), shippingish, subscriptionish, pickupish };
       })
-      .filter((option) => option.shippingish && !option.subscriptionish && option.price != null);
+      .filter((option) => option.shippingish && !option.subscriptionish && (!homeDeliveryOnly(fulfillmentMode) || !option.pickupish) && option.price != null);
+  }
+
+  function selectDeliveryOption(option) {
+    if (!option?.input || !visibleChoiceInput(option.input) || option.input.disabled) return false;
+    if (option.input.checked || option.input.getAttribute?.('aria-checked') === 'true') return true;
+    const target = option.input.labels?.[0] && visible(option.input.labels[0])
+      ? option.input.labels[0]
+      : visible(option.container)
+        ? option.container
+        : option.input;
+    if (!immediateSafeClick(target)) return false;
+    return Boolean(option.input.checked || option.input.getAttribute?.('aria-checked') === 'true');
+  }
+
+  function selectPreferredDeliveryOption({ primeRequired = false, fulfillmentMode = '' } = {}) {
+    const options = deliveryOptionEntries({ fulfillmentMode });
     const freeOptions = options.filter((option) => option.price === 0)
       .sort((left, right) => left.speedRank - right.speedRank);
     const paidOptions = options.filter((option) => option.price > 0)
       .sort((left, right) => left.price - right.price || left.speedRank - right.speedRank);
     const best = freeOptions[0] || (!primeRequired ? paidOptions[0] : null);
     if (!best) return '';
-    if (!best.input.checked) immediateSafeClick(best.input);
+    if (!selectDeliveryOption(best)) return '';
     return `delivery option ${best.price === 0 ? 'free' : `$${best.price.toFixed(2)}`}`;
   }
 
-  function deliverySelectionState() {
+  function deliverySelectionState({ fulfillmentMode = '' } = {}) {
     const pageText = pagePlainText(18000);
-    const deliverySectionVisible = /\b(delivery option|shipping option|shipping speed|delivery speed|delivery date|arrives|receive|get it)\b/i.test(pageText);
-    const options = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
-      .map((input) => {
-        const container = radioContainer(input);
-        const text = compactText(container?.innerText || container?.textContent || '', 1000);
-        return {
-          input,
-          text,
-          price: shippingPriceFromText(text),
-          speedRank: deliverySpeedRank(text),
-          shippingish: /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text),
-          subscriptionish: promotionalDeliveryOption(text)
-        };
-      })
-      .filter((option) => option.shippingish && !option.subscriptionish && option.price != null);
+    const shippingSections = shippingSpeedSections();
+    const hiddenShippingOptions = deliveryOptionEntries({ includeHidden: true, fulfillmentMode });
+    const options = deliveryOptionEntries({ fulfillmentMode });
+    const deliverySectionVisible = shippingSections.length > 0
+      || /\b(delivery option|shipping option|shipping speed|delivery speed|delivery date|arrives|receive|get it)\b/i.test(pageText);
+    // A named Shipping speed section is an explicit merchant decision point.
+    // Its collapsed choices must be opened and selected; a $0 summary line is
+    // not evidence that the fastest free option was actually chosen.
+    if (shippingSections.length && hiddenShippingOptions.length && !options.length) {
+      return {
+        required: true,
+        confirmed: false,
+        freeAvailable: hiddenShippingOptions.some((option) => option.price === 0),
+        selectedPrice: null,
+        bestPrice: hiddenShippingOptions.filter((option) => option.price === 0)
+          .sort((left, right) => left.speedRank - right.speedRank)[0]?.price ?? null,
+        source: 'shipping_speed_collapsed'
+      };
+    }
+    // Final review commonly collapses the shipping choices into its order
+    // summary. A verified $0 checkout shipping line is stronger evidence than
+    // an absent radio control and must not trigger a pickup/local-market flow.
+    const checkoutShipping = shippingTotalEvidenceForSurface(pageText, { surface: 'checkout' });
+    if (!options.length && checkoutShipping.authoritative && checkoutShipping.amount === 0) {
+      return {
+        required: false,
+        confirmed: true,
+        freeAvailable: true,
+        selectedPrice: 0,
+        bestPrice: 0,
+        source: 'checkout_shipping_total'
+      };
+    }
     if (!deliverySectionVisible && !options.length) return { required: false, confirmed: true };
     const freeOptions = options.filter((option) => option.price === 0)
       .sort((left, right) => left.speedRank - right.speedRank);
@@ -2579,15 +3364,42 @@
   }
 
   function shouldOpenDeliverySelector(state = {}) {
-    const summary = state.checkoutSummary || {};
-    if (!['checkout', 'final_review'].includes(String(summary.stage || state.browserState || '').toLowerCase())) return false;
-    const pageText = pagePlainText(18000);
-    if (!/\b(delivery option|shipping option|shipping speed|delivery speed|delivery date|arrives|receive|get it|shipping|delivery)\b/i.test(pageText)) return false;
-    const visibleShippingOptions = Array.from(interactionRoot().querySelectorAll('input[type="radio"]'))
-      .filter((input) => visible(input))
-      .map((input) => compactText(radioContainer(input)?.innerText || '', 1000))
-      .some((text) => /\b(delivery|shipping|arrives|receive|get it|standard|free)\b/i.test(text) && !promotionalDeliveryOption(text));
-    return !visibleShippingOptions;
+    // selectPreferredDeliveryOption handles real, visible shipping radio rows
+    // directly. There is no safe generic fallback: Amazon's pickup disclosure
+    // also contains delivery/free language and must never be opened by a
+    // delivery correction. When no shipping rows are visible, preserve the
+    // merchant's current shipping choice and continue with address/card work.
+    void state;
+    return false;
+  }
+
+  // Unlike generic delivery links, a Change control bound to a visible
+  // "Shipping speed" / "Delivery option" section has a narrowly defined
+  // purpose. It can expose standard carrier-speed radios, but must never be
+  // used for pickup, locker, Fresh, Counter, or local-market routing.
+  function findSafeDeliveryOptionsControl() {
+    for (const section of shippingSpeedSections()) {
+      const sectionText = compactText(section.innerText || section.textContent || '', 3600);
+      if (pickupDeliveryOption(sectionText)) continue;
+      const control = Array.from(section.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"]'))
+        .filter(visible)
+        .find((candidate) => /^(?:change|choose|edit)$/i.test(compactText(textFor(candidate), 80)) && !pickupOrLockerControl(candidate));
+      if (control) return { control, label: textFor(control), score: 320 };
+    }
+    return null;
+  }
+
+  async function chooseFastestFreeShipping({ primeRequired = false, fulfillmentMode = '' } = {}) {
+    let selection = selectPreferredDeliveryOption({ primeRequired, fulfillmentMode });
+    if (selection) return { selection, opened: false };
+    const opener = findSafeDeliveryOptionsControl();
+    if (!opener || !immediateSafeClick(opener.control)) return { selection: '', opened: false };
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await waitForPaint(80);
+      selection = selectPreferredDeliveryOption({ primeRequired, fulfillmentMode });
+      if (selection) return { selection, opened: true };
+    }
+    return { selection: '', opened: true };
   }
 
   function findDeclineOfferControl(root = null) {
@@ -2999,19 +3811,25 @@
     const controls = [];
     const seen = new Set();
     for (const root of roots) {
-      const target = root.matches?.('button, a, input[type="submit"], input[type="button"], [role="button"]')
-        ? root
-        : root.querySelector?.('input[type="submit"], input[type="button"], button, [role="button"]') || root;
-      if ((!visible(root) && !visible(target)) || target.disabled) continue;
-      const label = visibleControlLabel(root, 220) || visibleControlLabel(target, 220) || compactText(textFor(target), 220);
+      // Amazon often wraps the visible order label in a role=button surface
+      // around the actual native submit input. Prefer that nested native
+      // control when it exists; clicking the wrapper itself is not equivalent
+      // and can be a no-op.
+      const nestedNativeControl = root.querySelector?.('input[type="submit"], input[type="button"], button') || null;
+      const clickTarget = nestedNativeControl
+        || (root.matches?.('button, a, input[type="submit"], input[type="button"], [role="button"]') ? root : null)
+        || root.querySelector?.('[role="button"]')
+        || root;
+      if ((!visible(root) && !visible(clickTarget)) || clickTarget.disabled) continue;
+      const label = visibleControlLabel(root, 220) || visibleControlLabel(clickTarget, 220) || compactText(textFor(clickTarget), 220);
       const hasFinalOrderIntent = /^(?:place(?: your)? order|submit order|confirm and pay)$/i.test(label)
         || /\b(?:place(?: your)? order|submit order|confirm and pay)\b/i.test(label);
       const unsafe = /\b(?:use this payment method|gift card|promo code|prime|trial|subscribe|delivery address|payment method)\b/i.test(label)
         && !/\bplace(?: your)? order\b/i.test(label);
       if (!hasFinalOrderIntent || unsafe) continue;
-      if (seen.has(target)) continue;
-      seen.add(target);
-      controls.push(target);
+      if (seen.has(clickTarget)) continue;
+      seen.add(clickTarget);
+      controls.push({ wrapper: root, clickTarget, validatedLabel: label });
     }
     return controls;
   }
@@ -3037,9 +3855,229 @@
     return { attempted: true, saved: isChecked(), reason: isChecked() ? 'enabled' : 'not_confirmed' };
   }
 
-  function submitFinalOrder(action = {}, profile = {}) {
+  function pendingOrderMatchEvidence(action = {}) {
+    const rawText = pagePlainText(30000);
+    const marker = /\bthis is a pending order\b/i.test(rawText);
+    const candidate = action.boundCandidate && typeof action.boundCandidate === 'object'
+      ? action.boundCandidate
+      : null;
+    const cartEvidence = action.boundCartEvidence && typeof action.boundCartEvidence === 'object'
+      ? action.boundCartEvidence
+      : null;
+    const expectedAsin = String(cartEvidence?.asin || candidate?.asin || '').trim();
+    const expectedTitle = normalizeMatchText(canonicalProductTitle(cartEvidence?.title || candidate?.title || ''));
+    const productRows = Array.from(document.querySelectorAll([
+      '[data-asin]:not([data-asin=""])',
+      '[data-item-index]',
+      '[data-testid*="item" i]',
+      'article',
+      'li'
+    ].join(','))).filter(visible);
+    const productLinks = Array.from(document.querySelectorAll('a[href*="/dp/"], a[href*="/gp/product/"]')).filter(visible);
+    const semanticRowFor = (element) => element?.closest?.([
+      '[data-asin]:not([data-asin=""])',
+      '[data-item-index]',
+      '[data-testid*="item" i]',
+      'article',
+      'li',
+      '.a-fixed-left-grid-inner'
+    ].join(',')) || null;
+    const evidenceRowFor = (element) => semanticRowFor(element) || element || null;
+    const asinElement = expectedAsin
+      ? Array.from(document.querySelectorAll('[data-asin]:not([data-asin=""])')).find((element) => String(element.getAttribute('data-asin') || '').trim() === expectedAsin)
+      : null;
+    const asinLink = expectedAsin
+      ? productLinks.find((link) => new RegExp(`/(?:dp|gp/product)/${expectedAsin}(?:[/?#]|$)`, 'i').test(String(link.href || '')))
+      : null;
+    const asinRow = evidenceRowFor(asinElement || asinLink);
+    const titleElement = expectedTitle
+      ? [...productLinks, ...Array.from(document.querySelectorAll('h1, h2, h3, [data-testid*="title" i], span.a-size-base, span.a-text-bold, p')).filter(visible)]
+          .find((element) => normalizeMatchText(canonicalProductTitle(element.innerText || element.textContent || '')) === expectedTitle)
+      : null;
+    const exactTitleRow = evidenceRowFor(titleElement)
+      || productRows.find((row) => normalizeMatchText(canonicalProductTitle(row.innerText || row.textContent || '')) === expectedTitle);
+    const identityRow = asinRow || exactTitleRow;
+    const identityMatches = Boolean(identityRow);
+    const candidatePrice = Number(cartEvidence?.price ?? candidate?.price);
+    const identityText = String(identityRow?.innerText || identityRow?.textContent || '');
+    const identityPrices = Array.from(new Set(Array.from(identityText.matchAll(/\$\s*(\d{1,6}(?:\.\d{2})?)/g))
+      .filter((match) => {
+        const suffix = identityText.slice((match.index || 0) + match[0].length, (match.index || 0) + match[0].length + 40);
+        const prefix = identityText.slice(Math.max(0, (match.index || 0) - 24), match.index || 0);
+        const unitSuffix = /^\s*(?:\/|per\b)\s*(?:\d+(?:\.\d+)?\s*)?(?:fl\s*oz|ounces?|oz|pounds?|lbs?|kilograms?|kgs?|grams?|g|milliliters?|ml|liters?|l|counts?|ct|each|units?)\b/i.test(suffix);
+        const unitPrefix = /(?:unit price|price per)\s*:?\s*$/i.test(prefix);
+        return !unitSuffix && !unitPrefix;
+      })
+      .map((match) => Number(match[1]))
+      .filter((amount) => Number.isFinite(amount) && amount > 0)));
+    const priceEvidenceAmbiguous = identityPrices.length > 1;
+    const priceMatchesInIdentityRow = Number.isFinite(candidatePrice) && candidatePrice > 0
+      && identityPrices.length === 1
+      && Math.abs(identityPrices[0] - candidatePrice) <= 0.005;
+    const merchandiseSubtotalMatch = rawText.match(/\b(?:items?|merchandise subtotal|item subtotal|subtotal\s*\(\s*\d+\s*items?\s*\))\s*:?\s*\$\s*(\d{1,6}(?:\.\d{2})?)/i);
+    const explicitMerchandiseSubtotal = merchandiseSubtotalMatch ? Number(merchandiseSubtotalMatch[1]) : null;
+    const expectedItemCount = Number(action.expectedItemCount || 0);
+    const expectedMerchandiseSubtotal = Number.isFinite(candidatePrice)
+      && candidatePrice > 0
+      && Number.isInteger(expectedItemCount)
+      && expectedItemCount > 0
+      ? candidatePrice * expectedItemCount
+      : null;
+    const merchandisePriceContradiction = Boolean(identityMatches
+      && Number.isFinite(candidatePrice)
+      && candidatePrice > 0
+      && (identityPrices.length > 0 && (!priceMatchesInIdentityRow || priceEvidenceAmbiguous)
+        || Number.isFinite(explicitMerchandiseSubtotal)
+          && Number.isFinite(expectedMerchandiseSubtotal)
+          && Math.abs(explicitMerchandiseSubtotal - expectedMerchandiseSubtotal) > 0.005));
+    const singleItemOrderTotalMatches = Number(cartEvidence?.quantity) === 1
+      && Number.isFinite(candidatePrice)
+      && candidatePrice > 0
+      && new RegExp(`\\border total\\s*:?\\s*\\$\\s*${candidatePrice.toFixed(2).replace('.', '\\.')}`, 'i').test(rawText);
+    const priceMatches = Boolean(identityMatches
+      && !merchandisePriceContradiction
+      && (priceMatchesInIdentityRow || singleItemOrderTotalMatches));
+    const explicitQuantity = cartRowQuantity(identityRow);
+    const quantityContradiction = Number.isInteger(explicitQuantity)
+      && Number.isInteger(expectedItemCount)
+      && expectedItemCount > 0
+      && explicitQuantity !== expectedItemCount;
+    const quantityMatches = Number.isInteger(expectedItemCount)
+      && expectedItemCount > 0
+      && Number(cartEvidence?.quantity) === expectedItemCount
+      && cartEvidence?.sessionId === action.sessionId
+      && cartEvidence?.planHash === action.planHash
+      && !quantityContradiction;
+    return {
+      marker,
+      identityMatches,
+      identitySource: asinRow ? 'asin' : exactTitleRow ? 'exact_title' : 'none',
+      priceMatches,
+      priceSource: priceMatchesInIdentityRow ? 'identity_row' : singleItemOrderTotalMatches ? 'single_item_order_total' : 'none',
+      priceEvidenceAmbiguous,
+      merchandisePriceContradiction,
+      explicitMerchandiseSubtotal: Number.isFinite(explicitMerchandiseSubtotal) ? explicitMerchandiseSubtotal : null,
+      quantityMatches,
+      quantitySource: quantityMatches ? 'verified_cart' : 'none',
+      quantityContradiction,
+      explicitQuantity: Number.isInteger(explicitQuantity) ? explicitQuantity : null
+    };
+  }
+
+  async function confirmPendingOrder(action = {}, profile = {}) {
+    const state = pageState(profile);
+    if (state.orderSubmitted) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        orderSubmitted: true,
+        reason: 'Merchant order confirmation is already visible.',
+        state
+      };
+    }
+    const durableDispatch = action.priorPendingOrderDispatchReceipt;
+    if (durableDispatch?.kind === 'final_order'
+      && durableDispatch?.phase === 'click_dispatched'
+      && durableDispatch?.receiptScope === action.receiptScope) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        finalSubmitReceipt: durableDispatch,
+        pendingOrderContinuationPresent: true,
+        reason: 'Pending-order continuation was already dispatched; awaiting merchant confirmation.',
+        state
+      };
+    }
+    const evidence = pendingOrderMatchEvidence(action);
+    if (!evidence.marker) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        pendingOrderContinuationPresent: false,
+        reason: 'No Amazon pending-order continuation is present.',
+        state
+      };
+    }
+    if (action.priorFinalSubmitDispatched !== true) {
+      return { completed: false, reason: 'The pending order is not bound to a recorded first final-order dispatch.', state };
+    }
+    if (!evidence.identityMatches || !evidence.priceMatches || !evidence.quantityMatches) {
+      return {
+        completed: false,
+        reason: 'The pending order did not match the current mission item, quantity, and price.',
+        pendingOrderMatchEvidence: evidence,
+        state
+      };
+    }
+    const finalOrderReceipts = finalOrderReceiptsFor(state);
+    const existingDispatch = priorFinalOrderReceipt(action.id, action.receiptScope, finalOrderReceipts, 'click_dispatched');
+    if (existingDispatch) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        finalSubmitReceipt: existingDispatch,
+        pendingOrderContinuationPresent: true,
+        pendingOrderMatchEvidence: evidence,
+        reason: 'Pending-order continuation was already dispatched; awaiting merchant confirmation.',
+        state
+      };
+    }
+    const existingIntent = priorFinalOrderReceipt(action.id, action.receiptScope, finalOrderReceipts, 'final_submit_intent');
+    if (existingIntent) {
+      return {
+        completed: false,
+        noReplay: true,
+        pendingOrderContinuationPresent: true,
+        pendingOrderMatchEvidence: evidence,
+        reason: 'Pending-order continuation was interrupted before the native merchant click. Magic City will not replay it.',
+        state
+      };
+    }
+    const controls = finalOrderControls();
+    if (!controls.length) {
+      return { completed: false, reason: 'The matching pending order did not expose a verified continuation control.', state };
+    }
+    const scheduled = scheduleFinalOrderClick(controls[0]);
+    if (!scheduled) {
+      return { completed: false, reason: 'The matching pending-order continuation could not be clicked safely.', state };
+    }
+    const dispatched = await scheduled.dispatchReady;
+    if (!dispatched?.receipt) {
+      return {
+        completed: false,
+        reason: dispatched?.reason || 'The matching pending-order continuation could not be dispatched safely.',
+        state: pageState(profile)
+      };
+    }
+    return {
+      completed: true,
+      navigationRequested: true,
+      finalSubmitRequested: true,
+      finalSubmitReceipt: dispatched.receipt,
+      finalSubmitReceipts: [scheduled.intentReceipt, dispatched.receipt],
+      pendingOrderContinuationPresent: true,
+      pendingOrderMatchEvidence: evidence,
+      label: compactText(controls[0].validatedLabel, 140),
+      state: pageState(profile)
+    };
+  }
+
+  async function submitFinalOrder(action = {}, profile = {}) {
+    if (action.pendingOrderContinuation === true) return confirmPendingOrder(action, profile);
     if (action.autoSubmitAfterVerifiedCheckout !== true) {
       return { completed: false, reason: 'This mission did not authorize automatic final order submission.' };
+    }
+    const closedPickupModal = await closeNonBlockingCheckoutPickupModal();
+    if (closedPickupModal.closeRequested && !closedPickupModal.closed) {
+      return {
+        completed: false,
+        reason: 'An unexpected pickup overlay remained open after Magic City tried to close it. No delivery or pickup change was made.',
+        state: pageState(profile)
+      };
     }
     const state = pageState(profile);
     const summary = state.checkoutSummary || {};
@@ -3066,7 +4104,15 @@
     if (Number.isFinite(maxPrice) && maxPrice > 0 && Number.isFinite(merchandiseSubtotal) && merchandiseSubtotal > maxPrice + 0.005) {
       return { completed: false, reason: 'The verified merchandise subtotal exceeds the approved item budget.', state };
     }
-    if (!expectedCardLast4 || summary.cardMatches !== true) {
+    if (!expectedCardLast4) {
+      return {
+        completed: false,
+        localCheckoutProfileMissing: true,
+        reason: 'The local checkout profile is unavailable, so Magic City cannot verify the authorized card.',
+        state
+      };
+    }
+    if (summary.cardMatches !== true) {
       return { completed: false, reason: 'The selected merchant card does not match the Local Data Vault card cue.', state };
     }
     if (hasAddressPreset && summary.addressMatches !== true) {
@@ -3075,12 +4121,47 @@
     if (summary.deliveryConfirmed !== true) {
       return { completed: false, reason: 'The preferred delivery option is not confirmed yet.', state };
     }
+    // An Amazon navigation may outlive a checkpoint request. Only a persisted
+    // dispatch receipt proves that the native control was actually invoked.
+    // Intent alone is deliberately not replayed or treated as proof: the
+    // original page may have died between intent and click.
+    const finalOrderReceipts = finalOrderReceiptsFor(state);
+    const existingDispatch = priorFinalOrderReceipt(
+      action.id,
+      action.receiptScope,
+      finalOrderReceipts,
+      'click_dispatched'
+    );
+    if (existingDispatch) {
+      return {
+        completed: true,
+        skipped: true,
+        finalSubmitRequested: true,
+        finalSubmitReceipt: existingDispatch,
+        reason: 'Final order click was already requested; awaiting merchant confirmation.',
+        state
+      };
+    }
+    const existingIntent = priorFinalOrderReceipt(
+      action.id,
+      action.receiptScope,
+      finalOrderReceipts,
+      'final_submit_intent'
+    );
+    if (existingIntent) {
+      return {
+        completed: false,
+        noReplay: true,
+        reason: 'Final order dispatch was interrupted before the native merchant click. Magic City will not replay an irreversible order action.',
+        state
+      };
+    }
     const controls = finalOrderControls();
     if (!controls.length) {
       return { completed: false, reason: 'Magic City could not identify a verified final order control.', state };
     }
     const control = controls[0];
-    if (control.disabled) {
+    if (control.clickTarget.disabled) {
       return { completed: false, reason: 'The final order control is not available.', state };
     }
     // This Amazon preference changes a persistent merchant default. Only touch
@@ -3090,23 +4171,68 @@
     const merchantCheckoutDefault = action.saveMerchantCheckoutDefault === true
       ? saveAmazonCheckoutDefault()
       : { attempted: false, saved: false, reason: 'not_requested' };
-    control.scrollIntoView({ block: 'center', inline: 'center' });
     try {
-      control.click();
+      const scheduledFinalSubmit = scheduleFinalOrderClick(control);
+      if (!scheduledFinalSubmit) {
+        return { completed: false, reason: 'The merchant final order control could not be clicked safely.', state };
+      }
+      const dispatchedFinalSubmit = await scheduledFinalSubmit.dispatchReady;
+      if (!dispatchedFinalSubmit?.receipt) {
+        return {
+          completed: false,
+          reason: dispatchedFinalSubmit?.reason || 'The merchant final order control could not be dispatched safely.',
+          state: pageState(profile)
+        };
+      }
+      const stateAfterFinalSubmitRequested = pageState(profile);
       return {
         completed: true,
         navigationRequested: true,
         finalSubmitRequested: true,
-        label: visibleControlLabel(control, 140) || compactText(textFor(control), 140),
+        finalSubmitReceipt: dispatchedFinalSubmit.receipt,
+        finalSubmitReceipts: [
+          scheduledFinalSubmit.intentReceipt,
+          dispatchedFinalSubmit.receipt
+        ],
+        label: compactText(control.validatedLabel, 140),
         merchantCheckoutDefault,
-        state
+        checkoutPickupModalClosed: closedPickupModal.closed,
+        state: stateAfterFinalSubmitRequested
       };
     } catch {
       return { completed: false, reason: 'The merchant final order control could not be clicked safely.', state };
     }
   }
 
-  function fillCheckoutProfile(profile = {}, action = {}) {
+  async function fillCheckoutProfile(profile = {}, action = {}) {
+    const closedPickupModal = await closeNonBlockingCheckoutPickupModal();
+    if (closedPickupModal.closed) {
+      return {
+        completed: true,
+        skipped: false,
+        checkoutPickupModalClosed: true,
+        label: 'Closed pickup chooser',
+        state: pageState(profile)
+      };
+    }
+    if (closedPickupModal.closeRequested) {
+      return {
+        completed: false,
+        reason: 'An unexpected pickup overlay remained open after Magic City tried to close it. No delivery or pickup change was made.',
+        state: pageState(profile)
+      };
+    }
+    // Once Amazon exposes a verified final review, do not reopen address or
+    // delivery controls. The signed final-submit action owns the next step.
+    const existingState = pageState(profile);
+    if (existingState.checkoutSummary?.finalReviewReady === true) {
+      return {
+        completed: true,
+        skipped: true,
+        reason: 'Verified final review is already ready; preserving the merchant checkout state.',
+        state: existingState
+      };
+    }
     const rawPageText = pagePlainText(30000);
     const controlText = interactiveControls().map(textFor).join('\n');
     if (isOptionalOfferPage(rawPageText, controlText)) {
@@ -3148,13 +4274,38 @@
         filled.push(key.replace(/([A-Z])/g, ' $1').toLowerCase());
       }
     }
-    const deliverySelection = selectPreferredDeliveryOption({ primeRequired: action.primeRequired === true });
+    // The mission binds fulfillmentMode. Home delivery is the default, and a
+    // pickup route is legal only when the signed action explicitly allows it.
+    const deliveryChoice = await chooseFastestFreeShipping({
+      primeRequired: action.primeRequired === true,
+      fulfillmentMode: action.fulfillmentMode
+    });
+    const deliverySelection = deliveryChoice.selection;
     const state = pageState(profile);
     const summary = state.checkoutSummary || {};
     const selections = [...selectedOptions, deliverySelection].filter(Boolean);
     const addressMatches = summary.addressMatches;
-    const selectedMatchingAddress = selectedOptions.includes('matching delivery address');
+    const addressVerification = String(summary.addressVerification || '');
     const completeShippingProfile = fullShippingAddressAvailable(profile);
+
+    // If the signed Shipping speed section was opened but its radio rows did
+    // not render, re-observe. Do not ever fall back to generic delivery or
+    // pickup controls.
+    if (summary.deliverySelectionRequired === true
+      && summary.deliveryConfirmed !== true
+      && summary.stage !== 'final_review'
+      && !deliverySelection) {
+      if (deliveryChoice.opened) {
+        return {
+          completed: true,
+          skipped: false,
+          navigationRequested: true,
+          label: 'Open Shipping speed',
+          checkoutSelections: [...selections, 'open Shipping speed'],
+          state
+        };
+      }
+    }
 
     // Confirming an exact saved-card selection is a non-final checkout step.
     // Raw card entry and the final order action remain hard boundaries.
@@ -3169,6 +4320,9 @@
           completed: true,
           skipped: false,
           navigationRequested: true,
+          // A click only begins Amazon's payment transition. The background
+          // must re-observe until this control is gone and final review exists.
+          paymentConfirmationPending: true,
           label: compactText(confirmPayment.label || 'Use this payment method', 140),
           safeFieldsFilled: [...new Set(filled)],
           checkoutSelections: [...selections, selectedOptions.includes('matching payment card') ? 'confirm matching payment card' : 'confirm already-selected payment card'],
@@ -3210,7 +4364,7 @@
     // Selecting an address can update Amazon's checkout state asynchronously.
     // Treat the exact profile match as sufficient evidence to continue through
     // the non-sensitive "Deliver to this address" confirmation.
-    if (addressMatches === true || selectedMatchingAddress) {
+    if (addressMatches === true && summary.addressConfirmationRequired) {
       const confirmAddress = findAddressConfirmControl();
       if (confirmAddress && scheduleSafeClick(confirmAddress.control)) {
         return {
@@ -3220,17 +4374,6 @@
           label: compactText(confirmAddress.label || 'Use this address', 140),
           safeFieldsFilled: [...new Set(filled)],
           checkoutSelections: [...selections, 'confirm matching delivery address'],
-          state
-        };
-      }
-      if (selectedMatchingAddress && addressMatches !== true) {
-        return {
-          completed: true,
-          skipped: false,
-          navigationRequested: true,
-          label: 'Selected matching delivery address',
-          safeFieldsFilled: [...new Set(filled)],
-          checkoutSelections: selections,
           state
         };
       }
@@ -3316,6 +4459,17 @@
       }
     }
 
+    if (addressVerification === 'unverified') {
+      return {
+        completed: false,
+        profileCorrection: 'address_verification',
+        reason: 'Amazon showed a selected delivery-address row, but the local runner could not verify that row against the saved address fingerprint.',
+        safeFieldsFilled: [...new Set(filled)],
+        checkoutSelections: selections,
+        state
+      };
+    }
+
     const correctionKind = checkoutProfileCorrection(summary) ||
       (!deliverySelection && shouldOpenDeliverySelector(state) ? 'delivery' : '');
     if (
@@ -3376,42 +4530,68 @@
 
   async function executePlanStep(action = {}, checkoutProfile = null) {
     if (!action || typeof action !== 'object') return { completed: false, reason: 'Invalid plan action.' };
-    if (action.type === 'inspect' || action.type === 'pause') return { completed: true, state: pageState(checkoutProfile || {}) };
-    if (action.type === 'search') return { ...(await runSearch(action.query)), state: pageState(checkoutProfile || {}) };
-    if (action.type === 'select_candidate') {
-      const outcome = selectCandidate(action);
-      if (outcome.completed && outcome.searchResultSelected === true) {
-        return { ...outcome, state: compactPlanStepState({ candidateSelected: true }) };
+    const previousActionContext = activeActionContext;
+    activeActionContext = {
+      actionId: action.id || '',
+      actionType: action.type || '',
+      intent: action.intent || '',
+      receiptScope: action.receiptScope || ''
+    };
+    try {
+      if (action.type === 'inspect' || action.type === 'pause') return { completed: true, state: pageState(checkoutProfile || {}) };
+      if (action.type === 'search') return { ...(await runSearch(action.query)), state: pageState(checkoutProfile || {}) };
+      if (action.type === 'select_candidate') {
+        const outcome = selectCandidate(action);
+        if (outcome.completed && outcome.searchResultSelected === true) {
+          return { ...outcome, state: compactPlanStepState({ candidateSelected: true }) };
+        }
+        return { ...outcome, state: pageState(checkoutProfile || {}) };
       }
-      return { ...outcome, state: pageState(checkoutProfile || {}) };
-    }
-    if (action.type === 'navigate' && action.intent === 'open_cart') {
-      const outcome = clickIntent('open_cart', action, checkoutProfile || {});
-      return { ...outcome, state: compactPlanStepState({ cartOpenStarted: true }) };
-    }
-    if (action.type === 'click_intent') {
-      const outcome = clickIntent(action.intent, action, checkoutProfile || {});
-      if (action.intent === 'add_to_cart' && outcome.completed && outcome.directSearchResultCart === true) {
-        return { ...outcome, state: compactPlanStepState({ cartActionStarted: true }) };
+      if (action.type === 'navigate' && action.intent === 'open_cart') {
+        const outcome = clickIntent('open_cart', action, checkoutProfile || {});
+        return { ...outcome, state: compactPlanStepState({ cartOpenStarted: true }) };
       }
-      if (action.intent === 'checkout' && outcome.completed && outcome.cartCheckoutStarted === true) {
-        return outcome;
+      if (action.type === 'click_intent') {
+        const outcome = clickIntent(action.intent, action, checkoutProfile || {});
+        if (action.intent === 'add_to_cart' && outcome.completed && outcome.directSearchResultCart === true) {
+          return { ...outcome, state: compactPlanStepState({ cartActionStarted: true }) };
+        }
+        if (action.intent === 'checkout' && outcome.completed && outcome.cartCheckoutStarted === true) {
+          return outcome;
+        }
+        return { ...outcome, state: pageState(checkoutProfile || {}) };
       }
-      return { ...outcome, state: pageState(checkoutProfile || {}) };
+      if (action.type === 'fill_checkout_profile') return await fillCheckoutProfile(checkoutProfile || {}, action);
+      if (action.type === 'final_submit') return await submitFinalOrder(action, checkoutProfile || {});
+      return { completed: false, reason: 'Unsupported local plan action.' };
+    } finally {
+      activeActionContext = previousActionContext;
     }
-    if (action.type === 'fill_checkout_profile') return fillCheckoutProfile(checkoutProfile || {}, action);
-    if (action.type === 'final_submit') return submitFinalOrder(action, checkoutProfile || {});
-    return { completed: false, reason: 'Unsupported local plan action.' };
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    (async () => {
+  const EXECUTOR_MESSAGE_HANDLER_KEY = '__magicCityExecutorMessageHandlerV1';
+  const EXECUTOR_MESSAGE_LISTENER_KEY = '__magicCityExecutorMessageListenerInstalledV1';
+
+  // Chrome executes this file for each browser command. Keep a single
+  // listener in the extension's isolated world, but replace its handler on
+  // every injection so a later state read cannot be answered by an earlier
+  // executor instance with stale in-memory receipts.
+  globalThis[EXECUTOR_MESSAGE_HANDLER_KEY] = async (message) => {
       if (message?.type === 'MAGIC_CITY_BROWSER_STATE') return pageState(message.checkoutProfile || {});
       if (message?.type === 'MAGIC_CITY_EXECUTE_PLAN_STEP') return executePlanStep(message.action || {}, message.checkoutProfile || null);
       return { ok: true };
-    })()
-      .then(sendResponse)
-      .catch((error) => sendResponse({ completed: false, reason: error?.message || String(error), state: pageState() }));
-    return true;
-  });
+  };
+
+  if (!globalThis[EXECUTOR_MESSAGE_LISTENER_KEY]) {
+    globalThis[EXECUTOR_MESSAGE_LISTENER_KEY] = true;
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      const handler = globalThis[EXECUTOR_MESSAGE_HANDLER_KEY];
+      Promise.resolve(typeof handler === 'function'
+        ? handler(message)
+        : { completed: false, reason: 'Magic City browser executor is unavailable.' })
+        .then(sendResponse)
+        .catch((error) => sendResponse({ completed: false, reason: error?.message || String(error) }));
+      return true;
+    });
+  }
 })();

@@ -13,6 +13,10 @@ const MAX_PLANNED_BASKET_ITEMS = 12;
 const API_TIMEOUT_MS = 20_000;
 const RUNNER_STATUS_TIMEOUT_MS = 4_000;
 const RUNNER_STATUS_LEASE_MS = 3_000;
+// The final merchant click may use a verified local capability to avoid a
+// control-plane timeout at the irreversible boundary, but only immediately
+// after this runner has confirmed the session is still live.
+const FINAL_SUBMIT_LOCAL_LEASE_MS = 45_000;
 const RUNNER_RESUME_DELAY_MS = 5_000;
 const MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 90_000;
 const MIN_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 30_000;
@@ -20,7 +24,7 @@ const MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS = 120_000;
 // Keep exactly one recovery wake for an already approved mission. Chrome can
 // suspend an MV3 worker between two valid checkpoints; this lets it resume the
 // signed next action without turning the runner into a background crawler.
-const RUNNER_CONTINUATION_DELAY_MS = 30_000;
+const RUNNER_CONTINUATION_DELAY_MS = 5_000;
 const PAYMENT_WAIT_RESUME_DELAY_MS = 5_000;
 const PAYMENT_WAIT_HEARTBEAT_MS = 60_000;
 const PAYMENT_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
@@ -28,8 +32,14 @@ const CHECKOUT_PROFILE_RECONCILE_TIMEOUT_MS = 24_000;
 const TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS = [200, 700];
 const TAB_COMMAND_TIMEOUT_MS = 15_000;
 const BROWSER_ACTION_TIMEOUT_MS = 45_000;
+const EXECUTOR_REGISTRATION_REUSE_MS = 30_000;
+const LOCAL_CHECKOUT_PROFILE_STORAGE_KEY = 'magicCityLocalCheckoutProfiles';
 const SAFE_PLAN_ACTION_TYPES = new Set(['navigate', 'inspect', 'search', 'select_candidate', 'click_intent', 'fill_checkout_profile', 'final_submit', 'pause']);
 const inFlightSessionIds = new Set();
+const RUNNER_WORKER_STARTED_AT = new Date().toISOString();
+const RUNNER_WORKER_ID = globalThis.crypto?.randomUUID?.() || `worker-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let executorRegistrationCache = null;
+let executorRegistrationInFlight = null;
 
 function normalizeBaseUrl(value = '') {
   return String(value || DEFAULT_BASE_URL).trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
@@ -122,6 +132,19 @@ function isAmazonCheckoutPreludeUrl(value = '', plan = {}) {
     const targetDomain = String(plan.targetDomain || '').toLowerCase().replace(/^www\./, '');
     return ((targetDomain === 'amazon.com' && domain === 'amazon.com') || (fixtureHost && targetDomain === domain))
       && /^\/checkout\/byg(?:\/|$)/i.test(String(url.pathname || ''));
+  } catch {
+    return false;
+  }
+}
+
+function isAmazonCheckoutResumeUrl(value = '', plan = {}) {
+  try {
+    const url = new URL(String(value || ''));
+    const domain = domainForUrl(url.href);
+    const fixtureHost = domain === '127.0.0.1' || domain === 'localhost';
+    const targetDomain = String(plan.targetDomain || '').toLowerCase().replace(/^www\./, '');
+    const trustedTarget = (targetDomain === 'amazon.com' && domain === 'amazon.com') || (fixtureHost && targetDomain === domain);
+    return trustedTarget && /^(?:\/checkout(?:\/|$)|\/gp\/cart\/view|\/cart(?:\/|$)|\/alm\/(?:byg|substitution)(?:\/|$))/i.test(String(url.pathname || ''));
   } catch {
     return false;
   }
@@ -339,6 +362,13 @@ async function validatePlanForSession(session = {}) {
       || Number(action.maxPrice) <= 0
       || action.missionAction !== 'final_submit'
     )) throw new Error('mission_plan_final_submit_invalid');
+    if (action.pendingOrderContinuation === true && (
+      action.type !== 'final_submit'
+      || action.priorFinalSubmitActionId !== 'submit-final-order'
+      || action.chainAuthorizationActionId !== 'submit-final-order'
+      || !Number.isInteger(Number(action.expectedItemCount))
+      || Number(action.expectedItemCount) < 1
+    )) throw new Error('mission_plan_pending_order_continuation_invalid');
     if (action.awaitMerchantOrderConfirmation === true && (
       action.type !== 'inspect'
       || action.expectedMilestone !== 'order_submitted'
@@ -366,6 +396,46 @@ function assertLocalMissionAuthority(session = {}) {
   }
   if (!session.missionBoundAuth?.capabilityId || !session.missionBoundAuth?.tokenHash) {
     throw new Error('mission_capability_missing');
+  }
+  return session;
+}
+
+function normalizeFinalSubmitAuthorityLease(lease = null) {
+  const sessionId = String(lease?.sessionId || '').trim();
+  const planHash = String(lease?.planHash || '').trim();
+  const actionId = String(lease?.actionId || '').trim();
+  const verifiedAt = Number(lease?.verifiedAt || 0);
+  if (!sessionId || !planHash || !actionId || !Number.isFinite(verifiedAt) || verifiedAt <= 0) return null;
+  return { sessionId, planHash, actionId, verifiedAt };
+}
+
+function issueFinalSubmitAuthorityLease(session = {}, plan = {}, action = {}) {
+  const sessionId = String(session.id || '').trim();
+  const planHash = String(plan.planHash || '').trim();
+  const actionId = String(action.id || '').trim();
+  if (!sessionId || !planHash || !actionId || action.type !== 'final_submit') return null;
+  return { sessionId, planHash, actionId, verifiedAt: Date.now() };
+}
+
+function assertFinalSubmitLocalAuthority(session = {}, lease = null, plan = {}, action = {}) {
+  assertLocalMissionAuthority(session);
+  const normalizedLease = normalizeFinalSubmitAuthorityLease(lease);
+  if (!normalizedLease
+    || normalizedLease.sessionId !== String(session.id || '').trim()
+    || normalizedLease.planHash !== String(plan.planHash || '').trim()
+    || normalizedLease.actionId !== String(action.id || '').trim()) {
+    const error = new Error('final_submit_authority_lease_scope_mismatch');
+    error.code = 'final_submit_authority_lease_scope_mismatch';
+    error.finalSubmitAuthorityLease = normalizedLease;
+    throw error;
+  }
+  const ageMs = Date.now() - normalizedLease.verifiedAt;
+  if (ageMs > FINAL_SUBMIT_LOCAL_LEASE_MS) {
+    const error = new Error(`final_submit_authority_lease_expired:${Math.round(ageMs)}`);
+    error.code = 'final_submit_authority_lease_expired';
+    error.finalSubmitLeaseAgeMs = ageMs;
+    error.finalSubmitAuthorityLease = normalizedLease;
+    throw error;
   }
   return session;
 }
@@ -408,6 +478,8 @@ async function getConfig() {
     expiresAt: '',
     pluginId: RUNNER_EXTENSION_PLUGIN_ID,
     ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+    extensionId: '',
+    extensionVersion: '',
     holderPublicJwk: null,
     holderPrivateJwk: null,
     lastPollAt: '',
@@ -416,8 +488,8 @@ async function getConfig() {
     activeSessionId: '',
     activeRun: null,
     activeMissionTabs: {},
-    localCheckoutProfiles: {},
     pendingPaymentWaits: {},
+    finalOrderDispatches: {},
     useExistingBrowser: false,
     pairedAt: ''
   });
@@ -426,6 +498,89 @@ async function getConfig() {
 async function saveConfig(patch = {}) {
   await chrome.storage.local.set(patch);
   return getConfig();
+}
+
+function compactFinalOrderDispatchReceipt(receipt = {}) {
+  if (!receipt || receipt.kind !== 'final_order' || receipt.phase !== 'click_dispatched') return null;
+  const actionId = String(receipt.actionId || '').slice(0, 96);
+  const receiptScope = String(receipt.receiptScope || '').slice(0, 192);
+  if (!actionId || !receiptScope) return null;
+  return {
+    actionId,
+    actionType: String(receipt.actionType || '').slice(0, 64),
+    intent: String(receipt.intent || '').slice(0, 64),
+    receiptScope,
+    kind: 'final_order',
+    phase: 'click_dispatched',
+    controlTag: String(receipt.controlTag || '').slice(0, 32),
+    controlType: String(receipt.controlType || '').slice(0, 32),
+    path: String(receipt.path || '').slice(0, 240),
+    at: receipt.at || new Date().toISOString()
+  };
+}
+
+function mergeBrowserActionReceipts(...receiptLists) {
+  const receiptsByIdentity = new Map();
+  for (const receipt of receiptLists.flat()) {
+    if (!receipt || typeof receipt !== 'object' || !receipt.kind || !receipt.at) continue;
+    const identity = [
+      receipt.actionId || '',
+      receipt.receiptScope || '',
+      receipt.kind || '',
+      receipt.phase || '',
+      receipt.at || ''
+    ].join('|');
+    receiptsByIdentity.set(identity, receipt);
+  }
+  return [...receiptsByIdentity.values()]
+    .sort((left, right) => String(left.at || '').localeCompare(String(right.at || '')))
+    .slice(-24);
+}
+
+async function saveFinalOrderDispatchReceipt(tabId, receipt) {
+  const normalizedTabId = Number(tabId || 0);
+  const compactReceipt = compactFinalOrderDispatchReceipt(receipt);
+  if (!normalizedTabId || !compactReceipt) return { saved: false };
+  const config = await getConfig();
+  const dispatches = config.finalOrderDispatches && typeof config.finalOrderDispatches === 'object'
+    ? { ...config.finalOrderDispatches }
+    : {};
+  const tabKey = String(normalizedTabId);
+  const existing = Array.isArray(dispatches[tabKey])
+    ? dispatches[tabKey]
+    : dispatches[tabKey]
+      ? [dispatches[tabKey]]
+      : [];
+  dispatches[tabKey] = [...existing.filter((entry) => entry?.receiptScope !== compactReceipt.receiptScope), compactReceipt].slice(-8);
+  await saveConfig({ finalOrderDispatches: dispatches });
+  return { saved: true, receipt: compactReceipt };
+}
+
+async function finalOrderDispatchReceiptFor(tabId, receiptScope = '') {
+  const config = await getConfig();
+  const stored = config.finalOrderDispatches?.[String(Number(tabId || 0))] || null;
+  const receipts = Array.isArray(stored) ? stored : stored ? [stored] : [];
+  return receipts.find((receipt) => receipt?.receiptScope === String(receiptScope || '')) || null;
+}
+
+function normalizeActiveRunCartEvidence(evidence = null) {
+  if (!evidence || typeof evidence !== 'object') return null;
+  const sessionId = String(evidence.sessionId || '').trim();
+  const planHash = String(evidence.planHash || '').trim();
+  const asin = String(evidence.asin || '').trim().slice(0, 32);
+  const title = String(evidence.title || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+  const price = Number(evidence.price);
+  const quantity = Number(evidence.quantity);
+  if (!sessionId || !planHash || (!asin && !title) || !Number.isInteger(quantity) || quantity < 1) return null;
+  return {
+    sessionId,
+    planHash,
+    asin: asin || null,
+    title: title || null,
+    price: Number.isFinite(price) && price > 0 ? price : null,
+    quantity,
+    verifiedAt: String(evidence.verifiedAt || '').slice(0, 48) || null
+  };
 }
 
 function normalizeActiveRunCandidate(candidate = null) {
@@ -441,6 +596,51 @@ function normalizeActiveRunCandidate(candidate = null) {
   };
 }
 
+function normalizedProductIdentityText(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function verifiedCartEvidenceFor(report = {}, candidate = null, session = {}, plan = {}) {
+  if (!candidate || report?.checkoutSummary?.stage !== 'cart') return null;
+  const summary = report.checkoutSummary || {};
+  if (Number(summary.cartItemCount) !== 1) return null;
+  const items = Array.isArray(summary.cartItems) ? summary.cartItems : [];
+  if (items.length !== 1) return null;
+  const item = items[0] || {};
+  const candidateAsin = String(candidate.asin || '').trim();
+  const itemAsin = String(item.asin || '').trim();
+  const candidateTitle = normalizedProductIdentityText(candidate.title || '');
+  const itemTitle = normalizedProductIdentityText(item.title || '');
+  const identityMatches = candidateAsin && itemAsin
+    ? candidateAsin === itemAsin
+    : Boolean(candidateTitle && itemTitle && candidateTitle === itemTitle);
+  if (!identityMatches) return null;
+  const candidatePrice = Number(candidate.price);
+  const itemPrice = Number(item.price);
+  if (Number.isFinite(candidatePrice) && candidatePrice > 0
+    && Number.isFinite(itemPrice) && itemPrice > 0
+    && Math.abs(candidatePrice - itemPrice) > 0.005) return null;
+  const quantity = Number.isInteger(Number(item.quantity)) && Number(item.quantity) > 0
+    ? Number(item.quantity)
+    : Number(summary.cartItemCount);
+  if (quantity !== 1) return null;
+  return normalizeActiveRunCartEvidence({
+    sessionId: session.id,
+    planHash: plan.planHash,
+    asin: candidateAsin || itemAsin,
+    title: item.title || candidate.title,
+    price: Number.isFinite(itemPrice) && itemPrice > 0 ? itemPrice : candidatePrice,
+    quantity,
+    verifiedAt: new Date().toISOString()
+  });
+}
+
+function normalizeActiveRunEvidenceLabels(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 96))
+    .filter(Boolean))].slice(0, 32);
+}
+
 function normalizeActiveRun(entry = null) {
   const sessionId = String(entry?.sessionId || '').trim();
   if (!sessionId) return null;
@@ -448,15 +648,42 @@ function normalizeActiveRun(entry = null) {
     sessionId,
     planHash: String(entry?.planHash || '').trim() || null,
     phase: String(entry?.phase || 'claimed').trim() || 'claimed',
+    progressLabel: String(entry?.progressLabel || '').replace(/\s+/g, ' ').trim().slice(0, 120) || null,
+    progressState: String(entry?.progressState || '').trim().slice(0, 64) || null,
+    progressSequence: Math.max(0, Number(entry?.progressSequence || 0) || 0),
+    progressUpdatedAt: String(entry?.progressUpdatedAt || '').trim().slice(0, 48) || null,
+    startupTiming: entry?.startupTiming && typeof entry.startupTiming === 'object'
+      ? Object.fromEntries(Object.entries(entry.startupTiming)
+          .filter(([key, value]) => /^[a-z][a-zA-Z0-9]{0,63}$/.test(key)
+            && (typeof value === 'string' || Number.isFinite(Number(value))))
+          .slice(0, 24))
+      : null,
     tabId: Number(entry?.tabId || 0) || null,
     actionId: String(entry?.actionId || '').trim() || null,
     actionIndex: Number.isInteger(Number(entry?.actionIndex)) ? Number(entry.actionIndex) : null,
     nextActionIndex: Number.isInteger(Number(entry?.nextActionIndex)) ? Number(entry.nextActionIndex) : null,
     selectedCandidate: normalizeActiveRunCandidate(entry?.selectedCandidate),
+    cartEvidence: normalizeActiveRunCartEvidence(entry?.cartEvidence),
+    safeFieldsFilled: normalizeActiveRunEvidenceLabels(entry?.safeFieldsFilled),
+    checkoutSelections: normalizeActiveRunEvidenceLabels(entry?.checkoutSelections),
     waitExpiresAt: String(entry?.waitExpiresAt || '').trim() || null,
     merchantConfirmationStartedAt: String(entry?.merchantConfirmationStartedAt || '').trim() || null,
     merchantConfirmationDeadlineAt: String(entry?.merchantConfirmationDeadlineAt || '').trim() || null,
     merchantConfirmationAttempts: Math.max(0, Number(entry?.merchantConfirmationAttempts || 0) || 0),
+    finalSubmitAuthorityLease: normalizeFinalSubmitAuthorityLease(entry?.finalSubmitAuthorityLease),
+    workerId: String(entry?.workerId || '').trim() || null,
+    workerStartedAt: String(entry?.workerStartedAt || '').trim() || null,
+    lastAwaitedOperation: entry?.lastAwaitedOperation && typeof entry.lastAwaitedOperation === 'object'
+      ? {
+          kind: String(entry.lastAwaitedOperation.kind || '').slice(0, 64),
+          target: String(entry.lastAwaitedOperation.target || '').slice(0, 240),
+          status: String(entry.lastAwaitedOperation.status || '').slice(0, 32),
+          workerId: String(entry.lastAwaitedOperation.workerId || '').slice(0, 96),
+          startedAt: String(entry.lastAwaitedOperation.startedAt || '').slice(0, 48),
+          updatedAt: String(entry.lastAwaitedOperation.updatedAt || '').slice(0, 48),
+          error: String(entry.lastAwaitedOperation.error || '').slice(0, 240) || null
+        }
+      : null,
     startedAt: String(entry?.startedAt || '').trim() || new Date().toISOString(),
     updatedAt: String(entry?.updatedAt || '').trim() || new Date().toISOString()
   };
@@ -473,15 +700,41 @@ async function saveActiveRun(patch = {}) {
   const sessionId = String(patch.sessionId || current?.sessionId || '').trim();
   if (!sessionId) throw new Error('active_run_session_required');
   const now = new Date().toISOString();
+  const progressChanged = patch.progressLabel !== undefined || patch.progressState !== undefined;
   const activeRun = normalizeActiveRun({
     ...(current?.sessionId === sessionId ? current : {}),
     ...patch,
     sessionId,
+    workerId: RUNNER_WORKER_ID,
+    workerStartedAt: RUNNER_WORKER_STARTED_AT,
+    progressSequence: progressChanged ? Number(current?.progressSequence || 0) + 1 : current?.progressSequence,
+    progressUpdatedAt: progressChanged ? now : current?.progressUpdatedAt,
     startedAt: patch.startedAt || (current?.sessionId === sessionId ? current.startedAt : now),
     updatedAt: now
   });
   await saveConfig({ activeSessionId: sessionId, activeRun });
   return activeRun;
+}
+
+async function recordAwaitedOperation(kind, target, status, { startedAt = '', error = '' } = {}) {
+  const activeRun = await getActiveRun();
+  if (!activeRun?.sessionId) return null;
+  if (kind === 'control_plane_request'
+    && !String(target || '').includes(`/connectors/sessions/${encodeURIComponent(activeRun.sessionId)}`)) {
+    return null;
+  }
+  const now = new Date().toISOString();
+  return saveActiveRun({
+    lastAwaitedOperation: {
+      kind,
+      target,
+      status,
+      workerId: RUNNER_WORKER_ID,
+      startedAt: startedAt || now,
+      updatedAt: now,
+      error
+    }
+  });
 }
 
 async function clearActiveRun(sessionId = '') {
@@ -527,48 +780,97 @@ function normalizeLocalCheckoutProfile(profile = {}) {
   };
 }
 
-async function setLocalCheckoutProfile({ sessionId = '', profile = {}, expiresAt = '' } = {}, sender = null) {
+function localCheckoutProfileStore() {
+  const store = chrome.storage?.session;
+  if (!store?.get || !store?.set || !store?.remove) {
+    throw new Error('local_profile_session_storage_unavailable');
+  }
+  return store;
+}
+
+async function readLocalCheckoutProfiles() {
+  const store = localCheckoutProfileStore();
+  const stored = await store.get({ [LOCAL_CHECKOUT_PROFILE_STORAGE_KEY]: {} });
+  const profiles = { ...(stored?.[LOCAL_CHECKOUT_PROFILE_STORAGE_KEY] || {}) };
+  if (Object.keys(profiles).length) return { store, profiles };
+  // Older releases retained vault-derived checkout data in persistent local
+  // storage. Do not revive it across the upgrade: a fresh, session-bound
+  // vault handoff is required before another checkout can use those details.
+  await chrome.storage.local.remove('localCheckoutProfiles').catch(() => null);
+  return { store, profiles };
+}
+
+async function writeLocalCheckoutProfiles(store, profiles = {}) {
+  await store.set({ [LOCAL_CHECKOUT_PROFILE_STORAGE_KEY]: profiles });
+}
+
+async function purgeLegacyLocalCheckoutProfiles() {
+  // Older releases kept private checkout cues in persistent local storage.
+  // Never migrate them: a fresh vault handoff is required after this upgrade.
+  await chrome.storage.local.remove('localCheckoutProfiles').catch(() => null);
+}
+
+async function setLocalCheckoutProfile({ sessionId = '', profile = {}, planHash = '' } = {}, sender = null) {
   const config = await getConfig();
   const senderOrigin = String(sender?.origin || '').replace(/\/+$/, '');
   if (!config.deviceToken || senderOrigin !== normalizeBaseUrl(config.baseUrl)) throw new Error('local_profile_origin_not_allowed');
   const id = String(sessionId || '').trim().slice(0, 160);
   if (!id) throw new Error('local_profile_session_required');
-  const candidateExpiry = Date.parse(expiresAt || '');
-  const now = Date.now();
-  const maxExpiry = now + 10 * 60 * 1000;
-  const resolvedExpiry = Number.isFinite(candidateExpiry)
-    ? Math.min(Math.max(candidateExpiry, now + 60_000), maxExpiry)
-    : now + 8 * 60 * 1000;
+  const now = new Date().toISOString();
   const normalized = normalizeLocalCheckoutProfile(profile);
   if (!Object.values(normalized).some((entry) => typeof entry === 'string' && entry.trim())) throw new Error('local_profile_empty');
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
-  localCheckoutProfiles[id] = { profile: normalized, expiresAt: new Date(resolvedExpiry).toISOString() };
-  for (const [staleId] of Object.entries(localCheckoutProfiles).slice(0, -2)) delete localCheckoutProfiles[staleId];
-  await saveConfig({ localCheckoutProfiles });
-  return { stored: true, sessionId: id, expiresAt: new Date(resolvedExpiry).toISOString() };
+  const { store, profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
+  localCheckoutProfiles[id] = {
+    profile: normalized,
+    planHash: String(planHash || '').trim() || null,
+    createdAt: localCheckoutProfiles[id]?.createdAt || now,
+    updatedAt: now
+  };
+  const retainedEntries = Object.entries(localCheckoutProfiles)
+    .sort(([, left], [, right]) => String(right?.updatedAt || '').localeCompare(String(left?.updatedAt || '')))
+    .slice(0, 2);
+  const retainedProfiles = Object.fromEntries(retainedEntries);
+  await writeLocalCheckoutProfiles(store, retainedProfiles);
+  await purgeLegacyLocalCheckoutProfiles();
+  return { stored: true, sessionId: id, planHash: String(planHash || '').trim() || null };
 }
 
-async function getLocalCheckoutProfile(sessionId = '') {
-  const config = await getConfig();
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
-  const id = String(sessionId || '');
+async function bindLocalCheckoutProfileToPlan(sessionId = '', planHash = '') {
+  const id = String(sessionId || '').trim();
+  const expectedPlanHash = String(planHash || '').trim();
+  if (!id || !expectedPlanHash) return null;
+  const { store, profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
+  const entry = localCheckoutProfiles[id];
+  if (!entry?.profile) return null;
+  // A recovery plan may be newly signed for this same session after a manual
+  // stop. Rebind the volatile profile only after the replacement plan passed
+  // validatePlanForSession; never carry it across sessions.
+  localCheckoutProfiles[id] = {
+    ...entry,
+    planHash: expectedPlanHash,
+    updatedAt: new Date().toISOString()
+  };
+  await writeLocalCheckoutProfiles(store, localCheckoutProfiles);
+  return normalizeLocalCheckoutProfile(entry.profile);
+}
+
+async function getLocalCheckoutProfile(sessionId = '', planHash = '') {
+  const { profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
+  const id = String(sessionId || '').trim();
+  const expectedPlanHash = String(planHash || '').trim();
   const entry = localCheckoutProfiles[id];
   if (!entry) return null;
-  if (Date.parse(entry.expiresAt || '') <= Date.now()) {
-    delete localCheckoutProfiles[id];
-    await saveConfig({ localCheckoutProfiles });
-    return null;
-  }
+  if (expectedPlanHash && entry.planHash && entry.planHash !== expectedPlanHash) return null;
   return normalizeLocalCheckoutProfile(entry.profile || {});
 }
 
 async function clearLocalCheckoutProfile(sessionId = '') {
-  const config = await getConfig();
-  const localCheckoutProfiles = { ...(config.localCheckoutProfiles || {}) };
+  const { store, profiles: localCheckoutProfiles } = await readLocalCheckoutProfiles();
   const id = String(sessionId || '');
   if (!localCheckoutProfiles[id]) return;
   delete localCheckoutProfiles[id];
-  await saveConfig({ localCheckoutProfiles });
+  if (Object.keys(localCheckoutProfiles).length) await writeLocalCheckoutProfiles(store, localCheckoutProfiles);
+  else await store.remove(LOCAL_CHECKOUT_PROFILE_STORAGE_KEY);
 }
 
 async function getPendingPaymentWait(sessionId = '') {
@@ -597,6 +899,9 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
+  let text = '';
+  const operationStartedAt = new Date().toISOString();
+  await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'started', { startedAt: operationStartedAt }).catch(() => null);
   try {
     response = await fetch(`${normalizeBaseUrl(config.baseUrl)}${path}`, {
       method,
@@ -605,11 +910,21 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
         ...(body ? { 'content-type': 'application/json' } : {}),
         'x-magic-city-runner-surface': 'chrome-extension',
         'x-magic-city-runner-protocol': RUNNER_PROTOCOL,
+        'x-magic-city-runner-extension-id': chrome.runtime.id || '',
+        'x-magic-city-runner-extension-version': chrome.runtime.getManifest().version,
         ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
       },
       body: body ? JSON.stringify(body) : undefined
     });
+    // Keep the deadline active through the response body. Headers alone do
+    // not complete a control-plane request and a stalled body must not strand
+    // an active browser mission indefinitely.
+    text = await response.text();
   } catch (error) {
+    await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'failed', {
+      startedAt: operationStartedAt,
+      error: error?.message || String(error)
+    }).catch(() => null);
     if (error?.name === 'AbortError') {
       const timeoutError = new Error(`runner_api_timeout:${path}`);
       timeoutError.retryable = true;
@@ -620,7 +935,7 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
   } finally {
     clearTimeout(timer);
   }
-  const text = await response.text();
+  await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'completed', { startedAt: operationStartedAt }).catch(() => null);
   let data = {};
   try {
     data = text ? JSON.parse(text) : {};
@@ -663,15 +978,25 @@ async function retryTransientControlPlane(task) {
 }
 
 function scheduleRunnerResume(delayMs = RUNNER_CONTINUATION_DELAY_MS) {
-  // This is intentionally a single active-mission alarm. The gateway resumes
-  // only the persisted user-authorized run; it never discovers new work.
+  // Installed MV3 extensions clamp short alarms to roughly 30 seconds. This
+  // alarm is crash recovery only; the live external port owns normal forward
+  // progress for a user-started mission.
   void chrome.alarms.create(RESUME_ALARM, {
-    when: Date.now() + Math.max(1_000, Number(delayMs) || RUNNER_CONTINUATION_DELAY_MS)
+    when: Date.now() + Math.max(30_000, Number(delayMs) || RUNNER_CONTINUATION_DELAY_MS)
   }).catch(() => {});
 }
 
 function isExecutionCancelledError(error) {
   return String(error?.message || error || '').trim().toLowerCase() === 'execution_cancelled';
+}
+
+function isFinalSubmitPolicyError(error) {
+  const message = String(error?.message || error || '').trim().toLowerCase();
+  const code = String(error?.code || '').trim().toLowerCase();
+  return code.startsWith('final_submit_')
+    || message.startsWith('final_submit_')
+    || message.startsWith('mission_final_submit_')
+    || message === 'mission_action_requires_user_approval';
 }
 
 async function extensionHostPermissions() {
@@ -718,7 +1043,22 @@ async function registerExecutor(config = null) {
   const current = config || await getConfig();
   if (!current.deviceToken) throw new Error('runner_not_paired');
   const origins = await extensionHostPermissions();
-  return api('/plugins/register', {
+  const registrationKey = stableJson({
+    baseUrl: normalizeBaseUrl(current.baseUrl),
+    deviceId: current.deviceId || '',
+    deviceToken: current.deviceToken,
+    extensionId: chrome.runtime.id || '',
+    extensionVersion: chrome.runtime.getManifest().version,
+    origins: [...origins].sort()
+  });
+  if (executorRegistrationCache?.key === registrationKey
+    && executorRegistrationCache.validUntil > Date.now()) {
+    return { ...executorRegistrationCache.result, registrationReused: true };
+  }
+  if (executorRegistrationInFlight?.key === registrationKey) {
+    return executorRegistrationInFlight.promise;
+  }
+  const registrationPromise = api('/plugins/register', {
     method: 'POST',
     bearer: current.deviceToken,
     body: {
@@ -760,6 +1100,23 @@ async function registerExecutor(config = null) {
       }
     }
   });
+  executorRegistrationInFlight = { key: registrationKey, promise: registrationPromise };
+  try {
+    const result = await registrationPromise;
+    executorRegistrationCache = {
+      key: registrationKey,
+      result,
+      validUntil: Date.now() + EXECUTOR_REGISTRATION_REUSE_MS
+    };
+    return result;
+  } finally {
+    if (executorRegistrationInFlight?.promise === registrationPromise) executorRegistrationInFlight = null;
+  }
+}
+
+function invalidateExecutorRegistration() {
+  executorRegistrationCache = null;
+  executorRegistrationInFlight = null;
 }
 
 async function pollSessions() {
@@ -859,13 +1216,18 @@ function isRetryableNavigationError(error = null) {
 }
 
 async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeoutLabel = 'browser_navigation_timeout' } = {}) {
+  const operationStartedAt = new Date().toISOString();
+  await recordAwaitedOperation('navigation', targetUrl, 'started', { startedAt: operationStartedAt }).catch(() => null);
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const before = await chrome.tabs.get(tabId);
     const beforeUrl = String(before?.url || '');
     // Reusing a mission tab is normal. Opening the already-approved target is
     // an idempotent success, not a navigation failure.
-    if (navigationTargetMatches(beforeUrl, targetUrl)) return before;
+    if (navigationTargetMatches(beforeUrl, targetUrl)) {
+      await recordAwaitedOperation('navigation', targetUrl, 'completed', { startedAt: operationStartedAt }).catch(() => null);
+      return before;
+    }
 
     const navigation = waitForTabNavigation(tabId, beforeUrl, timeoutMs);
     try {
@@ -878,12 +1240,14 @@ async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeout
       current = await chrome.tabs.get(tabId).catch(() => current || updatedTab);
       const currentUrl = String(current?.url || '');
       if (!currentUrl || currentUrl === 'about:blank') throw new Error('browser_navigation_unconfirmed');
+      await recordAwaitedOperation('navigation', targetUrl, 'completed', { startedAt: operationStartedAt }).catch(() => null);
       return current;
     } catch (error) {
       lastError = error;
       navigation.cancel?.();
       const observed = await chrome.tabs.get(tabId).catch(() => null);
       if (observed?.url && observed.url !== 'about:blank' && navigationTargetMatches(observed.url, targetUrl)) {
+        await recordAwaitedOperation('navigation', targetUrl, 'completed', { startedAt: operationStartedAt }).catch(() => null);
         return observed;
       }
       if (attempt === 0 && isRetryableNavigationError(error)) {
@@ -893,6 +1257,10 @@ async function navigateMissionTab(tabId, targetUrl, { timeoutMs = 8_000, timeout
       break;
     }
   }
+  await recordAwaitedOperation('navigation', targetUrl, 'failed', {
+    startedAt: operationStartedAt,
+    error: lastError?.message || timeoutLabel || 'browser_navigation_timeout'
+  }).catch(() => null);
   throw new Error(lastError?.message || timeoutLabel || 'browser_navigation_timeout');
 }
 
@@ -944,6 +1312,9 @@ async function tabCommand(tabId, command, {
   responseTimeoutMs = TAB_COMMAND_TIMEOUT_MS,
   deadlineMs = 0
 } = {}) {
+  const operationTarget = `${String(command?.type || 'unknown')}:tab-${Number(tabId || 0)}`;
+  const operationStartedAt = new Date().toISOString();
+  await recordAwaitedOperation('tab_message', operationTarget, 'started', { startedAt: operationStartedAt }).catch(() => null);
   const remainingBeforeInjectionMs = remainingDeadlineMs(deadlineMs);
   if (remainingBeforeInjectionMs != null && remainingBeforeInjectionMs < 1) {
     throw new Error('browser_command_deadline_exceeded');
@@ -966,11 +1337,21 @@ async function tabCommand(tabId, command, {
   const boundedResponseTimeoutMs = remainingBeforeResponseMs == null
     ? responseTimeoutMs
     : Math.max(1, Math.min(responseTimeoutMs, remainingBeforeResponseMs));
-  return withTimeout(
-    () => chrome.tabs.sendMessage(tabId, command),
-    boundedResponseTimeoutMs,
-    'browser_content_script_timeout'
-  );
+  try {
+    const result = await withTimeout(
+      () => chrome.tabs.sendMessage(tabId, command),
+      boundedResponseTimeoutMs,
+      'browser_content_script_timeout'
+    );
+    await recordAwaitedOperation('tab_message', operationTarget, 'completed', { startedAt: operationStartedAt }).catch(() => null);
+    return result;
+  } catch (error) {
+    await recordAwaitedOperation('tab_message', operationTarget, 'failed', {
+      startedAt: operationStartedAt,
+      error: error?.message || String(error)
+    }).catch(() => null);
+    throw error;
+  }
 }
 
 async function amazonSearchCardAddToCart(tabId, action = {}) {
@@ -1144,42 +1525,64 @@ async function amazonSearchCardAddToCart(tabId, action = {}) {
   return result?.[0]?.result || null;
 }
 
-async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null) {
+async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null, cartUrl = '') {
   // Keep the result-card click and cart entry inside one local browser turn.
   // Amazon may render either an inline side cart or a full-page "Added to
   // cart" confirmation. Crossing a signed checkpoint between those two
   // controls lets MV3 suspend the worker while the obvious Go to Cart button
   // is already visible.
-  await delay(300);
-  let before = await chrome.tabs.get(tabId).catch(() => ({ url: '', status: '' }));
-  if (before.status === 'loading') {
-    await waitForTabReady(tabId, 3_500).catch(() => null);
-    before = await chrome.tabs.get(tabId).catch(() => before);
-  }
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const outcome = await tabCommand(tabId, {
-      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
-      action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true },
-      checkoutProfile
-    }, { injectionTimeoutMs: 4_000, responseTimeoutMs: 4_000 }).catch(() => null);
-    if (outcome?.completed && !outcome.cartFallbackRequested) {
-      if (outcome.navigationRequested && !outcome.skipped) {
-        await waitForTabUrlChange(tabId, before.url, 2_500)
-          .catch(() => waitForTabNavigation(tabId, before.url, 1_500).catch(() => null));
-        await waitForTabReady(tabId, 3_500).catch(() => null);
-      }
-      const state = await tabBrowserState(tabId, checkoutProfile, { attempts: 3, delayMs: 180 }).catch(() => outcome.state || null);
-      return {
-        advanced: true,
-        outcome,
-        state,
-        attempts: attempt + 1
-      };
+  await delay(120);
+  const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+  const outcome = await tabCommand(tabId, {
+    type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+    action: {
+      type: 'navigate',
+      intent: 'open_cart',
+      preferExistingCartControl: true,
+      url: cartUrl
+    },
+    checkoutProfile
+  }, { injectionTimeoutMs: 2_500, responseTimeoutMs: 2_500 }).catch(() => null);
+  if (outcome?.completed && !outcome.cartFallbackRequested) {
+    if (outcome.navigationRequested && !outcome.skipped) {
+      await waitForTabUrlChange(tabId, before.url, 2_000).catch(() => null);
     }
-    await delay(300);
-    before = await chrome.tabs.get(tabId).catch(() => before);
+    return {
+      advanced: true,
+      outcome,
+      state: outcome.state || null,
+      attempts: 1
+    };
   }
-  return { advanced: false, outcome: null, state: null, attempts: 3 };
+  // The URL is part of the signed open-cart plan action. When Amazon did not
+  // expose an exact live cart control, navigate there immediately instead of
+  // spending several command timeouts re-probing the same search page.
+  const fallbackUrl = withAmazonEnglishLocale(cartUrl || 'https://www.amazon.com/gp/cart/view.html');
+  const fallbackTab = await navigateMissionTab(tabId, fallbackUrl, {
+    timeoutMs: 5_000,
+    timeoutLabel: 'browser_cart_fallback_navigation_timeout'
+  }).catch(() => null);
+  if (!fallbackTab) return { advanced: false, outcome, state: null, attempts: 1 };
+  return {
+    advanced: true,
+    outcome: {
+      ...(outcome || {}),
+      completed: true,
+      navigationRequested: true,
+      cartFallbackRequested: true,
+      controlStrategy: 'stable_cart_fallback'
+    },
+    state: {
+      url: fallbackTab.url || fallbackUrl,
+      title: fallbackTab.title || '',
+      browserState: 'browse',
+      browserStateConfidence: 0,
+      browserStateReason: 'The signed Amazon cart URL opened after no exact live cart control was available.',
+      checkoutSummary: { stage: 'browse', nextAction: 'Inspecting cart' },
+      navigationReady: true
+    },
+    attempts: 1
+  };
 }
 
 async function tabBrowserState(tabId, checkoutProfile = null, {
@@ -1327,8 +1730,9 @@ async function recoverAmazonCheckoutPrelude(tabId, plan = {}, outcome = {}) {
   };
 }
 
-async function missionCheckpoint(session, { label, detail, state, missionAction, targetUrl, browser = null, plan = null, planAction = null, planActionStatus = 'completed' }) {
+async function missionCheckpoint(session, { label, detail, state, missionAction, targetUrl, browser = null, plan = null, planAction = null, planActionStatus = 'completed', runnerTiming = null }) {
   const config = await getConfig();
+  const checkpointRequestedAt = new Date().toISOString();
   const proofOfPossession = await buildProofOfPossession(session, { action: missionAction, targetUrl });
   const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/checkpoint`, {
     method: 'POST',
@@ -1341,6 +1745,11 @@ async function missionCheckpoint(session, { label, detail, state, missionAction,
       missionAction: normalizeMissionAction(missionAction),
       targetUrl,
       ...(browser ? { browser } : {}),
+      runnerTiming: {
+        workerStartedAt: RUNNER_WORKER_STARTED_AT,
+        checkpointRequestedAt,
+        ...(runnerTiming && typeof runnerTiming === 'object' ? runnerTiming : {})
+      },
       ...(plan ? { planHash: plan.planHash } : {}),
       ...(planAction ? {
         planActionId: planAction.id,
@@ -1356,6 +1765,26 @@ async function missionCheckpoint(session, { label, detail, state, missionAction,
   // that checkpoint lands, so an MV3 restart resumes the next signed action.
   scheduleRunnerResume();
   return data.session || session;
+}
+
+async function checkpointRunnerStartup(session, plan, nextAction, startupTiming = null) {
+  // This is deliberately non-advancing. It closes the MV3 gap between a
+  // successful server-side claim and the first browser operation, while the
+  // signed open-site action remains the next action to execute.
+  return missionCheckpoint(session, {
+    label: 'Opening browser',
+    detail: 'Magic City Runner claimed this mission and is preparing Chrome.',
+    state: 'running',
+    missionAction: nextAction.missionAction,
+    targetUrl: plan.startUrl,
+    plan,
+    planAction: nextAction,
+    planActionStatus: 'waiting',
+    runnerTiming: {
+      phase: 'startup',
+      ...(startupTiming && typeof startupTiming === 'object' ? startupTiming : {})
+    }
+  });
 }
 
 function verifiedCheckoutHandoff(report = {}) {
@@ -1380,6 +1809,67 @@ async function assertRunnerSessionActive(session) {
   return data.session || session;
 }
 
+function persistedFinalSubmitCursorMatches(session = {}, plan = {}, action = {}) {
+  const planState = session.extensionMissionPlanState || {};
+  const actionIndex = Number(planState.nextActionIndex);
+  if (planState.planHash !== plan.planHash || !Number.isInteger(actionIndex) || actionIndex < 0) return false;
+  const persistedAction = plan.actions?.[actionIndex];
+  if (persistedAction?.type !== 'final_submit' || persistedAction.id !== action.id) return false;
+  const previousAction = plan.actions?.[actionIndex - 1] || null;
+  if (!previousAction) return false;
+  const completedActionIds = new Set(Array.isArray(planState.completedActionIds) ? planState.completedActionIds : []);
+  if (!completedActionIds.has(previousAction.id)) return false;
+  if (previousAction.expectedMilestone) {
+    const milestones = new Set(Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : []);
+    if (!milestones.has(previousAction.expectedMilestone)) return false;
+  }
+  return true;
+}
+
+async function recoverMissingFinalSubmitAuthorityLease(session, plan, action) {
+  const refreshedSession = await assertRunnerSessionActive(session);
+  const refreshedPlan = await validatePlanForSession(refreshedSession);
+  if (refreshedPlan.planHash !== plan.planHash
+    || !persistedFinalSubmitCursorMatches(refreshedSession, refreshedPlan, action)) {
+    return { session: refreshedSession, lease: null };
+  }
+  assertLocalMissionAuthority(refreshedSession);
+  return {
+    session: refreshedSession,
+    lease: issueFinalSubmitAuthorityLease(refreshedSession, refreshedPlan, action)
+  };
+}
+
+async function assertFinalSubmitChainAuthorization(session, plan, action) {
+  const config = await getConfig();
+  let lastError = null;
+  // The anchor was started with the mission, so this is normally one fast
+  // status read. A healthy chain that is still settling gets a short bounded
+  // wait; an explicitly unavailable Sepolia endpoint is a signed-local
+  // fail-open, never an Amazon checkout failure.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/final-submit-chain-authorization`, {
+        method: 'POST',
+        bearer: config.deviceToken,
+        body: {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          planHash: plan.planHash,
+          actionId: action.chainAuthorizationActionId || action.id
+        },
+        timeoutMs: 10_000
+      });
+      if (data.ready === true) return data.session || session;
+      lastError = new Error('final_submit_chain_authorization_pending');
+    } catch (error) {
+      lastError = error;
+      if (!/final_submit_chain_authorization_pending/.test(String(error?.message || ''))) throw error;
+    }
+    await delay(900);
+  }
+  throw lastError || new Error('final_submit_chain_authorization_pending');
+}
+
 async function claimSession(session) {
   if (session.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID && session.missionBoundAuth?.confirmation?.method === 'proof-of-possession') {
     return session;
@@ -1400,7 +1890,20 @@ async function claimSession(session) {
 async function fulfillSession(session, report, note = '', plan = null) {
   const config = await getConfig();
   const finalUrl = report.finalUrl || report.url || getTargetUrl(session);
-  const orderSubmitted = Boolean(report.orderSubmitted);
+  const orderSubmitted = hasConfirmedMerchantOrder(report);
+  if (orderSubmitted) {
+    // Amazon's confirmation page is stronger evidence than a later stale
+    // checkout-picker observation. Preserve the terminal fact end to end.
+    report.orderSubmitted = true;
+    report.finalSubmitRequested = true;
+    report.stopState = 'order_submitted';
+    report.fulfillmentStatus = 'fulfilled';
+    report.fundingDisposition = 'capture';
+    report.checkoutSummary = {
+      ...(report.checkoutSummary || {}),
+      orderSubmitted: true
+    };
+  }
   const finalSubmitRequested = Boolean(report.finalSubmitRequested);
   const finalBoundary = stopForBoundary(report, plan);
   if (finalBoundary) {
@@ -1412,12 +1915,16 @@ async function fulfillSession(session, report, note = '', plan = null) {
     }
   }
   const proofOfPossession = await buildProofOfPossession(session, { action: 'handoff', targetUrl: finalUrl });
-  const fulfillmentStatus = report.fulfillmentStatus === 'fulfilled' ? 'fulfilled' : 'failed';
+  const fulfillmentStatus = orderSubmitted || report.fulfillmentStatus === 'fulfilled' ? 'fulfilled' : 'failed';
+  const requiresManualFinalReview = planRequiresManualFinalReview(plan);
+  const finalApprovalRequired = !orderSubmitted && !finalSubmitRequested && requiresManualFinalReview;
   const completionState = fulfillmentStatus === 'failed'
     ? 'needs_attention'
     : orderSubmitted ? 'completed'
       : finalSubmitRequested ? 'waiting_on_confirmation'
-        : report.addToCartClicked || report.checkoutOpened ? 'waiting_on_user' : 'handoff_ready';
+        : finalApprovalRequired || report.loginRequired || report.paymentRequired
+          ? 'waiting_on_user'
+          : 'handoff_ready';
   const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/fulfill`, {
     method: 'POST',
     bearer: config.deviceToken,
@@ -1448,19 +1955,20 @@ async function fulfillSession(session, report, note = '', plan = null) {
           localCheckoutProfileAvailable: Boolean(report.localCheckoutProfileAvailable),
           loginRequired: Boolean(report.loginRequired),
           paymentRequired: Boolean(report.paymentRequired),
-          finalApprovalRequired: !orderSubmitted && !finalSubmitRequested,
+          finalApprovalRequired,
           finalSubmitRequested,
           orderSubmitted,
           rawCredentialsAccess: false,
           rawPaymentAccess: false
         },
         completionState,
-        needsUserHandoff: !orderSubmitted && !finalSubmitRequested,
+        needsUserHandoff: !orderSubmitted && !finalSubmitRequested
+          && (finalApprovalRequired || Boolean(report.loginRequired) || Boolean(report.paymentRequired)),
         targetUrl: getTargetUrl(session),
         finalUrl
       },
       handoff: {
-        label: orderSubmitted ? 'Order submitted' : finalSubmitRequested ? 'Checking merchant confirmation' : report.loginRequired ? 'Sign in to continue' : report.paymentRequired ? 'Review payment and approve' : 'Review prepared checkout',
+        label: orderSubmitted ? 'Order submitted' : finalSubmitRequested ? 'Checking merchant confirmation' : report.loginRequired ? 'Sign in to continue' : report.paymentRequired ? 'Review payment and approve' : finalApprovalRequired ? 'Review prepared checkout' : 'Execution needs attention',
         url: finalUrl
       },
       notes: note || (orderSubmitted
@@ -1474,6 +1982,14 @@ async function fulfillSession(session, report, note = '', plan = null) {
     }
   });
   return data.session || session;
+}
+
+function hasConfirmedMerchantOrder(report = {}) {
+  return Boolean(
+    report?.orderSubmitted === true
+    || report?.milestoneSignals?.orderSubmitted === true
+    || report?.merchantOrderConfirmation?.confirmed === true
+  );
 }
 
 async function reportStartupFailure(session, error) {
@@ -1631,6 +2147,9 @@ function isAmazonCartContinuationUrl(value = '') {
 }
 
 function checkoutConstraintViolation(report = {}, plan = null, action = null) {
+  // A merchant order confirmation is terminal. Do not let an unreadable
+  // historical address/card picker turn a completed order into a failure.
+  if (hasConfirmedMerchantOrder(report)) return null;
   const summary = report.checkoutSummary || {};
   const stage = String(summary.stage || report.browserState || '').toLowerCase();
   const boundaryAction = action && typeof action === 'object' ? action : (report.runnerStep || {});
@@ -1658,6 +2177,19 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
     : Array.isArray(plan?.shoppingItems)
       ? Math.min(plan.shoppingItems.length, MAX_PLANNED_BASKET_ITEMS)
       : 1;
+  // The final review is an immutable checkout boundary once Amazon shows the
+  // closed delivery and payment summaries, the expected card/address match,
+  // and authoritative $0 shipping. Do not let a stale or unreadable picker
+  // observation reopen a verified checkout state.
+  const verifiedFinalReview = Boolean(
+    stage === 'final_review'
+    && summary.finalReviewReady === true
+    && summary.checkoutProfileVerified === true
+    && summary.addressMatches === true
+    && summary.cardMatches === true
+    && summary.shippingTotalEvidence?.authoritative === true
+    && parseUsdAmount(summary.shippingTotal) === 0
+  );
   if (
     budgetScope === 'incremental_cart_addition' &&
     checkoutish &&
@@ -1691,6 +2223,8 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
   const deliveryVerificationStep = boundaryActionType === 'fill_checkout_profile'
     || boundaryActionType === 'final_submit'
     || /(?:inspect-review|reconcile|verify-reviewed-checkout|submit-final-order|pause-for-user)/i.test(boundaryActionId);
+  const pendingOrderContinuationStep = boundaryAction.pendingOrderContinuation === true
+    || /^confirm-pending-order(?:-\d+)?$/i.test(boundaryActionId);
   if (deliveryPolicyStage && plan?.primeRequired === true) {
     if (summary.cartPrimeFulfillmentObserved === true && summary.cartPrimeVerified === false) {
       return {
@@ -1700,6 +2234,9 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
       };
     }
     const shippingAmount = parseUsdAmount(summary.shippingTotal);
+    const zeroShippingAuthoritative = summary.shippingTotalEvidence?.authoritative === true
+      && Number.isFinite(shippingAmount)
+      && shippingAmount <= 0.005;
     if (summary.shippingTotalEvidence?.authoritative === true && Number.isFinite(shippingAmount) && shippingAmount > 0) {
       return {
         state: 'prime_required',
@@ -1707,7 +2244,7 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
         evidence: `Prime-only checkout requires $0 delivery. Amazon currently shows ${summary.shippingTotal} shipping.`
       };
     }
-    if (deliveryVerificationStep && summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
+    if (deliveryVerificationStep && !zeroShippingAuthoritative && summary.deliverySelectionRequired === true && summary.deliveryFreeAvailable === false) {
       return {
         state: 'prime_required',
         failed: true,
@@ -1715,7 +2252,21 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
       };
     }
   }
-  if (checkoutish && summary.addressMatches === false) {
+  if (verifiedFinalReview) return null;
+  if (pendingOrderContinuationStep
+    && /\/(?:duplicateOrder|pending-order)(?:[/?#]|$)/i.test(String(report.url || report.finalUrl || ''))) {
+    return {
+      state: 'pending_order_verification_required',
+      evidence: report.runnerStep?.reason || 'Amazon requested a repeat-order confirmation, but Magic City could not verify the displayed product, quantity, and price. Review the preserved Amazon tab; no additional order click was issued.'
+    };
+  }
+  if (checkoutish && summary.addressVerification === 'unverified') {
+    return {
+      state: 'address_verification_required',
+      evidence: 'Amazon showed a delivery-address selection, but the runner could not verify the selected row. The checkout tab is preserved; no address mismatch was inferred.'
+    };
+  }
+  if (checkoutish && (summary.addressVerification === 'mismatched' || (summary.addressVerification == null && summary.addressMatches === false))) {
     return {
       state: 'checkout_profile_mismatch',
       failed: true,
@@ -1731,8 +2282,14 @@ function checkoutConstraintViolation(report = {}, plan = null, action = null) {
   return null;
 }
 
+function planRequiresManualFinalReview(plan = null) {
+  if (!plan || typeof plan !== 'object') return true;
+  if (plan?.limits?.stopBeforeFinalSubmit === true) return true;
+  return !plan.actions?.some((action) => action?.type === 'final_submit' && action.autoSubmitAfterVerifiedCheckout === true);
+}
+
 function stopForBoundary(report = {}, plan = null, action = null) {
-  if (report.finalSubmitRequested) return null;
+  if (hasConfirmedMerchantOrder(report) || report.finalSubmitRequested) return null;
   const violation = checkoutConstraintViolation(report, plan, action);
   if (violation) return violation;
   if (report.providerChallenge) return { state: 'captcha_or_challenge_required', evidence: 'Provider challenge detected.' };
@@ -1745,7 +2302,9 @@ function stopForBoundary(report = {}, plan = null, action = null) {
   if (report.paymentRequired || report.checkoutSummary?.paymentNeedsHuman) {
     return { state: 'payment_required', evidence: report.checkoutSummary?.paymentIssue || 'Payment information stays in the browser payment surface.' };
   }
-  if (report.finalApprovalVisible) return { state: 'final_approval_required', evidence: 'Final order approval is visible and was not clicked.' };
+  if (report.finalApprovalVisible && planRequiresManualFinalReview(plan)) {
+    return { state: 'final_approval_required', evidence: 'Final order approval is visible and was not clicked.' };
+  }
   return null;
 }
 
@@ -1858,7 +2417,7 @@ async function clearMissionTab(sessionId) {
   await saveConfig({ activeMissionTabs });
 }
 
-async function acquireMissionTab(sessionId, startUrl = '') {
+async function acquireMissionTab(sessionId, startUrl = '', { preferExistingCheckout = false, plan = null } = {}) {
   const existing = await activeMissionTab(sessionId);
   if (existing?.id) return existing;
   const targetDomain = domainForUrl(startUrl);
@@ -1881,17 +2440,40 @@ async function acquireMissionTab(sessionId, startUrl = '') {
       continue;
     }
     if (domainForUrl(tab.url || '') !== targetDomain) continue;
+    if (preferExistingCheckout && !isAmazonCheckoutResumeUrl(tab.url || '', plan || { targetDomain })) continue;
     delete activeMissionTabs[ownerSessionId];
     activeMissionTabs[sessionId] = tab.id;
     await saveConfig({ activeMissionTabs });
     return tab;
+  }
+  if (preferExistingCheckout) {
+    const browserTabs = await chrome.tabs.query({}).catch(() => []);
+    const resumableTab = browserTabs
+      .filter((tab) => domainForUrl(tab.url || '') === targetDomain && isAmazonCheckoutResumeUrl(tab.url || '', plan || { targetDomain }))
+      .sort((left, right) => Number(Boolean(right.active)) - Number(Boolean(left.active)) || Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
+    if (resumableTab?.id) {
+      activeMissionTabs[sessionId] = resumableTab.id;
+      await saveConfig({ activeMissionTabs });
+      return resumableTab;
+    }
   }
   if (changed) await saveConfig({ activeMissionTabs });
   return null;
 }
 
 async function reportAndStop(session, plan, report, note = '') {
-  const submitted = Boolean(report.orderSubmitted);
+  const submitted = hasConfirmedMerchantOrder(report);
+  if (submitted) {
+    report.orderSubmitted = true;
+    report.finalSubmitRequested = true;
+    report.stopState = 'order_submitted';
+    report.fulfillmentStatus = 'fulfilled';
+    report.fundingDisposition = 'capture';
+    report.checkoutSummary = {
+      ...(report.checkoutSummary || {}),
+      orderSubmitted: true
+    };
+  }
   const submitRequested = Boolean(report.finalSubmitRequested);
   const boundary = stopForBoundary(report, plan);
   if (submitted) {
@@ -1906,9 +2488,16 @@ async function reportAndStop(session, plan, report, note = '') {
       : 'The final-order click was issued, but Amazon did not confirm the order. The local tab was preserved; no completion receipt was issued.';
     report.fundingDisposition = 'release';
     report.fulfillmentStatus = 'failed';
+  } else if (report.fulfillmentStatus === 'failed' && report.stopState) {
+    // Preserve explicit terminal runner errors. In particular, a server-side
+    // final-submit rejection must be reported as such instead of being
+    // reclassified as a normal checkout boundary and later killed by the
+    // execution watchdog.
+    report.stopEvidence = report.stopEvidence || note || 'The local runner could not complete this approved browser step.';
+    report.fundingDisposition = report.fundingDisposition || 'release';
   } else if (boundary) {
-    report.stopState = boundary.state;
-    report.stopEvidence = boundary.evidence;
+    report.stopState = report.stopState || boundary.state;
+    report.stopEvidence = report.stopEvidence || boundary.evidence;
     if (boundary.failed) {
       report.fulfillmentStatus = 'failed';
       report.fundingDisposition = 'release';
@@ -1927,17 +2516,60 @@ async function reportAndStop(session, plan, report, note = '') {
       report.fundingDisposition = 'release';
     }
   }
-  const preserveForFinalReview = plan?.limits?.stopBeforeFinalSubmit !== false
-    && ['final_approval_required', 'needs_final_approval', 'review_ready'].includes(String(report.stopState || '').toLowerCase());
+  // The local fixture hosts exercise the same checkout-resume behavior in the
+  // smoke suite. Production profile retention remains Amazon-only.
+  const preserveCheckoutContext = ['amazon.com', '127.0.0.1', 'localhost'].includes(String(plan?.targetDomain || '').toLowerCase())
+    && [
+      'final_approval_required',
+      'needs_final_approval',
+      'review_ready',
+      'address_verification_required',
+      'checkout_profile_mismatch',
+      'payment_required',
+      'needs_payment',
+      'final_submit_unconfirmed',
+      'final_submit_dispatch_failed',
+      'pending_order_verification_required',
+      'local_checkout_profile_missing'
+    ].includes(String(report.stopState || '').toLowerCase());
   await fulfillSession(session, report, note, plan);
   await clearPendingPaymentWait(session.id);
   await clearActiveRun(session.id);
   // Keep ownership while the prepared merchant tab remains open. The UI can
   // focus it directly, and retries/new missions can reuse it instead of
   // creating a duplicate checkout tab.
-  if (!preserveForFinalReview) await clearLocalCheckoutProfile(session.id);
+  if (!preserveCheckoutContext) await clearLocalCheckoutProfile(session.id);
   await saveConfig({ lastExecution: { sessionId: session.id, status: report.stopState, at: new Date().toISOString() }, lastError: '' });
   return { sessionId: session.id, status: report.stopState };
+}
+
+async function reconcileCompletedPlan(session, plan, planState, checkoutProfile) {
+  const verifiedMilestones = Array.isArray(planState?.verifiedMilestones)
+    ? planState.verifiedMilestones
+    : [];
+  const tab = await activeMissionTab(session.id);
+  const browser = tab
+    ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
+    : null;
+  const orderSubmitted = verifiedMilestones.includes('order_submitted') || hasConfirmedMerchantOrder(browser);
+  return reportAndStop(session, plan, {
+    ...(browser || {}),
+    verifiedMilestones,
+    productOpened: verifiedMilestones.includes('candidate_selected'),
+    addToCartClicked: verifiedMilestones.includes('cart_confirmed'),
+    checkoutOpened: verifiedMilestones.includes('checkout_open'),
+    finalSubmitRequested: orderSubmitted || verifiedMilestones.includes('final_submit_requested'),
+    orderSubmitted,
+    ...(orderSubmitted ? {
+      merchantOrderConfirmation: {
+        confirmed: true,
+        observedAt: new Date().toISOString(),
+        reason: 'recovered_completed_plan'
+      }
+    } : {})
+  }, orderSubmitted
+    ? 'Recovered a completed signed plan from verified merchant confirmation. The order was not clicked again.'
+    : 'Recovered a completed signed plan without replaying browser actions.');
 }
 
 function mergeUnique(left = [], right = []) {
@@ -1973,7 +2605,18 @@ function observedVerifiedMilestones(report = {}, action = {}, outcome = {}, { ca
   if (action.expectedMilestone === 'cart_confirmed' && cartCountVerified && signals.cartVisible) {
     observed.push('cart_confirmed');
   }
-  if (action.expectedMilestone === 'final_submit_requested' && outcome.completed && outcome.finalSubmitRequested) {
+  if (action.expectedMilestone === 'final_submit_requested'
+    && outcome.completed
+    && outcome.finalSubmitRequested
+    && (
+      (outcome.finalSubmitReceipt?.kind === 'final_order'
+        && outcome.finalSubmitReceipt?.phase === 'click_dispatched')
+      // A worker may recover only after Amazon has already confirmed the
+      // purchase. That is stronger evidence than a local click receipt and
+      // must not be downgraded solely because the original tab navigated.
+      || outcome.orderSubmitted === true
+      || report.orderSubmitted === true
+    )) {
     observed.push('final_submit_requested');
   }
   return [...new Set(observed)];
@@ -1992,7 +2635,9 @@ function milestoneFailureReason(action = {}, report = {}, outcome = {}) {
     if (!signals.deliveryConfirmed) return 'The preferred delivery option is not confirmed yet.';
     return 'The merchant final-order review is not ready yet.';
   }
-  if (expected === 'final_submit_requested') return 'The approved final-order control was not invoked.';
+  if (expected === 'final_submit_requested') {
+    return String(outcome.reason || '').trim() || 'The approved final-order control was not invoked.';
+  }
   return `The required ${expected.replace(/_/g, ' ')} milestone was not verified.`;
 }
 
@@ -2068,13 +2713,25 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       completed: Boolean(outcome?.completed),
       skipped: Boolean(outcome?.skipped),
       safeFieldsFilled: Array.isArray(outcome?.safeFieldsFilled) ? outcome.safeFieldsFilled : [],
-      checkoutSelections: Array.isArray(outcome?.checkoutSelections) ? outcome.checkoutSelections : []
+      checkoutSelections: Array.isArray(outcome?.checkoutSelections) ? outcome.checkoutSelections : [],
+      checkoutObservation: {
+        addressMatches: outcome?.state?.checkoutSummary?.addressMatches ?? null,
+        addressVerification: outcome?.state?.checkoutSummary?.addressVerification || null,
+        addressConfirmationRequired: Boolean(outcome?.state?.checkoutSummary?.addressConfirmationRequired),
+        cardMatches: Boolean(outcome?.state?.checkoutSummary?.cardMatches),
+        paymentMethodConfirmationRequired: Boolean(outcome?.state?.checkoutSummary?.paymentMethodConfirmationRequired),
+        deliveryConfirmed: Boolean(outcome?.state?.checkoutSummary?.deliveryConfirmed)
+      }
     });
     if (!outcome?.completed) break;
     const observedSummary = outcome?.state?.checkoutSummary || {};
-    const cardSelectionNeedsReobserve = Array.isArray(outcome?.checkoutSelections)
+    const paymentConfirmationNeedsReobserve = outcome?.paymentConfirmationPending === true
+      || (Array.isArray(outcome?.checkoutSelections)
+        && outcome.checkoutSelections.some((selection) => /^confirm (matching|already-selected) payment card$/i.test(String(selection || ''))));
+    const cardSelectionNeedsReobserve = (Array.isArray(outcome?.checkoutSelections)
       && outcome.checkoutSelections.includes('matching payment card')
-      && (observedSummary.cardMatches !== true || observedSummary.paymentMethodConfirmationRequired === true);
+      && (observedSummary.cardMatches !== true || observedSummary.paymentMethodConfirmationRequired === true))
+      || paymentConfirmationNeedsReobserve;
     const addressSelectionNeedsReobserve = Array.isArray(outcome?.checkoutSelections)
       && outcome.checkoutSelections.includes('matching delivery address')
       && (observedSummary.addressMatches !== true || observedSummary.addressConfirmationRequired === true);
@@ -2089,7 +2746,7 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       // Address, card, and delivery selectors often change the DOM without a
       // navigation. Re-observe those immediately; reserve the long wait for
       // an actual page transition.
-      await delay(280);
+      await delay(paymentConfirmationNeedsReobserve ? 650 : 280);
       const after = await chrome.tabs.get(tabId).catch(() => before);
       if (after.url !== before.url || after.status === 'loading') {
         const remainingForNavigationMs = reconcileDeadline - Date.now();
@@ -2098,6 +2755,41 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
         await delay(Math.min(450, Math.max(0, reconcileDeadline - Date.now())));
       } else {
         await delay(Math.min(180, Math.max(0, reconcileDeadline - Date.now())));
+      }
+      // A merchant can settle an address, card, or delivery choice without a
+      // URL change. Re-observe before issuing another primitive so a completed
+      // checkout profile is not reopened by a stale selector still in the DOM.
+      const remainingForVerificationMs = reconcileDeadline - Date.now();
+      const verifiedState = remainingForVerificationMs > 900
+        ? await tabBrowserState(tabId, checkoutProfile, {
+          attempts: paymentConfirmationNeedsReobserve ? 3 : 2,
+          delayMs: paymentConfirmationNeedsReobserve ? 240 : 160,
+          deadlineMs: reconcileDeadline
+        }).catch(() => null)
+        : null;
+      const paymentSettledIntoFinalReview = paymentConfirmationNeedsReobserve
+        && verifiedState?.checkoutSummary?.paymentMethodConfirmationRequired !== true
+        && verifiedState?.checkoutSummary?.cardConfirmed === true
+        && verifiedState?.checkoutSummary?.finalReviewReady === true;
+      if (paymentSettledIntoFinalReview
+        || (!paymentConfirmationNeedsReobserve && (verifiedState?.checkoutSummary?.checkoutProfileVerified === true
+          || verifiedState?.checkoutSummary?.finalReviewReady === true))) {
+        return {
+          ...outcome,
+          ...merged,
+          completed: true,
+          skipped: false,
+          state: verifiedState
+        };
+      }
+      if (paymentConfirmationNeedsReobserve) {
+        latestOutcome = {
+          ...outcome,
+          completed: false,
+          skipped: false,
+          reason: 'Amazon is still applying the selected payment method; final review has not appeared yet.',
+          state: verifiedState || outcome.state
+        };
       }
       continue;
     }
@@ -2120,10 +2812,17 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
       deadlineMs: reconcileDeadline
       }).catch(() => latestOutcome?.state || null)
     : latestOutcome?.state || null;
+  const finalSummary = merged.state?.checkoutSummary || latestOutcome?.state?.checkoutSummary || {};
+  const paymentStillPending = latestOutcome?.paymentConfirmationPending === true
+    && (finalSummary.paymentMethodConfirmationRequired === true || finalSummary.finalReviewReady !== true);
   return {
     ...(latestOutcome || {}),
     ...merged,
-    reason: latestOutcome?.reason || (Date.now() >= reconcileDeadline
+    completed: paymentStillPending ? false : Boolean(latestOutcome?.completed),
+    skipped: paymentStillPending ? false : Boolean(merged.skipped),
+    reason: paymentStillPending
+      ? 'Amazon did not confirm the selected payment method before final-review verification timed out.'
+      : latestOutcome?.reason || (Date.now() >= reconcileDeadline
       ? 'Checkout preset reconciliation timed out before the next verified state.'
       : 'Checkout preset reconciliation reached its safety limit.'),
     state: merged.state || latestOutcome?.state || null
@@ -2131,6 +2830,34 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
 }
 
 async function executePlanAction(tabId, action, plan, checkoutProfile = null, assertActive = null) {
+  // This is runtime-only context, not a mutation of the signed plan. It scopes
+  // durable page receipts to this exact signed action so a completed order in a
+  // previous mission never suppresses a fresh mission in the same Amazon tab.
+  action = {
+    ...action,
+    receiptScope: `${String(plan?.planHash || '').slice(0, 96)}:${String(action?.id || '').slice(0, 96)}`
+  };
+  if (action.pendingOrderContinuation === true) {
+    const beforeContinuation = await chrome.tabs.get(tabId).catch(() => null);
+    if (beforeContinuation?.url
+      && !/\/(?:duplicateOrder|pending-order)(?:[/?#]|$)/i.test(beforeContinuation.url)
+      && !/order-confirmation|thank|order-confirmed/i.test(beforeContinuation.url)) {
+      await waitForTabNavigation(tabId, beforeContinuation.url, 5_000).catch(() => null);
+      await delay(180);
+    }
+    const activeRun = await getActiveRun();
+    const priorReceiptScope = `${String(plan?.planHash || '').slice(0, 96)}:${String(action.priorFinalSubmitActionId || '').slice(0, 96)}`;
+    const priorPendingOrderDispatchReceipt = await finalOrderDispatchReceiptFor(tabId, action.receiptScope);
+    action = {
+      ...action,
+      sessionId: String(activeRun?.sessionId || ''),
+      planHash: String(plan?.planHash || ''),
+      priorFinalSubmitDispatched: Boolean(await finalOrderDispatchReceiptFor(tabId, priorReceiptScope)),
+      priorPendingOrderDispatchReceipt,
+      boundCandidate: normalizeActiveRunCandidate(activeRun?.selectedCandidate),
+      boundCartEvidence: normalizeActiveRunCartEvidence(activeRun?.cartEvidence)
+    };
+  }
   if (plan.targetDomain === 'amazon.com' && action.type !== 'navigate') {
     const currentTab = await chrome.tabs.get(tabId).catch(() => null);
     if (currentTab?.url && !isAmazonRetailShoppingUrl(currentTab.url)) {
@@ -2143,6 +2870,22 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
     const outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
     if (!outcome?.completed) return outcome;
+    if (outcome.alreadyInCart === true) {
+      return {
+        ...outcome,
+        navigationRequested: false,
+        cartFallbackUsed: false,
+        state: {
+          url: before?.url || action.url,
+          title: before?.title || '',
+          browserState: 'cart',
+          browserStateConfidence: 1,
+          browserStateReason: 'Amazon cart was already open; the next approved step verifies its contents.',
+          checkoutSummary: { stage: 'cart', nextAction: 'Inspecting cart' },
+          navigationReady: true
+        }
+      };
+    }
     let usedFallback = Boolean(outcome.cartFallbackRequested);
     if (!usedFallback) {
       await waitForTabUrlChange(tabId, before.url, 2_500)
@@ -2179,6 +2922,23 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     };
   }
   if (action.type === 'navigate') {
+    const existingTab = await chrome.tabs.get(tabId).catch(() => null);
+    if (action.preserveExistingCheckout === true && existingTab && isAmazonCheckoutResumeUrl(existingTab.url || '', plan)) {
+      return {
+        completed: true,
+        navigationRequested: false,
+        reusedExistingCheckout: true,
+        state: {
+          url: existingTab.url || action.url,
+          title: existingTab.title || '',
+          browserState: 'checkout',
+          browserStateConfidence: 1,
+          browserStateReason: 'The existing checkout tab was preserved for profile reconciliation.',
+          checkoutSummary: { stage: 'checkout', nextAction: 'Rechecking checkout' },
+          navigationReady: true
+        }
+      };
+    }
     const navigationUrl = plan.targetDomain === 'amazon.com'
       ? withAmazonEnglishLocale(action.url)
       : action.url;
@@ -2206,7 +2966,10 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     const deadlineAt = Date.parse(String(action.merchantConfirmationDeadlineAt || ''));
     const remainingMs = Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : null;
     const outcome = await waitForMerchantOrderConfirmation(tabId, checkoutProfile, assertActive, {
-      timeoutMs: remainingMs == null ? 14_000 : Math.min(14_000, remainingMs)
+      // The active website-to-extension port keeps normal execution alive.
+      // Observe the whole signed confirmation window here; alarms are only a
+      // fallback if Chrome actually terminates the worker.
+      timeoutMs: remainingMs == null ? MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS : remainingMs
     });
     return enforceAmazonRetailLane(tabId, action, plan, checkoutProfile, outcome);
   }
@@ -2235,7 +2998,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
     if (amazonFastPathAllowed && searchSurfaceAllowed) {
       const quickOutcome = await amazonSearchCardAddToCart(tabId, action);
       if (quickOutcome?.completed) {
-        const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile);
+        const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
         if (cartAdvance.advanced) {
           return {
             ...quickOutcome,
@@ -2299,7 +3062,7 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
   let before = await chrome.tabs.get(tabId);
   let outcome = await tabCommand(tabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action, checkoutProfile });
   if (action.type === 'select_candidate' && outcome?.directSearchResultCart === true) {
-    const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile);
+    const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
     if (cartAdvance.advanced) {
       return {
         ...outcome,
@@ -2559,23 +3322,62 @@ async function runSession(rawSession) {
   let currentAction = null;
   let currentActionStartedAt = 0;
   let retainActiveRun = false;
+  const startupTiming = {
+    clientRunStartedAt: String(rawSession?.runnerClientRunStartedAt || '').trim() || null,
+    wakeReceivedAt: String(rawSession?.runnerWakeReceivedAt || '').trim() || null,
+    runStartedAt: new Date().toISOString()
+  };
   try {
     // Read durable state before claiming. An MV3 restart may be resuming an
     // action after the browser accepted its click but before a checkpoint was
     // recorded, so overwriting this marker would make the action replayable.
     const persistedActiveRun = await getActiveRun();
     const resumingPersistedRun = Boolean(persistedActiveRun?.sessionId === rawSession.id);
-    session = await claimSession(rawSession);
     if (!resumingPersistedRun) {
-      await saveActiveRun({ sessionId: session.id, phase: 'claimed' });
+      // Persist before the remote claim. If MV3 is suspended after the server
+      // accepts the claim, the gateway can recover this exact signed session.
+      startupTiming.claimStartedAt = new Date().toISOString();
+      await saveActiveRun({
+        sessionId: rawSession.id,
+        phase: 'claiming',
+        progressLabel: 'Claiming mission',
+        progressState: 'claiming',
+        startupTiming
+      });
     }
+    await saveConfig({
+      lastError: '',
+      lastExecution: { sessionId: rawSession.id, status: 'claiming', at: new Date().toISOString() }
+    });
+    scheduleRunnerResume(8_000);
+    if (!startupTiming.claimStartedAt) startupTiming.claimStartedAt = new Date().toISOString();
+    session = await claimSession(rawSession);
+    let authorityVerifiedAt = Date.now();
+    startupTiming.claimAcceptedAt = new Date().toISOString();
+    startupTiming.claimDurationMs = Math.max(0, Date.parse(startupTiming.claimAcceptedAt) - Date.parse(startupTiming.claimStartedAt));
+    if (!resumingPersistedRun) {
+      await saveActiveRun({
+        sessionId: session.id,
+        phase: 'claimed',
+        progressLabel: 'Validating mission',
+        progressState: 'validating',
+        startupTiming
+      });
+    }
+    await saveConfig({
+      lastError: '',
+      lastExecution: { sessionId: session.id, status: 'claimed', at: new Date().toISOString() }
+    });
     // One bounded recovery opportunity protects an already-authorized run
     // from MV3 service-worker suspension without turning alarms into a
     // background mission discovery loop.
     scheduleRunnerResume(8_000);
     plan = await validatePlanForSession(session);
     assertLocalMissionAuthority(session);
-    const savedCheckoutProfile = await getLocalCheckoutProfile(session.id);
+    startupTiming.planValidatedAt = new Date().toISOString();
+    await bindLocalCheckoutProfileToPlan(session.id, plan.planHash);
+    const savedCheckoutProfile = await getLocalCheckoutProfile(session.id, plan.planHash);
+    startupTiming.profileBoundAt = new Date().toISOString();
     const checkoutProfileExpected = Boolean(session.extensionCheckoutProfileEnabled);
     const checkoutProfileAvailable = Boolean(savedCheckoutProfile);
     const checkoutProfile = savedCheckoutProfile ? { ...savedCheckoutProfile } : null;
@@ -2584,6 +3386,7 @@ async function runSession(rawSession) {
       ? session.extensionMissionPlanState
       : { nextActionIndex: 0 };
     const interruptedRun = resumingPersistedRun ? persistedActiveRun : await getActiveRun();
+    let finalSubmitAuthorityLease = normalizeFinalSubmitAuthorityLease(interruptedRun?.finalSubmitAuthorityLease);
     const resumesInterruptedAction = Boolean(
       interruptedRun?.sessionId === session.id
       && interruptedRun.phase === 'executing_step'
@@ -2594,6 +3397,9 @@ async function runSession(rawSession) {
       sessionId: session.id,
       planHash: plan.planHash,
       phase: resumesInterruptedAction ? 'executing_step' : 'running',
+      progressLabel: 'Starting browser',
+      progressState: 'starting_browser',
+      startupTiming,
       nextActionIndex: Number(planState.nextActionIndex || 0),
       ...(resumesInterruptedAction ? {
         actionId: interruptedRun.actionId,
@@ -2603,7 +3409,25 @@ async function runSession(rawSession) {
     const completedActionIds = new Set(Array.isArray(planState.completedActionIds) ? planState.completedActionIds : []);
     const persistedMilestones = Array.isArray(planState.verifiedMilestones) ? planState.verifiedMilestones : [];
     const nextAction = plan.actions[Number(planState.nextActionIndex || 0)];
-    if (!nextAction) return { sessionId: session.id, status: 'plan_completed' };
+    if (!nextAction) return reconcileCompletedPlan(session, plan, planState, checkoutProfile);
+    if (String(session.status || '').toLowerCase() !== 'executing') {
+      startupTiming.startupCheckpointStartedAt = new Date().toISOString();
+      session = await checkpointRunnerStartup(session, plan, nextAction, startupTiming);
+      authorityVerifiedAt = Date.now();
+      startupTiming.startupCheckpointAcceptedAt = new Date().toISOString();
+      startupTiming.startupCheckpointDurationMs = Math.max(
+        0,
+        Date.parse(startupTiming.startupCheckpointAcceptedAt) - Date.parse(startupTiming.startupCheckpointStartedAt)
+      );
+      await saveActiveRun({
+        sessionId: session.id,
+        planHash: plan.planHash,
+        phase: resumesInterruptedAction ? 'executing_step' : 'running',
+        progressLabel: 'Opening Amazon',
+        progressState: 'opening_browser',
+        startupTiming
+      });
+    }
     if (!await hasPermissionForUrl(startUrl)) {
       const domain = domainForUrl(startUrl);
       session = await missionCheckpoint(session, {
@@ -2626,11 +3450,18 @@ async function runSession(rawSession) {
     }
 
     await chrome.action.setBadgeText({ text: '' });
-    let tab = await acquireMissionTab(session.id, startUrl);
+    let tab = await acquireMissionTab(session.id, startUrl, {
+      preferExistingCheckout: plan.resumeCheckoutReconcile === true,
+      plan
+    });
+    startupTiming.browserTabAcquiredAt = new Date().toISOString();
     await saveActiveRun({
       sessionId: session.id,
       planHash: plan.planHash,
       phase: resumesInterruptedAction ? 'executing_step' : 'running',
+      progressLabel: 'Browser ready',
+      progressState: 'browser_ready',
+      startupTiming,
       tabId: Number(tab?.id || 0) || null,
       nextActionIndex: Number(planState.nextActionIndex || 0),
       ...(resumesInterruptedAction ? {
@@ -2638,10 +3469,9 @@ async function runSession(rawSession) {
         actionIndex: Number(interruptedRun.actionIndex)
       } : {})
     });
-    let authorityVerifiedAt = Date.now();
-    const assertActive = async ({ force = false } = {}) => {
+    const assertActive = async ({ force = false, localOnly = false } = {}) => {
       assertLocalMissionAuthority(session);
-      if (!force && Date.now() - authorityVerifiedAt < RUNNER_STATUS_LEASE_MS) return session;
+      if (localOnly || (!force && Date.now() - authorityVerifiedAt < RUNNER_STATUS_LEASE_MS)) return session;
       session = await assertRunnerSessionActive(session);
       authorityVerifiedAt = Date.now();
       assertLocalMissionAuthority(session);
@@ -2652,9 +3482,10 @@ async function runSession(rawSession) {
       addToCartClicked: persistedMilestones.includes('cart_confirmed'),
       checkoutOpened: persistedMilestones.includes('checkout_open'),
       verifiedMilestones: [...new Set(persistedMilestones)],
-      safeFieldsFilled: [],
-      checkoutSelections: [],
+      safeFieldsFilled: normalizeActiveRunEvidenceLabels(interruptedRun?.safeFieldsFilled),
+      checkoutSelections: normalizeActiveRunEvidenceLabels(interruptedRun?.checkoutSelections),
       selectedCandidate: null,
+      cartEvidence: normalizeActiveRunCartEvidence(interruptedRun?.cartEvidence),
       initialCartItemCount: null,
       reusedPreparedCart: false,
       localCheckoutProfileExpected: checkoutProfileExpected,
@@ -2672,7 +3503,7 @@ async function runSession(rawSession) {
           url: tab.url || startUrl,
           finalUrl: tab.url || startUrl,
           stopState: 'local_checkout_profile_missing',
-          stopEvidence: 'The Local Data Vault checkout handoff expired while Magic City was waiting for card autofill. Unlock the vault and retry.',
+          stopEvidence: 'Card autofill was not completed before the checkout wait elapsed. Reopen the checkout and use Chrome autofill to continue.',
           fulfillmentStatus: 'failed',
           fundingDisposition: 'release',
           ...progress
@@ -2684,7 +3515,7 @@ async function runSession(rawSession) {
           await clearPendingPaymentWait(session.id);
           paymentState.paymentAutofillWaitExpired = true;
           paymentState.stopState = 'payment_required';
-          paymentState.stopEvidence = 'Card entry was not completed before the local checkout handoff expired. Reopen the checkout and use Chrome autofill to continue.';
+          paymentState.stopEvidence = 'Card entry was not completed before the checkout wait elapsed. Reopen the checkout and use Chrome autofill to continue.';
           return reportAndStop(session, plan, { ...paymentState, ...progress });
         }
         const parked = await parkForPaymentAutofill(session, plan, { ...paymentState, ...progress });
@@ -2698,6 +3529,7 @@ async function runSession(rawSession) {
     }
     for (let index = Number(planState.nextActionIndex || 0); index < plan.actions.length; index += 1) {
       const action = plan.actions[index];
+      const presentation = planActionPresentation(action);
       currentAction = action;
       currentActionStartedAt = Date.now();
       const durableRun = await getActiveRun();
@@ -2717,10 +3549,41 @@ async function runSession(rawSession) {
         actionId: action.id,
         actionIndex: index,
         nextActionIndex: index,
+        progressLabel: presentation.label,
+        progressState: presentation.state,
         selectedCandidate: progress.selectedCandidate
       });
-      const presentation = planActionPresentation(action);
-      await assertActive({ force: action.type === 'final_submit' });
+      // A worker can restart after Amazon accepted the irreversible click but
+      // before the runner reports it. On an order-confirmation page, recover
+      // that observed fact without demanding a new click lease or replaying
+      // the merchant control. Every other final-submit surface still needs a
+      // fresh, scoped local lease before it can dispatch a click.
+      const recoveredState = recoveringInterruptedAction && tab
+        ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
+        : null;
+      const recoveredFinalOrderAlreadyConfirmed = action.type === 'final_submit'
+        && hasConfirmedMerchantOrder(recoveredState);
+      // A slow control-plane heartbeat must not race Amazon's irreversible
+      // button, but this is not an unlimited offline bypass. The signed
+      // capability must still be current and the runner must have observed a
+      // live session within one short lease window before dispatch.
+      if (action.type === 'final_submit' && !recoveredFinalOrderAlreadyConfirmed) {
+	        if (!finalSubmitAuthorityLease) {
+	          const recoveredAuthority = await recoverMissingFinalSubmitAuthorityLease(session, plan, action);
+	          session = recoveredAuthority.session;
+	          finalSubmitAuthorityLease = recoveredAuthority.lease;
+	          if (finalSubmitAuthorityLease) {
+	            authorityVerifiedAt = Date.now();
+	            await saveActiveRun({ finalSubmitAuthorityLease });
+	          }
+	        }
+        assertFinalSubmitLocalAuthority(session, finalSubmitAuthorityLease, plan, action);
+        if (session.finalSubmitChainAuthorization) {
+          session = await assertFinalSubmitChainAuthorization(session, plan, action);
+        }
+      } else {
+        await assertActive();
+      }
       if (!tab && action.type !== 'navigate') {
         return reportAndStop(session, plan, {
           url: startUrl,
@@ -2820,9 +3683,6 @@ async function runSession(rawSession) {
           });
         }
       }
-      const recoveredState = recoveringInterruptedAction && tab
-        ? await tabBrowserState(tab.id, checkoutProfile, { attempts: 2, delayMs: 180 }).catch(() => null)
-        : null;
       const resumedActionAlreadySatisfied = recoveredState
         ? actionWasSatisfiedBeforeRestart(executionAction, recoveredState)
         : false;
@@ -2846,7 +3706,12 @@ async function runSession(rawSession) {
             }
         : await withTimeout(
             () => executePlanAction(tab.id, executionAction, plan, checkoutProfile, assertActive),
-            BROWSER_ACTION_TIMEOUT_MS,
+            action.awaitMerchantOrderConfirmation === true
+              ? Math.min(
+                  MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS + 5_000,
+                  Math.max(BROWSER_ACTION_TIMEOUT_MS, Number(action.merchantConfirmationTimeoutMs || 0) + 5_000)
+                )
+              : BROWSER_ACTION_TIMEOUT_MS,
             `browser_step_timeout:${action.id}`
           );
       if (resumesInterruptedAction && outcome?.completed && !outcome.recoveredFromInterruption) {
@@ -2864,7 +3729,45 @@ async function runSession(rawSession) {
         };
         progress.directSearchResultCart = Boolean(outcome.directSearchResultCart);
       }
-      const report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+      let report = outcome.state || await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+      const observedCartEvidence = verifiedCartEvidenceFor(report, progress.selectedCandidate, session, plan);
+      if (observedCartEvidence) progress.cartEvidence = observedCartEvidence;
+      if (action.type === 'final_submit' && Array.isArray(outcome.finalSubmitReceipts)) {
+        // The executor returns both pre-navigation receipts in its signed
+        // action response. Preserve that explicit pair even if a merchant
+        // navigation or a later page observation exposes only one of them.
+        report.browserActionReceipts = mergeBrowserActionReceipts(
+          Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [],
+          outcome.finalSubmitReceipts
+        );
+      }
+      if (action.type === 'final_submit' && outcome.finalSubmitReceipt) {
+        // submitFinalOrder returns the pre-dispatch receipt so this action is
+        // non-replayable even if Amazon unloads the page. Give the queued
+        // native click one event-loop turn, then capture its dispatched
+        // receipt in the same signed checkpoint whenever the tab is readable.
+        // A navigation failure here never causes another merchant click.
+        await delay(260);
+        const dispatchedState = await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' }).catch(() => null);
+        if (dispatchedState?.browserActionReceipts?.length) {
+          const priorReceipts = Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [];
+          report = {
+            ...report,
+            ...dispatchedState,
+            browserActionReceipts: mergeBrowserActionReceipts(
+              priorReceipts,
+              dispatchedState.browserActionReceipts
+            )
+          };
+        }
+        const dispatchedReceipt = await finalOrderDispatchReceiptFor(tab.id, action.receiptScope);
+        if (dispatchedReceipt) {
+          report.browserActionReceipts = mergeBrowserActionReceipts(
+            Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [],
+            [dispatchedReceipt]
+          );
+        }
+      }
       report.runnerStep = {
         actionId: action.id,
         actionType: action.type,
@@ -2898,6 +3801,25 @@ async function runSession(rawSession) {
         profileCorrectionMissed: Boolean(outcome.profileCorrectionMissed),
         paymentAutofillRequired: Boolean(outcome.paymentAutofillRequired),
         profileTransitions: Array.isArray(outcome.profileTransitions) ? outcome.profileTransitions : [],
+        pendingOrderMatchEvidence: outcome.pendingOrderMatchEvidence && typeof outcome.pendingOrderMatchEvidence === 'object'
+          ? {
+              marker: Boolean(outcome.pendingOrderMatchEvidence.marker),
+              identityMatches: Boolean(outcome.pendingOrderMatchEvidence.identityMatches),
+              identitySource: String(outcome.pendingOrderMatchEvidence.identitySource || '').slice(0, 32),
+              priceMatches: Boolean(outcome.pendingOrderMatchEvidence.priceMatches),
+              priceSource: String(outcome.pendingOrderMatchEvidence.priceSource || '').slice(0, 32),
+              merchandisePriceContradiction: Boolean(outcome.pendingOrderMatchEvidence.merchandisePriceContradiction),
+              explicitMerchandiseSubtotal: Number.isFinite(Number(outcome.pendingOrderMatchEvidence.explicitMerchandiseSubtotal))
+                ? Number(outcome.pendingOrderMatchEvidence.explicitMerchandiseSubtotal)
+                : null,
+              quantityMatches: Boolean(outcome.pendingOrderMatchEvidence.quantityMatches),
+              quantitySource: String(outcome.pendingOrderMatchEvidence.quantitySource || '').slice(0, 32),
+              quantityContradiction: Boolean(outcome.pendingOrderMatchEvidence.quantityContradiction),
+              explicitQuantity: Number.isInteger(Number(outcome.pendingOrderMatchEvidence.explicitQuantity))
+                ? Number(outcome.pendingOrderMatchEvidence.explicitQuantity)
+                : null
+            }
+          : null,
         merchantCheckoutDefault: outcome.merchantCheckoutDefault && typeof outcome.merchantCheckoutDefault === 'object'
           ? {
               attempted: Boolean(outcome.merchantCheckoutDefault.attempted),
@@ -2914,9 +3836,40 @@ async function runSession(rawSession) {
               waitMs: Number(outcome.merchantOrderConfirmation.waitMs || 0) || null
             }
           : null,
+        // The content script records this before triggering merchant
+        // navigation, so the signed checkpoint remains auditable even if the
+        // navigation tears down the page immediately.
+        finalSubmitReceipt: outcome.finalSubmitReceipt && typeof outcome.finalSubmitReceipt === 'object'
+          ? {
+              actionId: String(outcome.finalSubmitReceipt.actionId || '').slice(0, 96),
+              actionType: String(outcome.finalSubmitReceipt.actionType || '').slice(0, 64),
+              intent: String(outcome.finalSubmitReceipt.intent || '').slice(0, 64),
+              receiptScope: String(outcome.finalSubmitReceipt.receiptScope || '').slice(0, 192),
+              kind: String(outcome.finalSubmitReceipt.kind || '').slice(0, 64),
+              phase: String(outcome.finalSubmitReceipt.phase || '').slice(0, 64),
+              controlTag: String(outcome.finalSubmitReceipt.controlTag || '').slice(0, 32),
+              controlType: String(outcome.finalSubmitReceipt.controlType || '').slice(0, 32),
+              path: String(outcome.finalSubmitReceipt.path || '').slice(0, 240),
+              at: outcome.finalSubmitReceipt.at || null
+            }
+          : null,
         runnerVersion: chrome.runtime.getManifest().version
       };
-      report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested);
+      if (report.runnerStep.finalSubmitReceipt) {
+        const receipt = report.runnerStep.finalSubmitReceipt;
+        // Keep the pre-navigation final-order receipt in the stable browser
+        // receipt list as well as the runner-step envelope. Merchant
+        // navigation may unload executor.js before a subsequent state read.
+        report.browserActionReceipts = mergeBrowserActionReceipts(
+          Array.isArray(report.browserActionReceipts) ? report.browserActionReceipts : [],
+          [receipt]
+        );
+      }
+      const finalSubmitDispatched = outcome.finalSubmitReceipt?.kind === 'final_order'
+        && outcome.finalSubmitReceipt?.phase === 'click_dispatched';
+      report.finalSubmitRequested = Boolean(outcome.finalSubmitRequested && (
+        action.type !== 'final_submit' || finalSubmitDispatched || outcome.orderSubmitted === true
+      ));
       report.orderSubmitted = Boolean(outcome.orderSubmitted || report.orderSubmitted);
       report.lastRunnerAction = String(outcome.label || '');
       const reportStage = String(report.checkoutSummary?.stage || report.browserState || '').toLowerCase();
@@ -3036,19 +3989,63 @@ async function runSession(rawSession) {
         browser: report,
         plan,
         planAction: action,
-        planActionStatus: actionStatus
+        planActionStatus: actionStatus,
+        runnerTiming: {
+          actionId: action.id,
+          actionStartedAt: new Date(currentActionStartedAt).toISOString(),
+          actionCompletedAt: new Date().toISOString(),
+          actionDurationMs,
+          resumedFromActiveRun: resumingPersistedRun,
+          resumedPhase: resumingPersistedRun ? (persistedActiveRun?.phase || null) : null,
+          recoveredAction: Boolean(recoveringInterruptedAction || outcome.recoveredFromInterruption),
+          ...(index === Number(planState.nextActionIndex || 0) ? {
+            browserTabAcquiredAt: startupTiming.browserTabAcquiredAt || null
+          } : {})
+        }
       });
+      authorityVerifiedAt = Date.now();
+      if (hasConfirmedMerchantOrder(report)) {
+        return reportAndStop(
+          session,
+          plan,
+          report,
+          'Merchant confirmation was durably recorded. Later tab state is not required to complete this mission.'
+        );
+      }
+      // The authenticated checkpoint immediately before the signed
+      // final-submit action renews a short, one-action local lease. This
+      // avoids a slow but healthy checkout expiring an authority timestamp
+      // captured at run start, without permitting a later or different plan
+      // action to reuse the lease.
+      const nextAction = plan.actions[index + 1] || null;
+      if (actionStatus === 'completed' && nextAction?.type === 'final_submit') {
+        finalSubmitAuthorityLease = issueFinalSubmitAuthorityLease(session, plan, nextAction);
+      }
+      // A failed final-order action must remain at its signed cursor. A
+      // persisted dispatch receipt proves a click; a recovered merchant
+      // confirmation proves the same action completed without replaying it.
+      const finalSubmitReceiptRecorded = action.type !== 'final_submit'
+        || (action.pendingOrderContinuation === true && outcome.skipped === true)
+        || (report.runnerStep.finalSubmitReceipt?.kind === 'final_order'
+          && report.runnerStep.finalSubmitReceipt?.phase === 'click_dispatched')
+        || outcome.orderSubmitted === true;
       await saveActiveRun({
         sessionId: session.id,
         planHash: plan.planHash,
         phase: 'running',
         tabId: Number(tab?.id || 0) || null,
-        actionId: null,
-        actionIndex: null,
-        nextActionIndex: index + 1,
-        selectedCandidate: progress.selectedCandidate
+        actionId: finalSubmitReceiptRecorded ? null : action.id,
+        actionIndex: finalSubmitReceiptRecorded ? null : index,
+        nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
+        selectedCandidate: progress.selectedCandidate,
+        cartEvidence: progress.cartEvidence,
+        safeFieldsFilled: progress.safeFieldsFilled,
+        checkoutSelections: progress.checkoutSelections,
+        finalSubmitAuthorityLease: actionStatus === 'completed' && nextAction?.type === 'final_submit'
+          ? finalSubmitAuthorityLease
+          : finalSubmitReceiptRecorded ? null : finalSubmitAuthorityLease
       });
-      if (action.awaitMerchantOrderConfirmation === true && outcome.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
+      if (action.awaitMerchantOrderConfirmation === true && report.finalSubmitRequested === true && outcome.orderSubmitted !== true) {
         const confirmationDeadlineMs = Date.parse(String(executionAction.merchantConfirmationDeadlineAt || ''));
         if (Number.isFinite(confirmationDeadlineMs) && confirmationDeadlineMs <= Date.now()) {
           return reportAndStop(session, plan, {
@@ -3074,9 +4071,11 @@ async function runSession(rawSession) {
           actionIndex: index,
           nextActionIndex: index,
           selectedCandidate: progress.selectedCandidate,
+          cartEvidence: progress.cartEvidence,
           merchantConfirmationStartedAt: durableRun?.merchantConfirmationStartedAt || new Date().toISOString(),
           merchantConfirmationDeadlineAt: executionAction.merchantConfirmationDeadlineAt || null,
-          merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0)) + 1
+          merchantConfirmationAttempts: Math.max(0, Number(durableRun?.merchantConfirmationAttempts || 0)) + 1,
+          finalSubmitAuthorityLease: null
         });
         retainActiveRun = true;
         scheduleRunnerResume(RUNNER_RESUME_DELAY_MS);
@@ -3113,7 +4112,7 @@ async function runSession(rawSession) {
       }
       const boundary = stopForBoundary(report, plan, action);
       const nextPlanAction = plan.actions[index + 1] || null;
-      const canFillBeforeSensitiveStop = ['payment_required', 'final_approval_required', 'checkout_profile_mismatch'].includes(String(boundary?.state || ''))
+      const canFillBeforeSensitiveStop = ['payment_required', 'final_approval_required', 'checkout_profile_mismatch', 'address_verification_required'].includes(String(boundary?.state || ''))
         && nextPlanAction?.type === 'fill_checkout_profile'
         && Boolean(checkoutProfile);
       const canOpenPaymentAutofill = boundary?.state === 'payment_required'
@@ -3136,6 +4135,15 @@ async function runSession(rawSession) {
           retainActiveRun = true;
           return parked;
         }
+        return reportAndStop(session, plan, report);
+      }
+      if (action.type === 'final_submit' && !outcome.completed) {
+        report.stopState = outcome.localCheckoutProfileMissing === true
+          ? 'local_checkout_profile_missing'
+          : 'final_submit_dispatch_failed';
+        report.stopEvidence = outcome.reason || 'The signed final-order action did not dispatch a native merchant click.';
+        report.fulfillmentStatus = 'failed';
+        report.fundingDisposition = 'release';
         return reportAndStop(session, plan, report);
       }
       if (action.expectedMilestone && !expectedMilestoneVerified) {
@@ -3209,7 +4217,19 @@ async function runSession(rawSession) {
       });
       return { sessionId: session.id, status: 'retrying_browser_step', retrying: true };
     }
-    await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'step_needs_review', actionId: currentAction?.id || null, durationMs: actionDurationMs, at: new Date().toISOString() } });
+    const startupFailure = !plan && !currentAction;
+    await saveConfig({
+      lastError: message,
+      lastExecution: {
+        sessionId: session.id,
+        status: startupFailure ? 'claim_failed' : 'step_needs_review',
+        actionId: currentAction?.id || null,
+        durationMs: actionDurationMs,
+        ...(Number.isFinite(error?.finalSubmitLeaseAgeMs) ? { finalSubmitLeaseAgeMs: error.finalSubmitLeaseAgeMs } : {}),
+        ...(error?.finalSubmitAuthorityLease ? { finalSubmitAuthorityLease: error.finalSubmitAuthorityLease } : {}),
+        at: new Date().toISOString()
+      }
+    });
     if (!plan && session?.claimedByPluginId === RUNNER_EXTENSION_PLUGIN_ID) return reportStartupFailure(session, error);
     if (!plan) throw error;
     const planState = session.extensionMissionPlanState?.planHash === plan.planHash
@@ -3220,6 +4240,19 @@ async function runSession(rawSession) {
     const tab = await activeMissionTab(session.id);
     let browser = null;
     if (tab) browser = await tabCommand(tab.id, { type: 'MAGIC_CITY_BROWSER_STATE' }).catch(() => null);
+    if (isFinalSubmitPolicyError(error)) {
+      return reportAndStop(session, plan, {
+        ...(browser || {}),
+        url: browser?.url || plan.startUrl,
+        finalUrl: browser?.url || plan.startUrl,
+        stopState: 'final_submit_authorization_rejected',
+        stopEvidence: `Magic City rejected the final-order authority before Amazon was charged: ${String(message).slice(0, 180)}`,
+        fulfillmentStatus: 'failed',
+        fundingDisposition: 'release',
+        finalSubmitRequested: false,
+        orderSubmitted: false
+      }, 'Final order request rejected by Magic City policy. The order was not placed.');
+    }
     try {
       session = await missionCheckpoint(session, {
         label: 'Browser step needs review',
@@ -3268,17 +4301,96 @@ async function resumeActiveRun() {
   return runSession(session);
 }
 
-async function pollAndExecute(requestedSessionId = '') {
-  const config = await getConfig();
-  if (!config.deviceToken) return { paired: false, executed: [] };
-  await registerExecutor(config);
-  const poll = await pollSessions();
-  const executed = [];
+async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = '') {
   const normalizedSessionId = String(requestedSessionId || '').trim();
+  const normalizedDispatchNonce = String(requestedDispatchNonce || '').trim();
+  const wakeReceivedAt = new Date().toISOString();
+  const recordWake = async (status, message = '') => {
+    if (!normalizedSessionId) return;
+    await saveConfig({
+      lastError: message,
+      lastExecution: {
+        sessionId: normalizedSessionId,
+        status,
+        ...(message ? { message } : {}),
+        at: new Date().toISOString()
+      }
+    });
+  };
+  const config = await getConfig();
+  if (!config.deviceToken) {
+    const error = 'runner_not_paired';
+    await recordWake('wake_failed', error);
+    return {
+      paired: false,
+      requestedSessionId: normalizedSessionId || null,
+      requestedSessionFound: false,
+      executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status: 'wake_failed', error }] : []
+    };
+  }
+  await recordWake('wake_received');
+  let poll;
+  try {
+    await recordWake('registering_runner');
+    await registerExecutor(config);
+    if (normalizedSessionId && normalizedDispatchNonce) {
+      await recordWake('claiming');
+      const directSession = {
+        id: normalizedSessionId,
+        extensionRunDispatch: { nonce: normalizedDispatchNonce },
+        runnerClientRunStartedAt: String(clientRunStartedAt || '').trim() || null,
+        runnerWakeReceivedAt: wakeReceivedAt
+      };
+      const execution = await runSession(directSession);
+      return {
+        paired: true,
+        sessions: [],
+        actionableCount: 1,
+        directClaim: true,
+        requestedSessionId: normalizedSessionId,
+        requestedSessionFound: true,
+        executed: [execution]
+      };
+    }
+    await recordWake('locating_mission');
+    poll = await pollSessions();
+  } catch (error) {
+    const message = error?.message || String(error);
+    const status = /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
+      ? 'claim_failed'
+      : 'wake_failed';
+    await recordWake(status, message);
+    return {
+      paired: true,
+      sessions: [],
+      actionableCount: 0,
+      requestedSessionId: normalizedSessionId || null,
+      requestedSessionFound: false,
+      executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status, error: message }] : []
+    };
+  }
+  const executed = [];
   const runnableSessions = poll.sessions.filter(isRunnableSession);
   const selectedSessions = normalizedSessionId
     ? runnableSessions.filter((session) => String(session?.id || '') === normalizedSessionId)
     : runnableSessions.slice(0, 1);
+  const requestedSession = normalizedSessionId
+    ? poll.sessions.find((session) => String(session?.id || '') === normalizedSessionId) || null
+    : null;
+  if (normalizedSessionId && !selectedSessions.length) {
+    const requestedStatus = String(requestedSession?.status || 'not_returned').toLowerCase();
+    const error = requestedSession
+      ? `requested_session_not_runnable:${requestedStatus}`
+      : 'requested_session_not_returned';
+    await recordWake('wake_rejected', error);
+    return {
+      ...poll,
+      requestedSessionId: normalizedSessionId,
+      requestedSessionFound: false,
+      requestedSessionStatus: requestedSession?.status || null,
+      executed: [{ sessionId: normalizedSessionId, status: 'wake_rejected', error }]
+    };
+  }
   // Keep the browser surface single-threaded. A second mission can reuse the
   // same tab after the first one reaches a boundary, but cannot compete for it.
   for (const session of selectedSessions.slice(0, 1)) {
@@ -3291,8 +4403,11 @@ async function pollAndExecute(requestedSessionId = '') {
         await saveConfig({ lastError: 'Magic City connection was interrupted. Retrying automatically.', lastExecution: { sessionId: session.id, status: 'retrying_control_plane', message, at: new Date().toISOString() } });
         executed.push({ sessionId: session.id, status: 'retrying_control_plane', retrying: true });
       } else {
-        await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status: 'failed', message, at: new Date().toISOString() } });
-        executed.push({ sessionId: session.id, status: 'failed', error: message });
+        const status = /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
+          ? 'claim_failed'
+          : 'failed';
+        await saveConfig({ lastError: message, lastExecution: { sessionId: session.id, status, message, at: new Date().toISOString() } });
+        executed.push({ sessionId: session.id, status, error: message });
       }
     }
   }
@@ -3322,7 +4437,7 @@ async function pollOnly() {
     return Number.isFinite(dispatchExpiry) && dispatchExpiry > Date.now();
   });
   if (!dispatchedSession?.id) return poll;
-  return pollAndExecute(dispatchedSession.id);
+  return pollAndExecute(dispatchedSession.id, dispatchedSession.extensionRunDispatch?.nonce || '');
 }
 
 async function getPendingMissionSite() {
@@ -3376,6 +4491,7 @@ async function allowAndStartPendingMissionSite() {
 async function pairWithCode({ baseUrl = DEFAULT_BASE_URL, code = '' } = {}) {
   const pairingCode = normalizePairingCode(code);
   if (!pairingCode || pairingCode.length < 6) throw new Error('Enter the pairing code from Magic City.');
+  invalidateExecutorRegistration();
   await saveConfig({ baseUrl: normalizeBaseUrl(baseUrl), lastError: '' });
   const claimed = await api('/native-runner/extension/pairing/claim', {
     method: 'POST',
@@ -3395,6 +4511,8 @@ async function pairWithCode({ baseUrl = DEFAULT_BASE_URL, code = '' } = {}) {
     expiresAt: setup.expiresAt || claimed.device?.expiresAt || '',
     pluginId: RUNNER_EXTENSION_PLUGIN_ID,
     ownerAgentId: RUNNER_EXTENSION_OWNER_AGENT_ID,
+    extensionId: chrome.runtime.id || '',
+    extensionVersion: chrome.runtime.getManifest().version,
     useExistingBrowser: Boolean(setup.useExistingBrowser ?? claimed.device?.useExistingBrowser),
     pairedAt: new Date().toISOString(),
     lastError: ''
@@ -3420,13 +4538,54 @@ async function activateRunner() {
 async function handleMessage(message, sender = null) {
   if (message?.type === 'PAIR_WITH_CODE') return pairWithCode(message);
   if (message?.type === 'SET_LOCAL_CHECKOUT_PROFILE') return setLocalCheckoutProfile(message, sender);
+  if (message?.type === 'MAGIC_CITY_FINAL_ORDER_DISPATCHED') {
+    const stored = await saveFinalOrderDispatchReceipt(sender?.tab?.id, message.receipt);
+    return { ok: true, saved: Boolean(stored?.saved) };
+  }
   if (message?.type === 'CHECK_STATUS') {
     let config = await getConfig();
-    if (config.deviceToken) await registerExecutor(config);
-    const poll = config.deviceToken ? await pollSessions() : { paired: false, sessions: [] };
+    const checkedAt = new Date().toISOString();
+    if (config.deviceToken) {
+      config = await saveConfig({
+        lastPollAt: checkedAt,
+        extensionId: chrome.runtime.id || '',
+        extensionVersion: chrome.runtime.getManifest().version,
+        lastError: ''
+      });
+    }
+    const refreshPromise = config.deviceToken
+      ? (async () => {
+          await registerExecutor(config);
+          return pollSessions();
+        })()
+      : Promise.resolve({ paired: false, sessions: [], actionableCount: 0 });
+    refreshPromise.catch((error) => {
+      void saveConfig({ lastError: error?.message || String(error) });
+    });
+    const poll = await withTimeout(
+      () => refreshPromise,
+      2500,
+      'runner_status_refresh_pending'
+    ).catch((error) => ({
+      paired: Boolean(config.deviceToken),
+      sessions: [],
+      actionableCount: 0,
+      refreshPending: error?.message === 'runner_status_refresh_pending',
+      error: error?.message || String(error)
+    }));
     config = await getConfig();
-    const origins = await extensionHostPermissions();
-    return { config: { ...config, deviceToken: undefined, holderPrivateJwk: undefined }, poll, origins };
+    const origins = await extensionHostPermissions().catch(() => []);
+    return {
+      config: {
+        ...config,
+        extensionId: chrome.runtime.id || '',
+        extensionVersion: chrome.runtime.getManifest().version,
+        deviceToken: undefined,
+        holderPrivateJwk: undefined
+      },
+      poll,
+      origins
+    };
   }
   if (message?.type === 'GET_PENDING_MISSION_SITE') return getPendingMissionSite();
   if (message?.type === 'START_PENDING_MISSION_SITE') return startPendingMissionSite(message);
@@ -3434,13 +4593,21 @@ async function handleMessage(message, sender = null) {
   if (message?.type === 'ALLOW_AND_START_PENDING_MISSION_SITE' || message?.type === 'ENABLE_PENDING_MISSION_SITE') {
     return allowAndStartPendingMissionSite();
   }
-  if (message?.type === 'RUN_PENDING_SESSIONS') return pollAndExecute(message.sessionId || '');
+  if (message?.type === 'RUN_PENDING_SESSIONS') {
+    return pollAndExecute(
+      message.sessionId || '',
+      message.extensionDispatchNonce || '',
+      message.clientRunStartedAt || ''
+    );
+  }
   if (message?.type === 'REGISTER_PLUGIN') {
     await registerExecutor();
     return { registered: true };
   }
   if (message?.type === 'DISCONNECT') {
+    invalidateExecutorRegistration();
     await chrome.storage.local.clear();
+    await chrome.storage.session?.clear?.().catch(() => null);
     return { disconnected: true };
   }
   return { ok: true, sender: sender?.origin || null };

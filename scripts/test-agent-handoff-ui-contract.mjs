@@ -29,11 +29,19 @@ assert.match(html, /href="\$\{escapeHtml\(SANTACLAWZ_AGENT_ACTIVATE_URL\)\}"/, '
 const pollSource = extractFunctionSource('refreshExecutionSessionForPolling');
 assert.match(pollSource, /refreshExecutionPanelInPlace\(session\)/, 'steady-state polling must patch the open panel in place');
 assert.match(pollSource, /previousBucket !== nextBucket/, 'full rendering must be limited to real lifecycle transitions');
+assert.match(pollSource, /const terminalBrowserOrder = sessionHasBrowserOrderSubmitted\(session\)/, 'merchant confirmation must be evaluated before a lifecycle render');
+assert.match(pollSource, /isTerminalExecutionStatus\(session\.status\) \|\| terminalBrowserOrder/, 'merchant-confirmed browser orders must stop local polling immediately');
 assert.doesNotMatch(
   pollSource,
   /await renderExecutionSheet\(sessionId, \{ focus: false \}\)/,
   'polling must not unconditionally replace the execution dock'
 );
+
+const inPlaceSource = extractFunctionSource('refreshExecutionPanelInPlace');
+assert.match(inPlaceSource, /activityBar\?\.remove\(\)/, 'in-place updates must remove an active bar after a run completes');
+assert.match(inPlaceSource, /shouldShowExecutionActivityBar\(session, statusBadge\)/, 'activity treatment must derive from the latest confirmed session state');
+assert.match(html, /Order placed and confirmed by Amazon\./, 'merchant-confirmed orders must use explicit terminal copy');
+assert.match(html, /function shouldShowExecutionActivityBar\(session, statusModel\)/, 'activity-bar rendering must have a dedicated terminal-state guard');
 
 const submitSource = extractFunctionSource('submitIntentFromChat');
 assert.doesNotMatch(

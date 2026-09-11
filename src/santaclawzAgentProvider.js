@@ -3,6 +3,11 @@ import {
   listSantaClawzPreflightSnapshots,
   upsertSantaClawzPreflightSnapshot
 } from './store.js';
+import {
+  SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID,
+  getSantaClawzApprovedExternalAgentIds,
+  isApprovedSantaClawzAgentId
+} from './santaclawzIntegrationPolicy.js';
 
 const DEFAULT_SANTACLAWZ_API_BASE = 'https://api.santaclawz.ai';
 const DEFAULT_SANTACLAWZ_SITE_BASE = 'https://santaclawz.ai';
@@ -51,7 +56,9 @@ function cleanBaseUrl(value, fallback) {
 
 function sourceConfig() {
   return {
-    enabled: envBoolean('SANTACLAWZ_AGENT_SOURCE_ENABLED', true),
+    // SantaClawz is an optional marketplace integration. Keep it opt-in so a
+    // missing production variable cannot silently re-enable remote discovery.
+    enabled: envBoolean('SANTACLAWZ_AGENT_SOURCE_ENABLED', false),
     apiBase: cleanBaseUrl(
       process.env.SANTACLAWZ_API_BASE
         || process.env.CLAWZ_API_BASE
@@ -66,7 +73,8 @@ function sourceConfig() {
     timeoutMs: Math.max(250, Math.min(envNumber('SANTACLAWZ_AGENT_FETCH_TIMEOUT_MS', 8000), 10000)),
     refreshMs: Math.max(5000, Math.min(envNumber('SANTACLAWZ_AGENT_REFRESH_MS', 60000), 10 * 60 * 1000)),
     preflightSnapshotMs: Math.max(60 * 60 * 1000, Math.min(envNumber('SANTACLAWZ_PREFLIGHT_SNAPSHOT_MS', 24 * 60 * 60 * 1000), 7 * 24 * 60 * 60 * 1000)),
-    cacheLimit: Math.max(20, Math.min(envNumber('SANTACLAWZ_AGENT_CACHE_LIMIT', 200), 500))
+    cacheLimit: Math.max(20, Math.min(envNumber('SANTACLAWZ_AGENT_CACHE_LIMIT', 200), 500)),
+    approvedAgentIds: getSantaClawzApprovedExternalAgentIds()
   };
 }
 
@@ -87,7 +95,8 @@ function configKey(config) {
     config.enabled ? '1' : '0',
     config.apiBase,
     config.siteBase,
-    config.cacheLimit
+    config.cacheLimit,
+    config.approvedAgentIds.join(',')
   ].join('|');
 }
 
@@ -313,6 +322,7 @@ export function isSantaClawzAvailableForMagicCity(agent = {}) {
 }
 
 export function isSantaClawzProtocolHireReadyForMagicCity(agent = {}) {
+  if (!isApprovedSantaClawzAgentId(agent?.agentId || agent?.sessionId || '')) return false;
   if (hasLocalhostMarker(agent)) return false;
   if (isSantaClawzUtilityAgent(agent)) return false;
   if (isSantaClawzLocalDevelopmentAgent(agent)) return false;
@@ -916,7 +926,9 @@ function normalizeSantaClawzAgent(agent) {
   if (isSantaClawzPlaceholderListing(agent)) return null;
   const externalAgentId = String(agent?.agentId || agent?.sessionId || '').trim();
   if (!externalAgentId) return null;
-  const supportedLanes = inferSupportedLanes(agent);
+  const supportedLanes = externalAgentId === SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID
+    ? ['developer-tools-agent']
+    : inferSupportedLanes(agent);
   const capabilities = supportedLanes.length
     ? supportedLanes
     : arrayOfStrings(agent?.capabilityTags).slice(0, 6);
@@ -931,8 +943,10 @@ function normalizeSantaClawzAgent(agent) {
   const online = isSantaClawzAvailableForMagicCity(agent);
   const hireable = isSantaClawzHireReadyForMagicCity(agent);
   const demoOnline = online && !hireable;
-  const privacyModes = modeStrings(agent?.privacyModes);
-  const deliveryLanes = arrayOfStrings(agent?.deliveryLanes);
+  const privacyModes = modeStrings(agent?.privacyModes).filter((mode) => ['public', 'private'].includes(mode));
+  const deliveryLanes = externalAgentId === SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID
+    ? ['platform_scanned']
+    : arrayOfStrings(agent?.deliveryLanes);
   const marketplaceTags = tagStrings(agent?.marketplaceTags);
 
   return {
@@ -1076,7 +1090,7 @@ function buildSantaClawzAgentsFromPreflightSnapshots(limit = 200) {
         ? snapshot.metadata
         : {};
       const agentId = String(snapshot?.agentId || '').trim();
-      if (!agentId || metadata.online !== true || metadata.hireable !== true) return null;
+      if (!isApprovedSantaClawzAgentId(agentId) || metadata.online !== true || metadata.hireable !== true) return null;
       return {
         agentId,
         sessionId: agentId.split('--session_agent_')[1] ? `session_agent_${agentId.split('--session_agent_')[1]}` : null,
@@ -1196,6 +1210,7 @@ export async function getSantaClawzAuthoritativeRuntimeByMagicId(agentId, { forc
     : normalizedId;
   if (!externalId) return null;
   const snapshot = await refreshSantaClawzAgentCache({ force });
+  if (!isApprovedSantaClawzAgentId(externalId)) return null;
   return snapshot.agents.find((agent) => String(agent?.agentId || '').trim() === externalId) || null;
 }
 
@@ -1342,6 +1357,7 @@ export async function fetchSantaClawzDirectory({
   const trimmedQuery = String(query || '').trim();
   const maxResults = Math.max(1, Math.min(Number(limit) || 100, 500));
   const filteredAgents = snapshot.agents
+    .filter((agent) => isApprovedSantaClawzAgentId(agent?.agentId || ''))
     .filter((agent) => (online ? isSantaClawzAvailableForMagicCity(agent) : true))
     .filter((agent) => (hireable ? isSantaClawzVisibleForMagicCityMarketplace(agent) : true))
     .filter((agent) => matchesQuery(agent, trimmedQuery))

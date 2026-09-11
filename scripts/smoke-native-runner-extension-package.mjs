@@ -73,14 +73,90 @@ if (!/function normalizeActiveRunCandidate/.test(packagedLegacyBackground)
   || !/selectedCandidate:\s*progress\.selectedCandidate/.test(packagedLegacyBackground)) {
   fail('interrupted cart actions must retain a compact selected-product identity for replay protection');
 }
-if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,320}if \(!resumingPersistedRun\) \{[\s\S]{0,120}phase: 'claimed'/.test(packagedLegacyBackground)) {
-  fail('a resumed run must inspect its durable active-run marker before writing phase claimed');
+if (!/function normalizeActiveRunCartEvidence/.test(packagedLegacyBackground)
+  || !/function verifiedCartEvidenceFor/.test(packagedLegacyBackground)
+  || !/boundCartEvidence:\s*normalizeActiveRunCartEvidence/.test(packagedLegacyBackground)) {
+  fail('pending-order continuation must use session-bound evidence from the verified one-item cart');
+}
+if (!/safeFieldsFilled:\s*normalizeActiveRunEvidenceLabels\(entry\?\.safeFieldsFilled\)/.test(packagedLegacyBackground)
+  || !/checkoutSelections:\s*normalizeActiveRunEvidenceLabels\(entry\?\.checkoutSelections\)/.test(packagedLegacyBackground)) {
+  fail('inline checkpoint recovery must retain accumulated checkout evidence');
+}
+if (!/Array\.isArray\(dispatches\[tabKey\]\)/.test(packagedLegacyBackground)
+  || !/receipts\.find\(\(receipt\) => receipt\?\.receiptScope/.test(packagedLegacyBackground)
+  || !/priorPendingOrderDispatchReceipt = await finalOrderDispatchReceiptFor/.test(packagedLegacyBackground)) {
+  fail('first-submit and continuation dispatch receipts must remain independently durable by action scope');
+}
+if (!/const persistedActiveRun = await getActiveRun\(\);[\s\S]{0,600}phase: 'claiming'[\s\S]{0,1400}phase: 'claimed'/.test(packagedLegacyBackground)) {
+  fail('the runner must persist recovery before its remote claim and retain it after claiming');
+}
+if (!/recordWake\('wake_received'\)/.test(packagedLegacyBackground)
+  || !/recordWake\('wake_rejected'/.test(packagedLegacyBackground)
+  || !/requested_session_not_runnable/.test(packagedLegacyBackground)
+  || !/'claim_failed'/.test(packagedLegacyBackground)) {
+  fail('the runner must persist and return an exact-session wake or claim failure instead of silently leaving it queued');
+}
+const startupCheckpointStart = packagedLegacyBackground.indexOf('async function checkpointRunnerStartup(');
+const startupCheckpointSection = startupCheckpointStart >= 0
+  ? packagedLegacyBackground.slice(startupCheckpointStart, startupCheckpointStart + 1_200)
+  : '';
+if (!startupCheckpointSection.includes("planActionStatus: 'waiting'")
+  || !packagedLegacyBackground.includes('session = await checkpointRunnerStartup(session, plan, nextAction, startupTiming);')) {
+  fail('the runner must report a non-advancing startup checkpoint before browser work');
 }
 if (!/const isCartMutation = action\.type === 'click_intent' && action\.intent === 'add_to_cart';[\s\S]{0,500}cartStateVerifiesCandidateSelection\(report, action\)/.test(packagedLegacyBackground)) {
   fail('a recovered cart mutation must verify the selected product before skipping a retry');
 }
 if (!/finalSubmitRequested: action\.type === 'final_submit' && Boolean\(recoveredState\?\.orderSubmitted/.test(packagedLegacyBackground)) {
   fail('a recovered merchant order confirmation must retain final-submit evidence');
+}
+if (!/async function reconcileCompletedPlan\(/.test(packagedLegacyBackground)
+  || !/if \(!nextAction\) return reconcileCompletedPlan\(session, plan, planState, checkoutProfile\);/.test(packagedLegacyBackground)
+  || !/Recovered a completed signed plan from verified merchant confirmation/.test(packagedLegacyBackground)) {
+  fail('an exhausted signed plan must reconcile durable merchant confirmation without replaying a browser action');
+}
+if (!/runnerTiming:\s*\{[\s\S]{0,300}workerStartedAt:[\s\S]{0,300}checkpointRequestedAt\b/.test(packagedLegacyBackground)) {
+  fail('runner checkpoints must include worker and checkpoint timing for recovery diagnostics');
+}
+const packagedExecutorPath = path.join(unpackedDir, 'executor.js');
+if (!fs.existsSync(packagedExecutorPath)) fail('package is missing executor.js');
+const packagedExecutor = fs.readFileSync(packagedExecutorPath, 'utf8');
+if (!/function scheduleFinalOrderClick\(control\)/.test(packagedExecutor)
+  || !/function currentBrowserActionReceipts\(\)/.test(packagedExecutor)
+  || !/validatedLabel/.test(packagedExecutor)
+  || !/phase: 'final_submit_intent'/.test(packagedExecutor)
+  || !/phase: 'click_dispatched'/.test(packagedExecutor)
+  || !/type: 'MAGIC_CITY_FINAL_ORDER_DISPATCHED'/.test(packagedExecutor)
+  || !/EXECUTOR_MESSAGE_LISTENER_KEY/.test(packagedExecutor)
+  || !/function priorFinalOrderReceipt/.test(packagedExecutor)) {
+  fail('final order dispatch must retain wrapper validation, durable receipts, and a single current executor listener');
+}
+if (!/function activeCartItemEvidence\(\)/.test(packagedExecutor)
+  || !/function pendingOrderMatchEvidence\(action/.test(packagedExecutor)
+  || !/function canonicalProductTitle\(value = ''\)/.test(packagedExecutor)
+  || !/productTitleFromRow\(row, link\)/.test(packagedExecutor)
+  || !/identitySource:\s*asinRow \? 'asin'/.test(packagedExecutor)
+  || !/quantitySource:\s*quantityMatches \? 'verified_cart'/.test(packagedExecutor)
+  || !/quantityContradiction/.test(packagedExecutor)
+  || !/merchandisePriceContradiction/.test(packagedExecutor)
+  || !/action\.priorPendingOrderDispatchReceipt/.test(packagedExecutor)) {
+  fail('pending-order continuation must require exact product identity and previously verified cart quantity');
+}
+if (!/pendingOrderContinuationStep[\s\S]{0,1200}pending_order_verification_required/.test(packagedLegacyBackground)) {
+  fail('a sparse pending-order identity mismatch must remain a manual pending-order boundary');
+}
+if (/if \(globalThis\.__magicCityExecutorInstalled\) return;/.test(packagedExecutor)
+  || !/priorFinalOrderReceipt\([\s\S]{0,220}'click_dispatched'/.test(packagedExecutor)
+  || !/Final order dispatch was interrupted before the native merchant click/.test(packagedExecutor)) {
+  fail('executor reinjection must replace the current handler and intent-only final submits must not count as dispatched');
+}
+if (!/if \(message\?\.type === 'MAGIC_CITY_FINAL_ORDER_DISPATCHED'\)/.test(packagedLegacyBackground)
+  || !/saveFinalOrderDispatchReceipt\(sender\?\.tab\?\.id, message\.receipt\)/.test(packagedLegacyBackground)) {
+  fail('the background must persist the dispatched final-order receipt before page navigation can unload the content script');
+}
+if (!/outcome\.finalSubmitReceipt\?\.kind === 'final_order'[\s\S]{0,160}outcome\.finalSubmitReceipt\?\.phase === 'click_dispatched'/.test(packagedLegacyBackground)
+  || !/nextActionIndex: finalSubmitReceiptRecorded \? index \+ 1 : index/.test(packagedLegacyBackground)) {
+  fail('a failed final submit must retain its signed action cursor');
 }
 const checkoutNavigationMarker = 'Opening checkout is navigation only.';
 const checkoutNavigationIndex = packagedLegacyBackground.indexOf(checkoutNavigationMarker);
@@ -90,21 +166,45 @@ const checkoutNavigationSection = checkoutNavigationIndex >= 0
 if (!checkoutNavigationSection || /runCheckoutProfileReconcile/.test(checkoutNavigationSection)) {
   fail('open-checkout must remain a navigation primitive, without hidden profile reconciliation');
 }
-if (!/ACTIVE_MISSION_CONTINUATION_DELAY_MS/.test(packagedBackground)
+if (!/ACTIVE_MISSION_RECOVERY_DELAY_MS\s*=\s*30_000/.test(packagedBackground)
   || !/result\?\.status === 'already_running'/.test(packagedBackground)) {
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
+}
+if (!/async function reconcileCommittedCheckpoint\(result\)/.test(packagedBackground)
+  || !/open-site\|\(\?:prepare\|open\)-cart\|continue-checkout\|inspect-review\|confirm-pending-order\|confirm-merchant-order/.test(packagedBackground)) {
+  fail('committed checkout checkpoints must reconcile inline only for the reviewed action allowlist');
+}
+if (!/if \(hasConfirmedMerchantOrder\(report\)\) \{[\s\S]{0,240}return reportAndStop\(/.test(packagedLegacyBackground)) {
+  fail('durably checkpointed merchant confirmation must terminate before later tab-dependent actions');
+}
+if (!/onConnectExternal/.test(packagedBackground)
+  || !/magic-city-active-run-v1/.test(packagedBackground)
+  || !/RUNNER_PROGRESS/.test(packagedBackground)
+  || !/RUNNER_RESULT/.test(packagedBackground)
+  || !/chrome\.storage\.onChanged\?\.addListener/.test(packagedBackground)) {
+  fail('normal mission execution must use a live progress channel instead of alarm-paced continuation');
 }
 if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.test(packagedBackground)
   || !/return dispatch\(message, \{ origin \}\);/.test(packagedBackground)
   || !/Keep the external message open through the exact-session claim/.test(packagedBackground)) {
   fail('external runner wake must run through the direct exact-session claim path, without detached MV3 work');
 }
-if (!/async function pollAndExecute\(requestedSessionId = ''\)/.test(packagedLegacyBackground)
-  || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)) {
+if (!/async function pollAndExecute\(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = ''\)/.test(packagedLegacyBackground)
+  || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)
+  || !/directClaim:\s*true/.test(packagedLegacyBackground)
+  || !/extensionRunDispatch:\s*\{ nonce: normalizedDispatchNonce \}/.test(packagedLegacyBackground)) {
   fail('runner execution must select the exact session requested by Magic City');
 }
-if (!/async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id\)/.test(packagedLegacyBackground)) {
+if (!/async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id, dispatchedSession\.extensionRunDispatch\?\.nonce/.test(packagedLegacyBackground)) {
   fail('heartbeat fallback must execute only a still-valid user-dispatched browser mission');
+}
+if (!/EXECUTOR_REGISTRATION_REUSE_MS\s*=\s*30_000/.test(packagedLegacyBackground)
+  || !/executorRegistrationInFlight/.test(packagedLegacyBackground)
+  || !/registrationReused:\s*true/.test(packagedLegacyBackground)) {
+  fail('startup must reuse or share a recent executor registration');
+}
+if (!/outcome\.alreadyInCart === true[\s\S]{0,500}amazon cart was already open/i.test(packagedLegacyBackground)) {
+  fail('an already-open cart must bypass navigation waits and fallback reloads');
 }
 if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackground)
   || !/const navigation = waitForTabNavigation\(tabId, beforeUrl, timeoutMs\);[\s\S]*const updatedTab = await withTimeout/.test(packagedLegacyBackground)) {
@@ -121,6 +221,42 @@ if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackgr
   });
   if (smoke.error) fail(smoke.error.message);
   if (smoke.status !== 0) fail(`browser smoke exited with ${smoke.status}`);
+
+  const connectionDropSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+      MAGIC_CITY_BROWSER_SMOKE_FOCUS: 'cart-checkpoint-connection-drop'
+    },
+    stdio: 'inherit'
+  });
+  if (connectionDropSmoke.error) fail(connectionDropSmoke.error.message);
+  if (connectionDropSmoke.status !== 0) fail(`cart checkpoint connection-drop smoke exited with ${connectionDropSmoke.status}`);
+
+  const checkoutResponseLossSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+      MAGIC_CITY_BROWSER_SMOKE_FOCUS: 'checkout-checkpoint-response-loss'
+    },
+    stdio: 'inherit'
+  });
+  if (checkoutResponseLossSmoke.error) fail(checkoutResponseLossSmoke.error.message);
+  if (checkoutResponseLossSmoke.status !== 0) fail(`checkout checkpoint response-loss smoke exited with ${checkoutResponseLossSmoke.status}`);
+
+  const confirmedOrderTerminalSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+      MAGIC_CITY_BROWSER_SMOKE_FOCUS: 'confirmed-order-terminal'
+    },
+    stdio: 'inherit'
+  });
+  if (confirmedOrderTerminalSmoke.error) fail(confirmedOrderTerminalSmoke.error.message);
+  if (confirmedOrderTerminalSmoke.status !== 0) fail(`confirmed order terminal smoke exited with ${confirmedOrderTerminalSmoke.status}`);
 
   console.log(`native-runner extension release package smoke passed: ${zipPath}`);
 } finally {

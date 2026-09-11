@@ -4,6 +4,7 @@ import {
   evaluateBrowserExtensionFulfillment,
   validateBrowserExtensionPlan
 } from '../src/browserMissionPlan.js';
+import { runAssistedBrowserWorkerExecution } from '../src/browserExecution.js';
 
 const baseSession = {
   id: 'final-review-policy-smoke',
@@ -31,9 +32,10 @@ assert.equal(automaticPlan.primeRequired, true);
 assert.ok(automaticPlan.actions.every((action) => action.fulfillmentPolicy === 'amazon_free_shipping_preferred'));
 assert.ok(automaticPlan.actions.every((action) => action.primeRequired === true));
 assert.equal(automaticPlan.requireMerchantOrderConfirmation, true);
-assert.equal(automaticPlan.actions.at(-3)?.type, 'final_submit');
-assert.equal(automaticPlan.actions.at(-3)?.autoSubmitAfterVerifiedCheckout, true);
-assert.equal(automaticPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
+assert.equal(automaticPlan.actions.find((action) => action.id === 'submit-final-order')?.type, 'final_submit');
+assert.equal(automaticPlan.actions.find((action) => action.id === 'submit-final-order')?.autoSubmitAfterVerifiedCheckout, true);
+assert.equal(automaticPlan.actions.find((action) => action.id === 'submit-final-order')?.saveMerchantCheckoutDefault, true);
+assert.equal(automaticPlan.actions.find((action) => action.id === 'confirm-pending-order')?.pendingOrderContinuation, true);
 assert.equal(automaticPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 assert.equal(automaticPlan.actions.at(-2)?.expectedMilestone, 'order_submitted');
 assert.equal(automaticPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
@@ -44,10 +46,25 @@ assert.equal(validateBrowserExtensionPlan(defaultAmazonPlan).valid, true);
 assert.equal(defaultAmazonPlan.limits.stopBeforeFinalSubmit, false);
 assert.equal(defaultAmazonPlan.saveMerchantCheckoutDefault, true);
 assert.equal(defaultAmazonPlan.requireMerchantOrderConfirmation, true);
-assert.equal(defaultAmazonPlan.actions.at(-3)?.type, 'final_submit');
-assert.equal(defaultAmazonPlan.actions.at(-3)?.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.actions.find((action) => action.id === 'submit-final-order')?.type, 'final_submit');
+assert.equal(defaultAmazonPlan.actions.find((action) => action.id === 'submit-final-order')?.saveMerchantCheckoutDefault, true);
+assert.equal(defaultAmazonPlan.actions.find((action) => action.id === 'confirm-pending-order')?.pendingOrderContinuation, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.awaitMerchantOrderConfirmation, true);
 assert.equal(defaultAmazonPlan.actions.at(-2)?.merchantConfirmationTimeoutMs, 90_000);
+
+const staleLegacyStopPolicy = await runAssistedBrowserWorkerExecution({
+  ...baseSession,
+  selections: {
+    ...baseSession.selections,
+    finalApprovalPolicy: 'auto_submit_after_verified_checkout',
+    // Older connector payloads included this generic default. The signed
+    // Amazon policy must win, otherwise a fresh mission pauses at Place order.
+    checkoutRunnerStopBeforeFinalSubmit: true
+  }
+});
+assert.equal(staleLegacyStopPolicy.localCheckoutRunner.finalApprovalPolicy, 'auto_submit_after_verified_checkout');
+assert.equal(staleLegacyStopPolicy.localCheckoutRunner.stopBeforeFinalSubmit, false);
+assert.equal(staleLegacyStopPolicy.paymentPolicy.finalApprovalPolicy, 'auto_submit_after_verified_checkout');
 
 const reviewPlan = buildBrowserExtensionMissionPlan({
   ...baseSession,
@@ -60,15 +77,20 @@ const reviewPlan = buildBrowserExtensionMissionPlan({
 assert.equal(validateBrowserExtensionPlan(reviewPlan).valid, true);
 assert.equal(reviewPlan.limits.stopBeforeFinalSubmit, true);
 assert.equal(reviewPlan.actions.some((action) => action.type === 'final_submit'), false);
+const continueCheckoutIndex = reviewPlan.actions.findIndex((action) => action.id === 'continue-checkout');
+const paymentReconcileIndex = reviewPlan.actions.findIndex((action) => action.id === 'reconcile-payment-profile');
+const inspectReviewIndex = reviewPlan.actions.findIndex((action) => action.id === 'inspect-review');
 assert.ok(
-  reviewPlan.actions.findIndex((action) => action.id === 'inspect-review')
-    > reviewPlan.actions.findIndex((action) => action.id === 'continue-checkout'),
+  inspectReviewIndex > continueCheckoutIndex,
   'the lean checkout plan must still verify final review after the checkout transition'
 );
-assert.equal(
-  reviewPlan.actions.some((action) => action.id === 'reconcile-payment-profile'),
-  false,
-  'single-item Amazon happy path uses the checkout transition reconcile instead of a duplicate visible step'
+assert.ok(
+  paymentReconcileIndex > continueCheckoutIndex,
+  'single-item checkout must reconcile address/card cues after Amazon enters its payment page'
+);
+assert.ok(
+  inspectReviewIndex > paymentReconcileIndex,
+  'final review may be inspected only after the post-navigation payment reconciliation'
 );
 
 const approvedResumePlan = buildBrowserExtensionMissionPlan({
@@ -85,7 +107,7 @@ assert.equal(approvedResumePlan.resumeFinalSubmit, true);
 assert.equal(approvedResumePlan.limits.stopBeforeFinalSubmit, false);
 assert.deepEqual(
   approvedResumePlan.actions.map((action) => action.type),
-  ['inspect', 'fill_checkout_profile', 'inspect', 'final_submit', 'inspect', 'pause']
+  ['inspect', 'fill_checkout_profile', 'inspect', 'final_submit', 'final_submit', 'inspect', 'pause']
 );
 assert.equal(approvedResumePlan.actions.some((action) => action.type === 'navigate'), false);
 assert.equal(approvedResumePlan.actions.find((action) => action.type === 'final_submit')?.maxPrice, 4);
@@ -105,13 +127,44 @@ const checkoutReconcilePlan = buildBrowserExtensionMissionPlan({
 
 assert.equal(validateBrowserExtensionPlan(checkoutReconcilePlan).valid, true);
 assert.equal(checkoutReconcilePlan.resumeCheckoutReconcile, true);
+assert.equal(checkoutReconcilePlan.resumeCheckoutAutoSubmit, false);
 assert.equal(checkoutReconcilePlan.startUrl, 'https://www.amazon.com/checkout/p/example?pipelineType=Chewbacca');
 assert.equal(checkoutReconcilePlan.limits.stopBeforeFinalSubmit, true);
 assert.deepEqual(
   checkoutReconcilePlan.actions.map((action) => action.type),
-  ['navigate', 'fill_checkout_profile', 'inspect', 'pause']
+  ['navigate', 'fill_checkout_profile', 'click_intent', 'fill_checkout_profile', 'inspect', 'pause']
 );
+assert.equal(checkoutReconcilePlan.actions[0].preserveExistingCheckout, true);
+assert.equal(checkoutReconcilePlan.actions[0].resumeCheckoutReconcile, true);
 assert.equal(checkoutReconcilePlan.actions.some((action) => action.type === 'final_submit'), false);
+
+const automaticCheckoutReconcilePlan = buildBrowserExtensionMissionPlan({
+  ...baseSession,
+  extensionCheckoutReconcileResume: true,
+  extensionCheckoutReconcileUrl: 'https://www.amazon.com/checkout/p/example?pipelineType=Chewbacca',
+  fulfillment: {
+    result: {
+      browserExecution: {
+        finalUrl: 'https://www.amazon.com/checkout/p/example?pipelineType=Chewbacca'
+      }
+    }
+  },
+  selections: {
+    ...baseSession.selections,
+    finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+  }
+});
+
+assert.equal(validateBrowserExtensionPlan(automaticCheckoutReconcilePlan).valid, true);
+assert.equal(automaticCheckoutReconcilePlan.resumeCheckoutReconcile, true);
+assert.equal(automaticCheckoutReconcilePlan.resumeCheckoutAutoSubmit, true);
+assert.equal(automaticCheckoutReconcilePlan.limits.stopBeforeFinalSubmit, false);
+assert.deepEqual(
+  automaticCheckoutReconcilePlan.actions.map((action) => action.type),
+  ['navigate', 'fill_checkout_profile', 'click_intent', 'fill_checkout_profile', 'inspect', 'final_submit', 'final_submit', 'inspect', 'pause']
+);
+assert.equal(automaticCheckoutReconcilePlan.actions[0].preserveExistingCheckout, true);
+assert.equal(automaticCheckoutReconcilePlan.actions.find((action) => action.type === 'final_submit')?.maxPrice, 4);
 
 const clickedButUnconfirmed = evaluateBrowserExtensionFulfillment({
   status: 'fulfilled',

@@ -3,16 +3,27 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import {
-  createSubmission,
-  findSubmissionByPayloadHash,
+  createOrGetSubmission,
   getSubmission,
   getZekoRelayerPersistenceStatus,
   listSubmissions,
   updateSubmission
 } from './zekoSubmitterStore.js';
+import {
+  getMbaMissionRegistryBootstrapState,
+  getMbaMissionRegistryConfig,
+  submitMbaMissionRegistryAnchor
+} from './mba/missionRegistryAnchor.js';
+import { MBA_MISSION_REGISTRY_ADDRESS } from './mba/registryConfig.js';
+import {
+  getMbaMissionRegistryPersistenceStatus,
+  getMbaMissionRegistryState,
+  upsertMbaMissionRegistryState,
+  withMbaMissionRegistryMutationLock
+} from './mbaRegistryStore.js';
 
 // The relayer is an internal capability. Expose it only when an operator opts in.
-const HOST = process.env.ZEKO_RELAYER_HOST || process.env.ZEKO_SUBMITTER_HOST || '127.0.0.1';
+const HOST = process.env.ZEKO_RELAYER_HOST || process.env.ZEKO_SUBMITTER_HOST || process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.ZEKO_RELAYER_PORT ?? process.env.ZEKO_SUBMITTER_PORT ?? 4412);
 const TOKEN = process.env.ZEKO_RELAYER_TOKEN || process.env.ZEKO_SUBMITTER_TOKEN || '';
 const MODE = process.env.ZEKO_RELAYER_MODE || process.env.ZEKO_SUBMITTER_MODE || 'record';
@@ -29,9 +40,10 @@ const ZEKO_O1JS_NETWORK_ID =
   process.env.ZEKO_O1JS_NETWORK_ID ||
   (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'zeko-mainnet' : 'testnet');
 const ZEKO_IS_MAINNET = String(ZEKO_NETWORK_ID).includes('mainnet');
-const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
-const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
-const TX_FEE = process.env.TX_FEE || '100000000';
+const ZEKO_IS_SEPOLIA = String(ZEKO_NETWORK_ID).includes('sepolia');
+const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_SEPOLIA ? 'https://sepolia.zeko.io/graphql' : ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
+const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_SEPOLIA ? ZEKO_GRAPHQL : ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
+const TX_FEE = process.env.TX_FEE || (ZEKO_IS_SEPOLIA ? '200000' : '100000000');
 const RELAYER_PRIVATE_KEY =
   process.env.ZEKO_RELAYER_PRIVATE_KEY ||
   process.env.ZEKO_MISSION_AUTH_RELAYER_PRIVATE_KEY ||
@@ -41,6 +53,7 @@ const ANCHOR_PAYMENT_AMOUNT = process.env.ZEKO_ANCHOR_PAYMENT_AMOUNT || '1';
 const ANCHOR_RECIPIENT = process.env.ZEKO_ANCHOR_RECIPIENT || '';
 const MISSION_AUTH_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY || '';
 const MISSION_AUTH_REGISTRY_PRIVATE_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY || '';
+const MBA_MISSION_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || process.env.MISSION_REGISTRY_PUBLIC_KEY || MBA_MISSION_REGISTRY_ADDRESS;
 const ZEKO_PROOF_CACHE_DIR = String(process.env.ZEKO_PROOF_CACHE_DIR || '').trim();
 const PRE_BROADCAST_RETRY_LIMIT = Math.max(
   1,
@@ -125,10 +138,16 @@ async function readBody(req, maxBytes = 512 * 1024) {
 }
 
 function assertToken(req) {
-  if (!TOKEN) return true;
+  if (!TOKEN) {
+    const err = new Error('relayer_auth_not_configured');
+    err.statusCode = 503;
+    throw err;
+  }
   const header = req.headers.authorization || '';
   const expected = `Bearer ${TOKEN}`;
-  if (header !== expected) {
+  const actualBytes = Buffer.from(header);
+  const expectedBytes = Buffer.from(expected);
+  if (actualBytes.length !== expectedBytes.length || !crypto.timingSafeEqual(actualBytes, expectedBytes)) {
     const err = new Error('unauthorized');
     err.statusCode = 401;
     throw err;
@@ -170,6 +189,11 @@ function isTransientSendError(message) {
   return /502|504|Bad Gateway|Gateway Timeout|timeout|timed out|fetch failed|ECONNRESET|UND_ERR|socket/i.test(String(message || ''));
 }
 
+function extractZekoTxHash(value) {
+  const match = String(value || '').match(/\btxHash=([1-9A-HJ-NP-Za-km-z]{20,})\b/);
+  return match?.[1] || null;
+}
+
 async function computeSignedTransactionHash(signedTx, Transaction) {
   try {
     if (!signedTx || typeof signedTx.toJSON !== 'function' || !Transaction?.hash) return null;
@@ -182,40 +206,11 @@ async function computeSignedTransactionHash(signedTx, Transaction) {
 const ACCOUNT_CACHE_QUERY = `query Account($pk: PublicKey!) {
   account(publicKey: $pk) {
     publicKey
-    token
     nonce
     balance { total }
-    tokenSymbol
-    receiptChainHash
-    timing {
-      initialMinimumBalance
-      cliffTime
-      cliffAmount
-      vestingPeriod
-      vestingIncrement
-    }
-    permissions {
-      editState
-      access
-      send
-      receive
-      setDelegate
-      setPermissions
-      setVerificationKey { auth txnVersion }
-      setZkappUri
-      editActionState
-      setTokenSymbol
-      incrementNonce
-      setVotingFor
-      setTiming
-    }
-    delegateAccount { publicKey }
-    votingFor
     zkappState
-    verificationKey { verificationKey hash }
-    actionState
+    verificationKey { hash }
     provedState
-    zkappUri
   }
 }`;
 
@@ -269,17 +264,104 @@ function requireAnchorPayload(body) {
     throw err;
   }
   const payload = body.anchorPayload;
-  if (payload.schema !== 'magic-city-anchor-v1') {
+  const mbaAnchor = payload.schema === 'magic-city-final-submit-chain-anchor-v1';
+  if (payload.schema !== 'magic-city-anchor-v1' && !mbaAnchor) {
     const err = new Error('invalid_anchor_schema');
     err.statusCode = 400;
     throw err;
   }
-  if (!payload.statementHash || !payload.requestCommitment || !payload.batchRoot) {
+  if (!payload.statementHash || (!mbaAnchor && (!payload.requestCommitment || !payload.batchRoot))) {
     const err = new Error('missing_anchor_fields');
     err.statusCode = 400;
     throw err;
   }
   return payload;
+}
+
+async function readMbaRegistryOnChain() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  timeout.unref?.();
+  try {
+    const response = await fetch(ZEKO_GRAPHQL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: 'query MbaRegistry($pk: PublicKey!) { account(publicKey: $pk) { publicKey nonce zkappState verificationKey { hash } } }',
+        variables: { pk: MBA_MISSION_REGISTRY_PUBLIC_KEY }
+      })
+    });
+    const payload = await response.json();
+    const account = payload?.data?.account;
+    const state = Array.isArray(account?.zkappState) ? account.zkappState : [];
+    if (!response.ok || payload?.errors?.length || !account?.publicKey || !account?.verificationKey?.hash || !state[4] || state[5] == null) {
+      throw new Error('mba_registry_chain_state_unavailable');
+    }
+    return {
+      reachable: true,
+      accountNonce: String(account.nonce || ''),
+      registryRoot: String(state[4]),
+      sequence: String(state[5]),
+      verificationKeyHash: String(account.verificationKey.hash)
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function mbaRelayerReadiness() {
+  const persistence = getMbaMissionRegistryPersistenceStatus();
+  const config = getMbaMissionRegistryConfig();
+  const onchain = await readMbaRegistryOnChain();
+  let mirror = await getMbaMissionRegistryState(MBA_MISSION_REGISTRY_PUBLIC_KEY);
+  if (!mirror && onchain.reachable) {
+    try {
+      const bootstrap = getMbaMissionRegistryBootstrapState(MBA_MISSION_REGISTRY_PUBLIC_KEY);
+      if (bootstrap.registryRoot === onchain.registryRoot && bootstrap.sequence === onchain.sequence) {
+        mirror = await upsertMbaMissionRegistryState(MBA_MISSION_REGISTRY_PUBLIC_KEY, {
+          ...bootstrap,
+          initializedFrom: 'verified_chain_bootstrap'
+        });
+      }
+    } catch {
+      // A custom registry must have an explicitly provisioned durable mirror.
+    }
+  }
+  const mirrorMatchesOnchain = Boolean(
+    onchain.reachable
+    && mirror
+    && mirror.pending == null
+    && String(mirror.registryRoot || '') === onchain.registryRoot
+    && String(mirror.sequence || '') === onchain.sequence
+  );
+  return {
+    ready: Boolean(config.configured && persistence.healthy && onchain.reachable && mirrorMatchesOnchain),
+    registryAddress: MBA_MISSION_REGISTRY_PUBLIC_KEY,
+    capabilities: ['mba_mission_registry', 'registry_state_sync'],
+    credentialsConfigured: config.configured,
+    persistence,
+    chain: {
+      reachable: onchain.reachable,
+      accountNonce: onchain.accountNonce || null,
+      registryRoot: onchain.registryRoot || null,
+      sequence: onchain.sequence || null,
+      error: onchain.error || null
+    },
+    mirror: mirror
+      ? {
+          registryRoot: String(mirror.registryRoot || ''),
+          sequence: String(mirror.sequence || ''),
+          pending: Boolean(mirror.pending),
+          matchesOnchain: mirrorMatchesOnchain
+        }
+      : { registryRoot: null, sequence: null, pending: false, matchesOnchain: false }
+  };
 }
 
 function buildTxPlan(anchorPayload, payloadHash) {
@@ -565,7 +647,10 @@ async function runSubmitOnce(submissionId) {
     throw err;
   }
   try {
-    const sent = await submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash);
+    const sent = MODE === 'mba_mission_registry'
+      ? await withMbaMissionRegistryMutationLock(MBA_MISSION_REGISTRY_PUBLIC_KEY, () =>
+        submitMbaMissionRegistryAnchor(submission.anchorPayload, submission.payloadHash))
+      : await submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash);
     const updated = await updateSubmission(submission.id, {
       status: sent.txHash ? 'submitted' : 'pending',
       txHash: sent.txHash,
@@ -584,17 +669,18 @@ async function runSubmitOnce(submissionId) {
     }));
     return updated;
   } catch (error) {
-    const stage = String(error?.executionStage || 'mission_auth_registry');
+    const stage = String(error?.executionStage || MODE);
     const submissionUncertain = Boolean(error?.submissionUncertain);
     const message = error instanceof Error ? error.message : String(error);
+    const preservedTxHash = error?.txHash || extractZekoTxHash(message) || submission.txHash || null;
     await updateSubmission(submission.id, {
       status: submissionUncertain ? 'submission_unknown' : 'failed',
-      txHash: error?.txHash || submission.txHash || null,
+      txHash: preservedTxHash,
       result: {
         accepted: false,
         errorCode: message || 'relayer_submission_failed',
         stage,
-        txHash: error?.txHash || submission.txHash || null,
+        txHash: preservedTxHash,
         safeToRetrySamePayload: !submissionUncertain && error?.safeToRetry !== false
       }
     }).catch(() => null);
@@ -621,8 +707,8 @@ function runSubmitOnceChild(submissionId) {
     };
     const timeout = setTimeout(() => {
       child.kill('SIGKILL');
-      const err = new Error(`mission_auth_registry_child_timeout:${ZEKO_RELAYER_JOB_TIMEOUT_MS}`);
-      err.executionStage = 'mission_auth_registry_child';
+      const err = new Error(`${MODE}_child_timeout:${ZEKO_RELAYER_JOB_TIMEOUT_MS}`);
+      err.executionStage = `${MODE}_child`;
       err.submissionUncertain = true;
       err.safeToRetry = false;
       finish(() => reject(err));
@@ -637,7 +723,7 @@ function runSubmitOnceChild(submissionId) {
       if (stderr.length > 256 * 1024) stderr = stderr.slice(-128 * 1024);
     });
     child.on('error', (error) => {
-      error.executionStage = 'mission_auth_registry_child_spawn';
+      error.executionStage = `${MODE}_child_spawn`;
       finish(() => reject(error));
     });
     child.on('exit', (code, signal) => {
@@ -648,13 +734,14 @@ function runSubmitOnceChild(submissionId) {
           const parsed = JSON.parse(lines.at(-1) || '{}');
           return finish(() => resolve(parsed));
         } catch (error) {
-          error.executionStage = 'mission_auth_registry_child_parse';
+          error.executionStage = `${MODE}_child_parse`;
           return finish(() => reject(error));
         }
       }
-      const err = new Error(stderr.trim().slice(-1000) || `mission_auth_registry_child_exit:${code ?? signal}`);
-      err.executionStage = 'mission_auth_registry_child';
+      const err = new Error(stderr.trim().slice(-1000) || `${MODE}_child_exit:${code ?? signal}`);
+      err.executionStage = `${MODE}_child`;
       err.submissionUncertain = /submission_unknown|send_timeout|SIGKILL|timeout|Bad Gateway|Gateway Timeout|502|504/i.test(String(stderr || signal || ''));
+      err.txHash = extractZekoTxHash(stderr);
       finish(() => reject(err));
     });
   });
@@ -668,12 +755,16 @@ async function handleSubmit(req, res) {
   const networkId = body.networkId || ZEKO_NETWORK_ID;
   const anchorKey = buildAnchorKey(anchorPayload, networkId);
 
-  const recentSubmissions = await listSubmissions(200);
-  const previous = recentSubmissions.find((candidate) => {
-    if (candidate.anchorKey === anchorKey) return true;
-    if (!candidate.anchorPayload) return candidate.payloadHash === payloadHash;
-    return buildAnchorKey(candidate.anchorPayload, candidate.networkId || ZEKO_NETWORK_ID) === anchorKey;
-  }) || await findSubmissionByPayloadHash(payloadHash);
+  const reservation = await createOrGetSubmission({
+    status: 'received',
+    mode: MODE,
+    payloadHash,
+    anchorKey,
+    networkId,
+    anchorPayload,
+    txPlan: buildTxPlan(anchorPayload, payloadHash)
+  });
+  const previous = reservation.created ? null : reservation.submission;
   if (previous?.status === 'submitted' && previous.txHash) {
     return sendJson(res, 200, {
       id: previous.id,
@@ -709,26 +800,16 @@ async function handleSubmit(req, res) {
     });
   }
 
-  const submission = previous?.status === 'failed'
-    ? await updateSubmission(previous.id, {
-        status: 'received',
-        mode: MODE,
-        payloadHash,
-        anchorKey,
-        networkId,
-        anchorPayload,
-        txPlan: buildTxPlan(anchorPayload, payloadHash),
-        result: { retryingSamePayload: true }
-      })
-    : await createSubmission({
-        status: 'received',
-        mode: MODE,
-        payloadHash,
-        anchorKey,
-        networkId,
-        anchorPayload,
-        txPlan: buildTxPlan(anchorPayload, payloadHash)
-      });
+  if (previous) {
+    return sendJson(res, 409, {
+      error: 'mission_auth_submission_not_retryable',
+      id: previous.id,
+      status: previous.status || 'failed',
+      payloadHash: previous.payloadHash,
+      anchorKey
+    });
+  }
+  const submission = reservation.submission;
 
   if (MODE === 'record') {
     const updated = await updateSubmission(submission.id, {
@@ -785,11 +866,11 @@ async function handleSubmit(req, res) {
     });
   }
 
-  if (MODE === 'mission_auth_registry') {
+  if (MODE === 'mission_auth_registry' || MODE === 'mba_mission_registry') {
     try {
       await updateSubmission(submission.id, {
         status: 'processing',
-        result: { accepted: true, stage: 'mission_auth_registry' }
+        result: { accepted: true, stage: MODE }
       });
       const childResult = await runSubmitOnceChild(submission.id);
       const updated = await getSubmission(submission.id) || childResult;
@@ -801,7 +882,7 @@ async function handleSubmit(req, res) {
         result: updated.result
       });
     } catch (error) {
-      const stage = String(error?.executionStage || 'mission_auth_registry');
+      const stage = String(error?.executionStage || MODE);
       const current = await getSubmission(submission.id).catch(() => null);
       const submissionUncertain = Boolean(error?.submissionUncertain || current?.status === 'submission_unknown');
       const preservedTxHash = error?.txHash || current?.txHash || current?.result?.txHash || null;
@@ -856,16 +937,18 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
     if (req.method === 'GET' && url.pathname === '/health') {
+      const mba = MODE === 'mba_mission_registry' ? await mbaRelayerReadiness() : null;
       return sendJson(res, 200, {
         status: 'ok',
-        service: 'zeko-relayer',
+        service: MODE === 'mba_mission_registry' ? 'magic-city-mba-relayer' : 'zeko-relayer',
         mode: MODE,
         networkId: ZEKO_NETWORK_ID,
         o1jsNetworkId: ZEKO_O1JS_NETWORK_ID,
         graphql: ZEKO_GRAPHQL,
         archive: ZEKO_ARCHIVE,
         registryConfigured: Boolean(MISSION_AUTH_REGISTRY_PUBLIC_KEY || MISSION_AUTH_REGISTRY_PRIVATE_KEY),
-        persistence: getZekoRelayerPersistenceStatus()
+        persistence: getZekoRelayerPersistenceStatus(),
+        mba
       });
     }
 

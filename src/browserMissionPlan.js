@@ -46,10 +46,13 @@ const VERIFIED_HUMAN_BOUNDARIES = new Set([
   'captcha_or_challenge_required',
   'login_required',
   'payment_required',
-  'final_approval_required'
+  'final_approval_required',
+  'pending_order_verification_required'
 ]);
 const UNVERIFIED_TECHNICAL_STOPS = new Set([
   'basket_item_not_added',
+  'final_submit_dispatch_failed',
+  'final_submit_unconfirmed',
   'local_checkout_profile_missing',
   'product_selection_needs_review',
   'milestone_not_verified',
@@ -136,10 +139,11 @@ export function evaluateBrowserExtensionFulfillment({ status = '', result = null
   );
 
   if (requestedStatus === 'failed') {
+    const terminalEvidenceVerified = !UNVERIFIED_TECHNICAL_STOPS.has(stopState);
     return {
       status: 'failed',
-      accepted: true,
-      proofEligible: !UNVERIFIED_TECHNICAL_STOPS.has(stopState),
+      accepted: terminalEvidenceVerified,
+      proofEligible: terminalEvidenceVerified,
       reason: stopState || 'runner_reported_failure'
     };
   }
@@ -393,6 +397,11 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   const fulfillmentPolicy = String(session.extensionFulfillmentPolicy || (
     fastAmazonCatalogPlan ? 'amazon_free_shipping_preferred' : 'merchant_default'
   ));
+  // Home delivery is the retail default. Pickup needs explicit, separately
+  // signed consent and is never inferred from a merchant promotion.
+  const fulfillmentMode = String(session.extensionFulfillmentMode || '').trim() === 'pickup_allowed'
+    ? 'pickup_allowed'
+    : 'home_delivery';
   // Keep the existing policy name for older published runners, while adding an
   // explicit capability flag that newer runners enforce as Prime-only.
   const primeRequired = session.extensionPrimeRequired === true
@@ -406,8 +415,8 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   const finalApprovalPolicy = String(selections.finalApprovalPolicy || '').trim().toLowerCase();
   // One Amazon Run authorizes one checkout submit only when the local runner
   // can still verify the merchant, cap, saved address, and selected card cue.
-  // A recovery-only reconciliation retains its pause so it cannot transform a
-  // previously stopped session into a fresh spend authority.
+  // A recovery may keep that authority only when the session itself was
+  // already configured to auto-submit; a review-only session must still pause.
   const autoSubmitAfterVerifiedCheckout = (finalApprovalPolicy === 'auto_submit_after_verified_checkout'
     || (!finalApprovalPolicy && fastAmazonCatalogPlan && !requestedCheckoutReconcile))
     && extensionFinalSubmitEnabled;
@@ -420,6 +429,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
   // instead of replaying catalog search and cart work.
   const resumeFinalSubmit = Boolean(session.extensionFinalSubmitResume && autoSubmitAfterVerifiedCheckout);
   const resumeCheckoutReconcile = Boolean(requestedCheckoutReconcile && fillLocalCheckoutProfile && checkoutResumeUrl);
+  const resumeCheckoutAutoSubmit = Boolean(resumeCheckoutReconcile && autoSubmitAfterVerifiedCheckout);
   const itemizedBasket = shoppingItems.length > 1;
   const plannedItems = itemizedBasket
     ? shoppingItems.slice(0, MAX_PLANNED_BASKET_ITEMS)
@@ -498,28 +508,51 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     maxPrice,
     expectedMilestone: 'final_submit_requested'
   });
+  const pendingOrderContinuationAction = () => buildAction('confirm-pending-order', 'final_submit', 'final_submit', {
+    autoSubmitAfterVerifiedCheckout: true,
+    pendingOrderContinuation: true,
+    priorFinalSubmitActionId: 'submit-final-order',
+    chainAuthorizationActionId: 'submit-final-order',
+    expectedItemCount: itemizedBasket ? plannedItems.length : 1,
+    maxPrice
+  });
   const confirmMerchantOrderAction = () => buildAction('confirm-merchant-order', 'inspect', 'read_public_page', {
     awaitMerchantOrderConfirmation: true,
     merchantConfirmationTimeoutMs: MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS,
     expectedMilestone: 'order_submitted'
   });
+  const automaticSubmitActions = () => [
+    finalSubmitAction(),
+    ...((fastAmazonCatalogPlan || fulfillmentPolicy === 'amazon_free_shipping_preferred') && !itemizedBasket
+      ? [pendingOrderContinuationAction()]
+      : []),
+    confirmMerchantOrderAction()
+  ];
   const reviewSubmitActions = [
     buildAction('inspect-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true }),
     ...(fillLocalCheckoutProfile ? [buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeFinalSubmit: true })] : []),
     buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeFinalSubmit: true, expectedMilestone: 'final_review_ready' }),
-    finalSubmitAction(),
-    confirmMerchantOrderAction(),
+    ...automaticSubmitActions(),
     buildAction('pause-for-user', 'pause', 'handoff', { reason: 'order_submission_requested' })
   ];
   // A checkout can expose its delivery selector first and its card selector only
-  // after delivery is confirmed. This continuation deliberately reopens the
-  // merchant checkout URL, reconciles saved address/card cues, then pauses. It
-  // contains no search, cart, credential, or final-submit action.
+  // after delivery is confirmed. This continuation reuses the existing merchant
+  // tab, never replays catalog/cart work, and reaches final review again. It can
+  // submit only when the original mission policy already authorized auto-submit.
   const reviewReconcileActions = [
-    buildAction('open-reviewed-checkout', 'navigate', 'browser_open', { url: startUrl, resumeCheckoutReconcile: true }),
-    buildAction('reconcile-reviewed-checkout', 'fill_checkout_profile', 'fill_safe_fields', { resumeCheckoutReconcile: true }),
-    buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeCheckoutReconcile: true, expectedMilestone: 'checkout_profile_verified' }),
-    buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_profile_reconciled' })
+    buildAction('open-reviewed-checkout', 'navigate', 'browser_open', {
+      url: startUrl,
+      resumeCheckoutReconcile: true,
+      preserveExistingCheckout: true
+    }),
+    buildAction('reconcile-reviewed-delivery', 'fill_checkout_profile', 'fill_safe_fields', { resumeCheckoutReconcile: true }),
+    buildAction('continue-reviewed-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true, resumeCheckoutReconcile: true }),
+    buildAction('reconcile-reviewed-payment', 'fill_checkout_profile', 'fill_safe_fields', { resumeCheckoutReconcile: true }),
+    buildAction('verify-reviewed-checkout', 'inspect', 'read_public_page', { resumeCheckoutReconcile: true, expectedMilestone: 'final_review_ready' }),
+    ...(resumeCheckoutAutoSubmit ? automaticSubmitActions() : []),
+    buildAction('pause-for-user', 'pause', 'handoff', {
+      reason: resumeCheckoutAutoSubmit ? 'order_submission_requested' : 'checkout_profile_reconciled'
+    })
   ];
   const actions = startUrl
     ? (resumeFinalSubmit
@@ -546,7 +579,7 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
           ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? automaticSubmitActions() : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'basket_review_ready' })
         ]
       : [
@@ -572,19 +605,26 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
           buildAction('open-checkout', 'click_intent', 'browser_click', { intent: 'checkout', expectedMilestone: 'checkout_open' }),
           ...(fillLocalCheckoutProfile ? [buildAction('fill-checkout-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('continue-checkout', 'click_intent', 'browser_click', { intent: 'checkout', optional: true }),
+          // Amazon can reveal the saved-card selector only after it advances from
+          // delivery to its dedicated payment page. Re-observe that transition
+          // before asking for final-review evidence.
+          ...(fillLocalCheckoutProfile ? [buildAction('reconcile-payment-profile', 'fill_checkout_profile', 'fill_safe_fields')] : []),
           buildAction('inspect-review', 'inspect', 'read_public_page', { expectedMilestone: 'final_review_ready' }),
-          ...(autoSubmitAfterVerifiedCheckout ? [finalSubmitAction(), confirmMerchantOrderAction()] : []),
+          ...(autoSubmitAfterVerifiedCheckout ? automaticSubmitActions() : []),
           buildAction('pause-for-user', 'pause', 'handoff', { reason: 'checkout_or_review_ready' })
         ])
     : [];
-  const policyBoundActions = fulfillmentPolicy === 'merchant_default' && !primeRequired
-    ? actions
-    : actions.map((action) => ({ ...action, fulfillmentPolicy, primeRequired }));
+  const policyBoundActions = actions.map((action) => ({
+    ...action,
+    fulfillmentPolicy,
+    fulfillmentMode,
+    primeRequired
+  }));
   const unsigned = {
     schema: BROWSER_EXTENSION_PLAN_SCHEMA,
     protocol: BROWSER_EXTENSION_PLAN_PROTOCOL,
     planId: `mplan_${String(session.id || 'pending').replace(/[^a-z0-9_-]/gi, '')}`,
-    revision: (itemizedBasket ? 3 : startsAtSearchResults ? 1 : 0) + (autoSubmitAfterVerifiedCheckout ? 1 : 0) + (resumeFinalSubmit ? 10 : 0) + (resumeCheckoutReconcile ? 20 : 0),
+    revision: (itemizedBasket ? 3 : startsAtSearchResults ? 1 : 0) + (autoSubmitAfterVerifiedCheckout ? 1 : 0) + (resumeFinalSubmit ? 10 : 0) + (resumeCheckoutReconcile ? 20 : 0) + (resumeCheckoutAutoSubmit ? 40 : 0),
     targetDomain,
     startUrl,
     query,
@@ -619,12 +659,14 @@ export function buildBrowserExtensionMissionPlan(session = {}) {
     budgetScope,
     budgetBasis,
     fulfillmentPolicy,
+    fulfillmentMode,
     fulfillmentScope: fastAmazonCatalogPlan ? 'amazon_catalog_prime_only' : 'merchant_default',
     primeRequired,
     allowAmazonLocalMarket: false,
     allowThirdPartyFulfillment: false,
     resumeFinalSubmit,
     resumeCheckoutReconcile,
+    resumeCheckoutAutoSubmit,
     finalApprovalPolicy: autoSubmitAfterVerifiedCheckout ? 'auto_submit_after_verified_checkout' : 'pause_before_final_approval',
     saveMerchantCheckoutDefault,
     requireMerchantOrderConfirmation: autoSubmitAfterVerifiedCheckout,
@@ -677,6 +719,15 @@ export function validateBrowserExtensionPlan(plan = null) {
     || action.missionAction !== 'final_submit'
   ))) {
     return { valid: false, reason: 'plan_final_submit_invalid' };
+  }
+  if (actions.some((action) => action.pendingOrderContinuation === true && (
+    action.type !== 'final_submit'
+    || action.priorFinalSubmitActionId !== 'submit-final-order'
+    || action.chainAuthorizationActionId !== 'submit-final-order'
+    || !Number.isInteger(Number(action.expectedItemCount))
+    || Number(action.expectedItemCount) < 1
+  ))) {
+    return { valid: false, reason: 'plan_pending_order_continuation_invalid' };
   }
   const finalSubmitIndex = actions.findIndex((action) => action.type === 'final_submit');
   if (finalSubmitIndex >= 0 && !actions.slice(finalSubmitIndex + 1).some((action) => (

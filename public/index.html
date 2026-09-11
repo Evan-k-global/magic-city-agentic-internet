@@ -1727,6 +1727,19 @@
       gap: 4px;
     }
 
+    .execution-panel-open-target {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+      appearance: none;
+    }
+
     .execution-panel-title {
       font-size: 14px;
       font-weight: 700;
@@ -2063,63 +2076,25 @@
       margin-top: 2px;
       color: rgba(245, 250, 255, 0.94);
       font-size: 12px;
-      overflow-wrap: anywhere;
+      overflow-wrap: normal;
+      word-break: normal;
     }
 
-    .execution-audit-links,
-    .execution-audit-report details {
+    .execution-audit-actions {
       margin-top: 9px;
     }
 
-    .execution-audit-report details {
-      padding-top: 8px;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-    }
-
-    .execution-audit-report summary {
-      cursor: pointer;
-      color: rgba(225, 244, 255, 0.86);
-      font-size: 11px;
-      font-weight: 700;
-    }
-
-    .execution-audit-markdown {
-      margin-top: 8px;
+    .execution-audit-summary {
+      margin: 9px 0 0;
       color: rgba(220, 234, 245, 0.82);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-
-    .execution-audit-markdown h1,
-    .execution-audit-markdown h2,
-    .execution-audit-markdown h3,
-    .execution-audit-markdown h4 {
-      margin: 8px 0 5px;
-      color: rgba(245, 250, 255, 0.96);
-      font-size: 13px;
-    }
-
-    .execution-audit-markdown p,
-    .execution-audit-markdown ul,
-    .execution-audit-markdown ol {
-      margin: 5px 0;
-    }
-
-    .execution-audit-report pre {
-      max-height: 260px;
-      margin: 8px 0 0;
-      overflow: auto;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: rgba(220, 234, 245, 0.78);
-      font-size: 10px;
+      font-size: 11px;
       line-height: 1.4;
     }
 
-    @media (max-width: 560px) {
-      .execution-audit-facts {
-        grid-template-columns: 1fr;
-      }
+    .execution-audit-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
     }
 
     .execution-output-wait {
@@ -2658,6 +2633,35 @@
       box-shadow:
         0 10px 24px rgba(23, 215, 255, 0.22),
         inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    }
+
+    .execution-agent-start {
+      min-height: 44px;
+      padding: 11px 18px;
+      border-radius: 12px;
+      font-weight: 900;
+      cursor: pointer;
+      transition: transform 90ms ease, box-shadow 120ms ease, filter 120ms ease, opacity 120ms ease;
+    }
+
+    .execution-agent-start:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow:
+        0 12px 26px rgba(23, 215, 255, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.58);
+    }
+
+    .execution-agent-start:active:not(:disabled) {
+      transform: translateY(2px);
+      box-shadow:
+        0 4px 12px rgba(23, 215, 255, 0.18),
+        inset 0 2px 3px rgba(0, 47, 61, 0.18);
+    }
+
+    .execution-agent-start.is-starting {
+      cursor: progress;
+      opacity: 0.82;
+      filter: saturate(0.78);
     }
 
     .execution-secondary {
@@ -5576,7 +5580,7 @@
           <div id="controlsTopupHint" class="wallet-policy-line">Choose credits and payment method.</div>
           <div id="controlsCreditsMsg" class="muted"></div>
           <div id="stripeTopupSuccess" class="wallet-success-note" hidden></div>
-          <div class="wallet-agent-payment-default">
+          <div class="wallet-agent-payment-default" data-santaclawz-feature>
             <label class="wallet-topup-field">
               <span>SantaClawz default</span>
               <span class="wallet-select-shell">
@@ -5750,7 +5754,7 @@
         <div class="execution-job-ledger" id="jobsDashboardList"></div>
       </details>
 
-	      <details id="settingsAgentHubSection" hidden>
+      <details id="settingsAgentHubSection" data-santaclawz-feature hidden>
         <summary>Explore</summary>
         <div class="settings-note">Explore agents or register your own. Magic City handles the retail listing and MCP wiring; SantaClawz handles activation, payments, delivery, and Zeko-backed proof/reputation.</div>
         <div class="agent-summary-card">
@@ -6015,10 +6019,9 @@
                 <div class="helper-list" id="helperSavedAgentsList"></div>
               </div>
               <div class="helper-panel" id="helperAllAgentsPanel" role="tabpanel" aria-labelledby="helperAllTab">
-                <div class="helper-platform-section" id="helperPlatformAgentsSection" hidden>
+                <div class="helper-platform-section" id="helperPlatformAgentsSection" data-santaclawz-feature hidden>
                   <div class="helper-group-heading">
-                    <div class="helper-group-title">SantaClawz Agents</div>
-                    <a class="helper-add-agent-link" href="https://www.santaclawz.ai/" target="_blank" rel="noopener noreferrer">Add agent</a>
+                    <div class="helper-group-title">SantaClawz</div>
                   </div>
                   <div class="helper-platform-scroll">
                     <div class="helper-list" id="helperPlatformAgentsList"></div>
@@ -6059,6 +6062,29 @@
     const PERSONAL_AGENT_SETTINGS_KEY = 'magic_city_personal_agent_v1';
     const NATIVE_RUNNER_SETTINGS_KEY = 'magic_city_native_runner_v1';
     const SANTACLAWZ_PAYMENT_PREFERENCE_KEY = 'magic_city_santaclawz_payment_preference_v1';
+    const SANTACLAWZ_PRODUCT_MODE = String(window.__MAGIC_CITY_SANTACLAWZ_MODE__ || 'disabled').trim().toLowerCase();
+    const SANTACLAWZ_LIVE = SANTACLAWZ_PRODUCT_MODE === 'live';
+    const SANTACLAWZ_APPROVED_AGENT_IDS = new Set(
+      (Array.isArray(window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__)
+        ? window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__
+        : [])
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    function isApprovedSantaClawzClientAgent(agent = {}) {
+      const pluginId = String(agent.pluginId || agent.agentId || '').trim().toLowerCase();
+      return Boolean(pluginId && SANTACLAWZ_APPROVED_AGENT_IDS.has(pluginId));
+    }
+
+    function applySantaClawzProductMode() {
+      if (SANTACLAWZ_LIVE) return;
+      document.querySelectorAll('[data-santaclawz-feature]').forEach((element) => {
+        element.hidden = true;
+      });
+    }
+
+    applySantaClawzProductMode();
     const SAVED_AGENTS_KEY = 'magic_city_saved_agents_v1';
     const RUNNER_EXTENSION_PLUGIN_ID = 'magic-city-runner-extension';
     const RUNNER_EXTENSION_OWNER_AGENT_ID = 'magic-city-runner-extension';
@@ -6066,7 +6092,7 @@
     const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
     const NATIVE_RUNNER_EXTENSION_INSTALL_URL = String(window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__ || '').trim();
     const NATIVE_RUNNER_CHROME_EXTENSION_ID = 'dfoddgnffmbadfhkekeopjjnfmdlppge';
-    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.0';
+    const NATIVE_RUNNER_MIN_EXTENSION_VERSION = '0.4.33';
 	    const MAX_SAVED_THREADS = 24;
 	    const DEFAULT_LOCAL_MEMORY_SETTINGS = Object.freeze({
 	      enabled: true,
@@ -6154,11 +6180,17 @@
     const PROFILE_VAULT_DB = 'magic_city_local_secure_store_v1';
     const PROFILE_VAULT_DB_STORE = 'vaultKeys';
     const CHECKOUT_FINAL_REVIEW_KEY = 'magic_city_require_final_checkout_review_v1';
+    // v1 stored a safety-first default as a durable preference. Amazon checkout
+    // now defaults to the signed one-run auto-submit path, so only a deliberate
+    // v2 choice may keep the old review boundary for new missions.
+    const CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY = 'magic_city_final_checkout_review_preference_v2';
     const PROFILE_VAULT_LOCKED_NOTE = 'Save local workflow info behind device lock. Browser autofill or wallet handles final card entry; Magic City asks before unlocking exact details.';
 	    const attemptedLiveFoodDiscovery = new Set();
 	    const executionPendingSessions = new Set();
     const executionLocalErrors = new Map();
+	    const executionLocalRunnerProgress = new Map();
 	    const executionProtocolPollingSessions = new Set();
+	    const executionPollingRequestsInFlight = new Set();
 	    const executionDismissedSessions = new Set();
 	    const executionCancellingSessions = new Set();
 	    const NATIVE_RUNNER_CHECK_TIMEOUT_MS = 6000;
@@ -6226,7 +6258,8 @@
     }
 
     function requiresFinalCheckoutReview() {
-      return localStorage.getItem(CHECKOUT_FINAL_REVIEW_KEY) === 'true';
+      return localStorage.getItem(CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY) === 'explicit'
+        && localStorage.getItem(CHECKOUT_FINAL_REVIEW_KEY) === 'true';
     }
 
     function preferredBrowserFinalApprovalPolicy() {
@@ -6963,25 +6996,42 @@
           headers,
         });
       } catch (error) {
-        throw new Error(`network_request_failed:${path}:${String(error?.message || 'fetch_failed')}`);
+        const requestError = new Error(`network_request_failed:${path}:${String(error?.message || 'fetch_failed')}`);
+        requestError.path = path;
+        requestError.status = 0;
+        throw requestError;
       }
+      const responseRequestId = String(
+        res.headers.get('x-request-id')
+        || res.headers.get('fly-request-id')
+        || ''
+      ).trim();
       const contentType = String(res.headers.get('content-type') || '').toLowerCase();
       const text = await res.text();
       if (!contentType.includes('application/json')) {
         const snippet = text.slice(0, 120).replace(/\s+/g, ' ').trim();
-        throw new Error(`non_json_response:${path}:${res.status}:${contentType || 'unknown'}:${snippet}`);
+        const responseError = new Error(`non_json_response:${path}:${res.status}:${contentType || 'unknown'}:${snippet}`);
+        responseError.path = path;
+        responseError.status = res.status;
+        responseError.requestId = responseRequestId;
+        throw responseError;
       }
       let data = {};
       try {
         data = text ? JSON.parse(text) : {};
       } catch (error) {
-        throw new Error(`invalid_json:${path}:${res.status}:${String(error?.message || 'invalid_json')}`);
+        const responseError = new Error(`invalid_json:${path}:${res.status}:${String(error?.message || 'invalid_json')}`);
+        responseError.path = path;
+        responseError.status = res.status;
+        responseError.requestId = responseRequestId;
+        throw responseError;
       }
       if (!res.ok && !okStatuses.includes(res.status)) {
         const error = new Error(normalizeApiErrorCode(data.error) || `http_${res.status}`);
         error.status = res.status;
         error.data = data;
         error.path = path;
+        error.requestId = String(data.requestId || data.request_id || responseRequestId || '').trim();
         throw error;
       }
       return data;
@@ -7001,6 +7051,12 @@
       }
       if (/mission_capability_expired/i.test(serverCode) || /mission_capability_expired/i.test(raw)) {
         return 'This browser mission expired before it could continue. Retry to renew the same approved scope.';
+      }
+      if (/santaclawz_runtime_ready_timeout/i.test(serverCode) || /santaclawz_runtime_ready_timeout/i.test(raw)) {
+        return 'SantaClawz did not answer its readiness check in time. No payment was submitted; retry this saved run.';
+      }
+      if (/santaclawz_runtime_x402_plan_timeout/i.test(serverCode) || /santaclawz_runtime_x402_plan_timeout/i.test(raw)) {
+        return 'SantaClawz did not return its payment contract in time. No payment was submitted; retry this saved run.';
       }
       if (/network_request_failed|failed to fetch|networkerror|network request failed|load failed|non_json_response|invalid_json|unexpected token|unexpected end of json input|http_502|http_503|http_504/i.test(raw)) {
         return `${lanePrefix} could not reach the service right now. Retry in a moment.`;
@@ -7051,6 +7107,28 @@
 
     function executionErrorCode(error) {
       return String(error?.code || error?.data?.error || error?.message || error || '').trim();
+    }
+
+    function isSantaClawzExecutionSession(session = {}) {
+      const selectedAgent = session?.handoffData?.selectedAgent || session?.preferredExecutionAgentSnapshot || {};
+      return session?.handoffData?.kind === 'agent' && (
+        String(session?.preferredExecutionAgentId || selectedAgent.pluginId || '').startsWith('santaclawz:')
+        || String(selectedAgent.metadata?.source || '').toLowerCase() === 'santaclawz'
+      );
+    }
+
+    function santaClawzExecutionHasStarted(session = {}) {
+      const status = String(session?.status || '').toLowerCase();
+      const payment = session?.santaclawzDirectPayment || {};
+      const reservationStatus = String(session?.creditReservation?.status || '').toLowerCase();
+      return ['queued', 'claimed', 'executing', 'fulfilled', 'failed'].includes(status)
+        || Boolean(session?.executionRequestedAt || session?.completionRequestedAt)
+        || ['locked', 'settled', 'released'].includes(reservationStatus)
+        || Boolean(payment.paymentPayloadDigestSha256 || payment.submittedRequestId || payment.submittedAt);
+    }
+
+    function isUnstartedSantaClawzError(session = {}, error = null) {
+      return Boolean(error) && isSantaClawzExecutionSession(session) && !santaClawzExecutionHasStarted(session);
     }
 
     function executionRequiredCredits(session, error = null) {
@@ -7127,6 +7205,10 @@
     function executionLocalErrorApplies(session, error) {
       if (!session?.id || !error) return false;
       const status = String(session.status || '').toLowerCase();
+      // A direct wake can fail before the server has a chance to transition a
+      // queued mission. Keep that specific extension result visible instead
+      // of making the person wait for the watchdog to infer a failure.
+      if (/^extension_wake_(failed|rejected):/.test(String(error.code || ''))) return true;
       if (['queued', 'claimed', 'executing', 'fulfilled'].includes(status)) return false;
       if (/insufficient_credits/i.test(executionErrorCode(error))) {
         if (!executionCreditErrorNeedsTopup(session, error)) return false;
@@ -7149,15 +7231,50 @@
         data: {
           requiredCredits: executionRequiredCredits(session, error),
           availableCredits: executionKnownAvailableCredits(error),
-          shortfallCredits: Number(error?.data?.shortfallCredits || 0) || 0
+          shortfallCredits: Number(error?.data?.shortfallCredits || 0) || 0,
+          endpoint: String(error?.path || '').trim() || null,
+          httpStatus: Number(error?.status || 0) || null,
+          requestId: String(error?.requestId || error?.data?.requestId || error?.data?.request_id || '').trim() || null,
+          unstartedSantaClawz: isUnstartedSantaClawzError(session, error)
         },
         createdAt: new Date().toISOString()
+      });
+      console.warn('[magic-city-execution-error]', {
+        sessionId: session.id,
+        code: executionErrorCode(error),
+        endpoint: String(error?.path || '').trim() || null,
+        httpStatus: Number(error?.status || 0) || null,
+        requestId: String(error?.requestId || error?.data?.requestId || error?.data?.request_id || '').trim() || null,
+        unstartedSantaClawz: isUnstartedSantaClawzError(session, error)
       });
       return message;
     }
 
     function clearExecutionStatusError(sessionId) {
       if (sessionId) executionLocalErrors.delete(sessionId);
+    }
+
+    function reconcileExecutionWakeError(session) {
+      if (!session?.id) return false;
+      const error = executionLocalErrors.get(session.id) || null;
+      if (!/^extension_wake_(failed|rejected):/.test(String(error?.code || ''))) return false;
+      const errorAt = Date.parse(error.createdAt || '');
+      if (!Number.isFinite(errorAt)) return false;
+      const progressTimes = [
+        session.claimedAt,
+        session.executionLive?.createdAt,
+        ...(Array.isArray(session.executionTrace)
+          ? session.executionTrace
+            .filter((step) => String(step?.pluginId || '') === RUNNER_EXTENSION_PLUGIN_ID)
+            .map((step) => step?.createdAt)
+          : [])
+      ]
+        .map((value) => Date.parse(value || ''))
+        .filter(Number.isFinite);
+      if (!progressTimes.some((progressAt) => progressAt >= errorAt)) return false;
+      executionPendingSessions.delete(session.id);
+      clearExecutionStatusError(session.id);
+      return true;
     }
 
     function setExecutionStatusError(session, error) {
@@ -7889,7 +8006,7 @@
       nativeRunnerSettings = loadNativeRunnerSettings();
       applyNativeRunnerSettingsUi(nativeRunnerSettings);
       if (authSessionUser && nativeRunnerSettings.deviceId) {
-        refreshNativeRunnerStatus({ silent: true }).catch(() => null);
+        refreshNativeRunnerStatus({ silent: true, wakeExtension: true }).catch(() => null);
       }
       adminAccess = Boolean(user?.adminAccess || user?.adminAccount);
       applyAdminAccessUi(adminAccess);
@@ -9630,9 +9747,9 @@
       return lane && lane !== 'Magic City' ? `Workflow: Magic City · ${lane}` : 'Workflow: Magic City';
     }
 
-	    function buildProtocolLine(agentFollowUp = null) {
-	      return agentFollowUp ? 'Protocol: SantaClawz' : '';
-	    }
+    function buildProtocolLine(agentFollowUp = null) {
+      return SANTACLAWZ_LIVE && agentFollowUp ? 'Protocol: SantaClawz' : '';
+    }
 
 	    function clearStartupReturnParams(names = []) {
 	      const params = new URLSearchParams(window.location.search);
@@ -10233,6 +10350,7 @@
       const detail = String(row?.detail || '').toLowerCase();
       const source = `${statusValue} ${label} ${detail}`;
       if (fulfillment?.status === 'failed' || /failed|error/.test(source)) return { label: 'Failed', cls: 'failed' };
+      if (isBrowserHandoffPaused(fulfillment)) return { label: 'Paused', cls: 'queued' };
       if (fulfillment?.result?.needsFinalOrderConfirmation || fulfillment?.fundingDisposition === 'hold') {
         return { label: 'Awaiting confirmation', cls: 'queued' };
       }
@@ -10250,6 +10368,15 @@
       if (/sync|calendar|gmail|contact/.test(source)) return { label: 'Syncing', cls: 'running' };
       if (/checkout|provider|launch|browser|cart|reservation|apply/.test(source)) return { label: 'Working', cls: 'running' };
       return { label: fulfillment ? 'Completed' : 'Working', cls: fulfillment ? 'completed' : 'running' };
+    }
+
+    function isBrowserHandoffPaused(fulfillment = null) {
+      if (String(fulfillment?.status || '').toLowerCase() !== 'fulfilled') return false;
+      const result = fulfillment?.result || {};
+      const completionState = String(result.completionState || '').toLowerCase();
+      const stopState = String(result?.browserExecution?.stopState || result.stopState || '').toLowerCase();
+      return completionState === 'waiting_on_user'
+        || ['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required', 'pending_order_verification_required', 'login_required', 'needs_login', 'captcha_or_challenge_required', 'needs_captcha', 'final_approval_required', 'needs_final_approval', 'review_ready'].includes(stopState);
     }
 
     function getScopedStorageKey(baseKey, scope = getStorageScope()) {
@@ -10282,6 +10409,9 @@
     }
 
     function applySantaClawzPaymentPreferenceToSelections(selections = {}) {
+      if (!SANTACLAWZ_LIVE) return {
+        ...(selections && typeof selections === 'object' ? selections : {})
+      };
       return {
         ...(selections && typeof selections === 'object' ? selections : {}),
         santaclawzPaymentPreference: getSantaClawzPaymentPreference()
@@ -10495,9 +10625,41 @@
 
     function nativeRunnerHeartbeatIsFresh(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
-      const lastHeartbeat = normalized.lastPollAt;
+      const lastHeartbeat = nativeRunnerLastHeartbeatAt(normalized);
       const ms = Date.parse(lastHeartbeat || '');
       return Number.isFinite(ms) && Date.now() - ms < 2 * 60 * 1000;
+    }
+
+    function newerNativeRunnerTimestamp(left = '', right = '') {
+      const leftMs = Date.parse(left || '');
+      const rightMs = Date.parse(right || '');
+      if (Number.isFinite(leftMs) && Number.isFinite(rightMs)) return leftMs >= rightMs ? left : right;
+      if (Number.isFinite(leftMs)) return left;
+      return Number.isFinite(rightMs) ? right : '';
+    }
+
+    function newerNativeRunnerVersion(left = '', right = '') {
+      const normalizedLeft = String(left || '').trim();
+      const normalizedRight = String(right || '').trim();
+      if (!normalizedLeft) return normalizedRight;
+      if (!normalizedRight) return normalizedLeft;
+      return compareDottedVersions(normalizedLeft, normalizedRight) >= 0
+        ? normalizedLeft
+        : normalizedRight;
+    }
+
+    function nativeRunnerLastHeartbeatAt(settings = nativeRunnerSettings) {
+      const normalized = normalizeNativeRunnerSettings(settings);
+      const pollMs = Date.parse(normalized.lastPollAt || '');
+      const seenMs = Date.parse(normalized.lastSeenAt || '');
+      if (Number.isFinite(pollMs) && Number.isFinite(seenMs)) {
+        return pollMs >= seenMs ? normalized.lastPollAt : normalized.lastSeenAt;
+      }
+      return Number.isFinite(pollMs)
+        ? normalized.lastPollAt
+        : Number.isFinite(seenMs)
+          ? normalized.lastSeenAt
+          : '';
     }
 
     function nativeRunnerPairingIsFresh(settings = nativeRunnerSettings) {
@@ -10519,7 +10681,8 @@
 
     function nativeRunnerExtensionNeedsUpgrade(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
-      if (!normalized.extensionVersion) return false;
+      if (!NATIVE_RUNNER_MIN_EXTENSION_VERSION) return false;
+      if (!normalized.extensionVersion) return true;
       return compareDottedVersions(normalized.extensionVersion, NATIVE_RUNNER_MIN_EXTENSION_VERSION) < 0;
     }
 
@@ -10546,60 +10709,219 @@
       return NATIVE_RUNNER_EXTENSION_INSTALL_URL || normalized.extensionSetupUrl || '/native-runner/extension/';
     }
 
-	    function sendNativeRunnerExtensionMessage(message = {}) {
+	    async function sendNativeRunnerExtensionMessage(message = {}) {
+	      if (!window.chrome?.runtime?.sendMessage) {
+	        return { ok: false, reason: 'chrome_runtime_unavailable' };
+	      }
+	      const normalized = normalizeNativeRunnerSettings(nativeRunnerSettings);
+	      const candidateIds = [
+	        normalized.extensionId,
+	        ...nativeRunnerDevices.map((device) => device?.extensionId),
+	        NATIVE_RUNNER_CHROME_EXTENSION_ID
+	      ].map((id) => String(id || '').trim()).filter(Boolean);
+	      const extensionIds = Array.from(new Set(candidateIds));
+	      if (!extensionIds.length) return { ok: false, reason: 'extension_id_missing' };
+	      let lastFailure = null;
+	      for (const extensionId of extensionIds) {
+	        const result = message?.type === 'RUN_PENDING_SESSIONS' && window.chrome.runtime.connect
+	          ? await sendNativeRunnerExtensionPortMessage(extensionId, message)
+	          : await new Promise((resolve) => {
+	          try {
+	            window.chrome.runtime.sendMessage(
+	              extensionId,
+	              message,
+	              (response) => {
+	                const error = window.chrome.runtime.lastError;
+	                if (error) {
+	                  resolve({ ok: false, reason: error.message || 'extension_not_reachable', extensionId });
+	                  return;
+	                }
+	                if (!response?.ok) {
+	                  resolve({ ok: false, reason: response?.error || 'extension_pair_failed', extensionId });
+	                  return;
+	                }
+	                resolve({ ok: true, result: response.result || null, extensionId });
+	              }
+	            );
+	          } catch (error) {
+	            resolve({ ok: false, reason: error?.message || String(error), extensionId });
+	          }
+	        });
+	        if (result.ok) {
+	          if (extensionId && normalized.extensionId !== extensionId) {
+	            saveNativeRunnerSettings({ ...nativeRunnerSettings, extensionId });
+	          }
+	          return result;
+	        }
+	        // Once an active-run port has delivered the mission request, never
+	        // send that same irreversible workflow wake to another candidate ID.
+	        if (result.dispatched) return result;
+	        lastFailure = result;
+	      }
+	      return lastFailure || { ok: false, reason: 'extension_not_reachable' };
+	    }
+
+	    function runnerProgressLabel(payload = {}) {
+	      const explicit = String(payload.activeRun?.progressLabel || '').replace(/\s+/g, ' ').trim();
+	      if (explicit) return explicit;
+	      const status = String(payload.lastExecution?.status || payload.activeRun?.phase || '').trim();
+	      const labels = {
+	        wake_received: 'Starting Runner',
+	        registering_runner: 'Connecting Runner',
+	        locating_mission: 'Finding mission',
+	        claiming: 'Claiming mission',
+	        claimed: 'Validating mission',
+	        validating: 'Validating mission',
+	        starting_browser: 'Starting browser',
+	        opening_browser: 'Opening Amazon',
+	        browser_ready: 'Browser ready'
+	      };
+	      return labels[status] || String(payload.activeRun?.actionId || status || 'Runner active').replace(/[-_]/g, ' ');
+	    }
+
+	    function rememberExecutionRunnerProgress(sessionId = '', payload = {}) {
+	      const normalizedSessionId = String(sessionId || payload.activeRun?.sessionId || payload.lastExecution?.sessionId || '').trim();
+	      if (!normalizedSessionId) return false;
+	      const streamId = String(payload.streamId || payload.activeRun?.workerId || 'legacy').trim();
+	      const sequence = Math.max(0, Number(payload.sequence || payload.activeRun?.progressSequence || 0) || 0);
+	      const observedAt = Date.parse(payload.activeRun?.progressUpdatedAt || payload.at || payload.lastExecution?.at || '') || Date.now();
+	      const current = executionLocalRunnerProgress.get(normalizedSessionId) || null;
+	      if (current?.streamId === streamId && sequence <= current.sequence) return false;
+	      if (current?.streamId !== streamId && observedAt < Number(current?.observedAt || 0)) return false;
+	      executionLocalRunnerProgress.set(normalizedSessionId, {
+	        streamId,
+	        sequence,
+	        observedAt,
+	        label: runnerProgressLabel(payload),
+	        state: String(payload.activeRun?.progressState || payload.lastExecution?.status || payload.activeRun?.phase || '').trim(),
+	        startupTiming: payload.activeRun?.startupTiming || null
+	      });
+	      const session = executionSessionCache.get(normalizedSessionId) || null;
+	      if (session) {
+	        refreshExecutionPanelInPlace(session);
+	        requestAnimationFrame(() => refreshExecutionPanelInPlace(executionSessionCache.get(normalizedSessionId) || session));
+	      }
+	      return true;
+	    }
+
+	    function clearExecutionRunnerProgress(sessionId = '') {
+	      if (sessionId) executionLocalRunnerProgress.delete(sessionId);
+	    }
+
+	    function applyExecutionRunnerProgress(session, panel = null) {
+	      const status = String(session?.status || '').toLowerCase();
+	      const progress = executionLocalRunnerProgress.get(session?.id) || null;
+	      const localError = executionLocalErrors.get(session?.id) || null;
+	      if (executionLocalErrorApplies(session, localError)) return false;
+	      if (!progress || !['queued', 'claimed', 'executing'].includes(status) || Date.now() - progress.observedAt > 30_000) return false;
+	      const target = panel || $('executionDock')?.querySelector(`[data-session-panel="${escapeExecutionSelectorValue(session.id)}"]`);
+	      if (!target) return false;
+	      const label = progress.label || 'Runner active';
+	      const runTitle = target.querySelector('.execution-run-state > div > strong');
+	      const runDetail = target.querySelector('.execution-run-state > div > span');
+	      const statusText = target.querySelector('#executionStatusText');
+	      if (runTitle) runTitle.textContent = label;
+	      if (runDetail) runDetail.textContent = 'Magic City Runner is continuing this authorized browser mission.';
+	      if (statusText) statusText.textContent = `Session ${session.id} · ${label}`;
+	      return true;
+	    }
+
+	    function sendNativeRunnerExtensionPortMessage(extensionId, message = {}) {
 	      return new Promise((resolve) => {
-	        if (!window.chrome?.runtime?.sendMessage) {
-	          resolve({ ok: false, reason: 'chrome_runtime_unavailable' });
-          return;
-        }
-        const extensionId = normalizeNativeRunnerSettings(nativeRunnerSettings).extensionId || NATIVE_RUNNER_CHROME_EXTENSION_ID;
-        try {
-          window.chrome.runtime.sendMessage(
-            extensionId,
-            message,
-            (response) => {
-              const error = window.chrome.runtime.lastError;
-              if (error) {
-                resolve({ ok: false, reason: error.message || 'extension_not_reachable' });
-                return;
-              }
-              if (!response?.ok) {
-                resolve({ ok: false, reason: response?.error || 'extension_pair_failed' });
-                return;
-              }
-              resolve({ ok: true, result: response.result || null });
-            }
-          );
-        } catch (error) {
-          resolve({ ok: false, reason: error?.message || String(error) });
+	        let port = null;
+	        let settled = false;
+	        let dispatched = false;
+	        const finish = (result) => {
+	          if (settled) return;
+	          settled = true;
+	          resolve({ ...result, extensionId, dispatched });
+	        };
+	        try {
+	          port = window.chrome.runtime.connect(extensionId, { name: 'magic-city-active-run-v1' });
+	          port.onMessage.addListener((payload) => {
+	            if (payload?.type === 'RUNNER_PROGRESS') {
+	              const sessionId = String(message.sessionId || payload.activeRun?.sessionId || payload.lastExecution?.sessionId || '');
+	              rememberExecutionRunnerProgress(sessionId, payload);
+	              return;
+	            }
+	            if (payload?.type === 'RUNNER_RESULT') {
+	              finish(payload.ok
+	                ? { ok: true, result: payload.result || null }
+	                : { ok: false, reason: payload.error || 'extension_run_failed' });
+	            }
+	          });
+	          port.onDisconnect.addListener(() => {
+	            const error = window.chrome.runtime.lastError;
+	            if (!settled) finish({ ok: false, reason: error?.message || 'extension_run_channel_closed' });
+	          });
+	          port.postMessage(message);
+	          dispatched = true;
+	        } catch (error) {
+	          finish({ ok: false, reason: error?.message || String(error) });
 	        }
 	      });
 	    }
 
-    async function requestNativeRunnerMissionWake(sessionId = '') {
+	    async function requestNativeRunnerMissionWake(sessionId = '', extensionDispatchNonce = '', clientRunStartedAt = '') {
+      const describeWakeFailure = (wake) => {
+        if (!wake?.ok) {
+          const reason = String(wake?.reason || 'extension_not_reachable');
+          return {
+            code: `extension_wake_failed:${reason}`,
+            message: `Chrome did not wake Magic City Runner: ${reason}. Open the extension and click Run waiting mission.`
+          };
+        }
+        const result = wake.result || {};
+        const execution = Array.isArray(result.executed)
+          ? result.executed.find((entry) => String(entry?.sessionId || '') === String(sessionId)) || null
+          : null;
+        if (result.requestedSessionFound === false || ['wake_failed', 'wake_rejected', 'claim_failed', 'failed'].includes(String(execution?.status || ''))) {
+          const reason = String(execution?.error || result.requestedSessionStatus || 'runner_did_not_claim_session');
+          return {
+            code: `extension_wake_rejected:${reason}`,
+            message: `Magic City Runner did not start this mission: ${reason}. Retry the runner start after checking the extension.`
+          };
+        }
+        return null;
+      };
+      const applyWakeResult = (wake, { pending = false } = {}) => {
+        const statusEl = getExecutionSheetScrollElement(sessionId)?.querySelector('#executionStatusText') || $('executionStatusText');
+        const failure = describeWakeFailure(wake);
+        if (failure) {
+          executionPendingSessions.delete(sessionId);
+          executionLocalErrors.set(sessionId, { ...failure, createdAt: new Date().toISOString() });
+          if (statusEl) statusEl.textContent = `Session ${sessionId} · ${failure.message}`;
+          void renderExecutionSheet(sessionId, { focus: false });
+          return wake;
+        }
+        if (pending) {
+          if (statusEl) statusEl.textContent = `Session ${sessionId} · waiting for Magic City Runner to claim this mission`;
+          return wake;
+        }
+        clearExecutionStatusError(sessionId);
+        if (statusEl) statusEl.textContent = `Session ${sessionId} · runner accepted the mission`;
+        return wake;
+      };
+	      const cachedSession = executionSessionCache.get(sessionId) || null;
+	      const dispatchNonce = String(extensionDispatchNonce || cachedSession?.extensionRunDispatch?.nonce || '').trim();
+	      const wakeRequest = sendNativeRunnerExtensionMessage({
+	        type: 'RUN_PENDING_SESSIONS',
+	        sessionId,
+	        clientRunStartedAt: String(clientRunStartedAt || '').trim() || new Date().toISOString(),
+	        ...(dispatchNonce ? { extensionDispatchNonce: dispatchNonce } : {})
+	      });
       const timeoutResult = { ok: true, pending: true, reason: 'extension_wake_pending' };
       const wake = await Promise.race([
-        sendNativeRunnerExtensionMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }),
+        wakeRequest,
         new Promise((resolve) => setTimeout(() => resolve(timeoutResult), 2000))
       ]);
-      const statusEl = getExecutionSheetScrollElement(sessionId)?.querySelector('#executionStatusText') || $('executionStatusText');
-      if (!wake?.ok) {
-        const reason = wake?.reason || 'extension_not_reachable';
-        const message = `Chrome did not wake the Magic City Runner extension: ${reason}. Open the extension and click Run waiting mission.`;
-        if (statusEl) statusEl.textContent = `Session ${sessionId} · ${message}`;
-        executionLocalErrors.set(sessionId, {
-          message,
-          code: `extension_wake_failed:${reason}`,
-          createdAt: new Date().toISOString()
-        });
-        return wake;
+      if (wake.pending) {
+        // The external message remains open through claim. Its eventual nested
+        // result is still meaningful, especially when the exact session was
+        // returned by polling but rejected before claim.
+        void wakeRequest.then((result) => applyWakeResult(result)).catch((error) => applyWakeResult({ ok: false, reason: error?.message || String(error) }));
       }
-      if (wake.pending && statusEl) {
-        statusEl.textContent = `Session ${sessionId} · runner wake is pending; Chrome will pick up this exact mission shortly`;
-      } else if (statusEl) {
-        statusEl.textContent = `Session ${sessionId} · runner accepted the mission`;
-      }
-      return wake;
+      return applyWakeResult(wake, { pending: wake.pending === true });
     }
 
 	    function sendPairingCodeToNativeRunnerExtension(pairing = {}, settings = nativeRunnerSettings) {
@@ -10744,8 +11066,15 @@
           runnerReadyReason: readiness?.reason || base.runnerReadyReason || ''
         });
       }
-      const lastHeartbeat = device.lastPollAt || '';
+      const lastHeartbeat = device.lastPollAt || device.lastSeenAt || '';
       const hasHeartbeat = Boolean(lastHeartbeat);
+      const lastSeenAt = newerNativeRunnerTimestamp(device.lastSeenAt || '', base.lastSeenAt || '');
+      const lastPollAt = newerNativeRunnerTimestamp(device.lastPollAt || '', base.lastPollAt || '');
+      const extensionVersion = newerNativeRunnerVersion(base.extensionVersion || '', device.extensionVersion || '');
+      const runnerReadyReason = readiness?.reason === 'runner_extension_outdated'
+        && !nativeRunnerExtensionNeedsUpgrade({ ...base, extensionVersion })
+          ? ''
+          : readiness?.reason || base.runnerReadyReason || '';
       const trustMode = device.trustMode === 'trusted_under_cap'
         ? 'trusted_under_cap'
         : (base.trustMode === 'trusted_under_cap' ? 'trusted_under_cap' : 'local_runner');
@@ -10759,13 +11088,13 @@
           ? (trustMode === 'trusted_under_cap' ? 'trusted_ready' : 'installed')
           : (base.installStatus === 'not_started' ? 'setup_copied' : base.installStatus),
         installedAt: hasHeartbeat ? (base.installedAt || lastHeartbeat) : base.installedAt,
-        lastSeenAt: device.lastSeenAt || base.lastSeenAt,
-        lastPollAt: device.lastPollAt || base.lastPollAt,
+        lastSeenAt,
+        lastPollAt,
         lastQueueCount: Number(device.lastQueueCount || 0) || 0,
         executableReady: Boolean(readiness?.executableReady ?? base.executableReady),
-        runnerReadyReason: readiness?.reason || base.runnerReadyReason || '',
+        runnerReadyReason,
         extensionId: device.extensionId || base.extensionId || '',
-        extensionVersion: device.extensionVersion || base.extensionVersion || '',
+        extensionVersion,
         pairingStatus: device.id && base.pairingStatus !== 'pending' ? 'claimed' : base.pairingStatus,
         pairingCode: base.pairingStatus === 'pending' ? base.pairingCode : (device.id ? '' : base.pairingCode),
         pairingExpiresAt: base.pairingStatus === 'pending' ? base.pairingExpiresAt : (device.id ? '' : base.pairingExpiresAt),
@@ -10783,13 +11112,14 @@
       const selected = nativeRunnerDevices.find((device) => device.id && device.id === nativeRunnerSettings.deviceId)
         || nativeRunnerDevices[0];
       const active = selected.status === 'active';
-      const heartbeat = selected.lastPollAt || '';
+      const heartbeat = selected.lastPollAt || selected.lastSeenAt || '';
       const online = heartbeat && Date.now() - Date.parse(heartbeat) < 2 * 60 * 1000;
+      const heartbeatLabel = selected.lastPollAt ? 'polled' : 'seen';
       $('nativeRunnerDeviceList').innerHTML = `
         <div class="connector-activity-item native-runner-advanced-item">
           <div>
             <strong>Current runner</strong>
-            <span>${escapeHtml(online ? 'online' : active ? 'not polling' : selected.status || 'unknown')}${heartbeat ? ` · polled ${escapeHtml(nativeRunnerTimeAgo(heartbeat))}` : ''}${selected.tokenLast4 ? ` · Token ending ${escapeHtml(selected.tokenLast4)}` : ''}</span>
+            <span>${escapeHtml(online ? 'online' : active ? 'not polling' : selected.status || 'unknown')}${heartbeat ? ` · ${heartbeatLabel} ${escapeHtml(nativeRunnerTimeAgo(heartbeat))}` : ''}${selected.tokenLast4 ? ` · Token ending ${escapeHtml(selected.tokenLast4)}` : ''}</span>
           </div>
         </div>
       `;
@@ -10853,20 +11183,31 @@
         data = await requestNativeRunnerStatus(statusSettings);
         nativeRunnerDevices = Array.isArray(data.devices) ? data.devices : (data.device ? [data.device] : []);
         nativeRunnerActivity = Array.isArray(data.activity) ? data.activity : [];
-        const extensionPollAt = String(extensionCheck?.result?.config?.lastPollAt || '').trim();
+        // External extension responses are wrapped in { ok, result }. Keep
+        // the freshly checked-in heartbeat even when the subsequent server
+        // status read is briefly stale, otherwise the dashboard can claim the
+        // same runner shown as connected in its popup is offline.
+        const extensionStatus = extensionCheck?.result || extensionCheck || {};
+        const extensionPollAt = String(extensionStatus?.config?.lastPollAt || '').trim();
         const heartbeatSettings = extensionPollAt
-          ? { ...statusSettings, lastPollAt: extensionPollAt }
+          ? {
+              ...statusSettings,
+              lastPollAt: extensionPollAt,
+              lastSeenAt: extensionPollAt,
+              extensionId: extensionStatus?.config?.extensionId || statusSettings.extensionId || '',
+              extensionVersion: extensionStatus?.config?.extensionVersion || statusSettings.extensionVersion || ''
+            }
           : statusSettings;
         const saved = saveNativeRunnerSettings(mergeNativeRunnerDeviceStatus(heartbeatSettings, data.device || null, data.checkoutReadiness || data.readiness || null));
         applyNativeRunnerSettingsUi(saved);
         if (!silent && $('nativeRunnerStatus')) {
-          const extensionError = String(extensionCheck?.result?.config?.lastError || '').trim();
-          const extensionPollSucceeded = Boolean(extensionCheck?.result?.poll?.paired);
+          const extensionError = String(extensionStatus?.config?.lastError || '').trim();
+          const extensionPollSucceeded = Boolean(extensionStatus?.poll?.paired);
           if (extensionError && !extensionPollSucceeded) {
             $('nativeRunnerStatus').textContent = `Runner needs attention: ${extensionError}`;
             return saved;
           }
-          const heartbeat = saved.lastPollAt;
+          const heartbeat = nativeRunnerLastHeartbeatAt(saved);
           const readiness = data.checkoutReadiness || data.readiness || {};
           const updateRequired = Boolean(readiness.extensionUpdateRequired) || nativeRunnerExtensionNeedsUpgrade(saved);
           $('nativeRunnerStatus').textContent = data.device
@@ -10884,18 +11225,27 @@
       }
     }
 
-    async function checkNativeRunnerWithPolling() {
+    async function checkNativeRunnerWithPolling({ triggerButton = null } = {}) {
       if (nativeRunnerCheckInFlight) return nativeRunnerSettings;
       nativeRunnerCheckInFlight = true;
-      const button = $('nativeRunnerRefreshBtn');
+      const refreshButton = $('nativeRunnerRefreshBtn');
+      const primaryButton = $('nativeRunnerSetupBtn');
+      const primaryIsRefresh = primaryButton?.dataset.nativeRunnerPrimaryMode === 'refresh';
+      const activeButtons = Array.from(new Set([
+        triggerButton,
+        primaryIsRefresh ? primaryButton : null,
+        primaryIsRefresh ? null : refreshButton
+      ].filter(Boolean)));
       const status = $('nativeRunnerStatus');
-      const baselinePollAt = String(nativeRunnerSettings.lastPollAt || '').trim();
+      const baselinePollAt = String(nativeRunnerLastHeartbeatAt(nativeRunnerSettings) || '').trim();
       const startedAt = Date.now();
       let lastError = null;
       const setCheckingUi = () => {
-        if (button) {
+        if (refreshButton && primaryIsRefresh && refreshButton !== triggerButton) {
+          refreshButton.hidden = true;
+        }
+        for (const button of activeButtons) {
           button.disabled = true;
-          button.hidden = false;
           button.textContent = 'Checking...';
           button.setAttribute('aria-busy', 'true');
         }
@@ -10907,8 +11257,8 @@
         while (Date.now() - startedAt < NATIVE_RUNNER_CHECK_TIMEOUT_MS) {
           try {
             const latest = await refreshNativeRunnerStatus({ silent: true, wakeExtension: true });
-            const currentPollAt = String(latest?.lastPollAt || '').trim();
-            if (currentPollAt && currentPollAt !== baselinePollAt) return latest;
+            const currentHeartbeatAt = String(nativeRunnerLastHeartbeatAt(latest) || '').trim();
+            if (currentHeartbeatAt && currentHeartbeatAt !== baselinePollAt) return latest;
           } catch (error) {
             lastError = error;
           }
@@ -10925,17 +11275,18 @@
         return nativeRunnerSettings;
       } finally {
         nativeRunnerCheckInFlight = false;
-        if (button) {
+        for (const button of activeButtons) {
           button.disabled = false;
           button.textContent = 'Check';
           button.removeAttribute('aria-busy');
         }
+        applyNativeRunnerSettingsUi(nativeRunnerSettings);
       }
     }
 
     function getNativeRunnerUiState(settings = nativeRunnerSettings) {
       const normalized = normalizeNativeRunnerSettings(settings);
-      const heartbeat = normalized.lastPollAt;
+      const heartbeat = nativeRunnerLastHeartbeatAt(normalized);
       const heartbeatAgo = nativeRunnerTimeAgo(heartbeat);
       const heartbeatFresh = nativeRunnerHeartbeatIsFresh(normalized);
       if (normalized.installStatus === 'revoked') {
@@ -10975,7 +11326,7 @@
           title: 'Waiting for status',
           subtitle: hasFreshPairingCode
             ? 'Open the Magic City Runner extension and paste the pairing code.'
-            : 'Pair the extension, then click Status in the extension popup.',
+            : 'Pair the extension, then click Check in Magic City.',
           detail: hasFreshPairingCode
             ? `Pairing code expires in ${nativeRunnerTimeUntil(normalized.pairingExpiresAt)}.`
             : normalized.lastSetupCopiedAt
@@ -10989,8 +11340,8 @@
         return {
           tone: 'attention',
           title: 'Offline',
-          subtitle: `Last seen ${heartbeatAgo}. Open the extension popup and click Status.`,
-          detail: `Extension last seen ${heartbeatAgo}.`,
+          subtitle: `Last seen ${heartbeatAgo}. Click Check here or reopen the extension popup.`,
+          detail: `Extension last seen ${heartbeatAgo}. Opening the popup checks automatically; Check retries from Magic City.`,
           primaryLabel: 'Check',
           primaryMode: 'refresh'
         };
@@ -11566,6 +11917,16 @@
     }
 
     async function refreshAgentHub(force = false) {
+      if (!SANTACLAWZ_LIVE) {
+        agentHubState = {
+          ...agentHubState,
+          allAgents: [],
+          featuredAgents: [],
+          userAgents: [],
+          sources: null
+        };
+        return agentHubState;
+      }
       if (lazyBootState.agentHub && !force) return agentHubState;
       const data = await api(`/agent-hub/agents?scope=helper-${Date.now()}`, {
         headers: { 'cache-control': 'no-store' }
@@ -12021,9 +12382,11 @@
 	      };
 	    }
 
-	    function isHiddenAgentCompletionAgent(agent = {}) {
-	      const id = getAgentCompletionId(agent);
-	      return id === 'local-developer-tools-plugin' || isRetiredAgentCompletionAgent(agent);
+    function isHiddenAgentCompletionAgent(agent = {}) {
+      const id = getAgentCompletionId(agent);
+      return id === 'local-developer-tools-plugin'
+        || isRetiredAgentCompletionAgent(agent)
+        || (!SANTACLAWZ_LIVE && isSantaClawzRecommendationAgent(agent));
 	    }
 
 	    function getSavedAgentStorageKeys() {
@@ -12186,9 +12549,10 @@
 	      return match ? match[0] : '';
 	    }
 
-	    function normalizeAgentHubRowForHelper(row = {}) {
-	      const pluginId = String(row.agentId || row.pluginId || '').trim();
-	      if (!pluginId || isHiddenAgentCompletionAgent({ pluginId })) return null;
+    function normalizeAgentHubRowForHelper(row = {}) {
+      if (!SANTACLAWZ_LIVE) return null;
+      const pluginId = String(row.agentId || row.pluginId || '').trim();
+	      if (!pluginId || !isApprovedSantaClawzClientAgent({ pluginId }) || isHiddenAgentCompletionAgent({ pluginId })) return null;
 	      const isSantaClawz = pluginId.startsWith('santaclawz:')
 	        || /santaclawz/i.test(String(row.owner || row.metadata?.source || row.metadata?.providerId || ''));
 	      if (!isSantaClawz || /agent_job_pack|hosted_agent_job_pack/i.test(pluginId)) return null;
@@ -12237,8 +12601,9 @@
 	      };
 	    }
 
-	    function getHelperPlatformAgentsFromHub() {
-	      const rows = Array.isArray(agentHubState.allAgents) && agentHubState.allAgents.length
+    function getHelperPlatformAgentsFromHub() {
+      if (!SANTACLAWZ_LIVE) return [];
+      const rows = Array.isArray(agentHubState.allAgents) && agentHubState.allAgents.length
 	        ? agentHubState.allAgents
 	        : agentHubState.featuredAgents;
 	      const seen = new Set();
@@ -12254,10 +12619,16 @@
 	        .slice(0, 10);
 	    }
 
-	    function renderHelperPlatformAgents({ loading = false, error = '' } = {}) {
-	      const section = $('helperPlatformAgentsSection');
-	      const list = $('helperPlatformAgentsList');
-	      if (!section || !list) return;
+    function renderHelperPlatformAgents({ loading = false, error = '' } = {}) {
+      const section = $('helperPlatformAgentsSection');
+      const list = $('helperPlatformAgentsList');
+      if (!section || !list) return;
+      if (!SANTACLAWZ_LIVE) {
+        helperPlatformAgents = [];
+        section.hidden = true;
+        list.replaceChildren();
+        return;
+      }
 	      const popup = $('helperPopup');
 	      const platformScroll = section.querySelector('.helper-platform-scroll');
 	      const scrollState = {
@@ -12310,12 +12681,16 @@
 	      const normalized = String(id || '').trim().toLowerCase();
 	      return helperPlatformAgents.find((agent) => getAgentCompletionId(agent) === normalized)
 	        || getHelperPlatformAgentsFromHub().find((agent) => getAgentCompletionId(agent) === normalized)
-	        || loadSavedAgents().find((agent) => getAgentCompletionId(agent) === normalized)
+	        || loadSavedAgents().find((agent) => getAgentCompletionId(agent) === normalized && isApprovedSantaClawzClientAgent(agent))
 	        || null;
 	    }
 
-	    async function refreshHelperPlatformAgents(force = false) {
-	      renderHelperPlatformAgents({ loading: true });
+    async function refreshHelperPlatformAgents(force = false) {
+      if (!SANTACLAWZ_LIVE) {
+        renderHelperPlatformAgents();
+        return [];
+      }
+      renderHelperPlatformAgents({ loading: true });
 	      try {
 	        const needsAgentRows = !Array.isArray(agentHubState.allAgents) || !agentHubState.allAgents.length;
 	        await refreshAgentHub(force || needsAgentRows);
@@ -12369,7 +12744,7 @@
 	    function renderHelperSavedAgents() {
 	      const el = $('helperSavedAgentsList');
 	      if (!el) return;
-	      const saved = loadSavedAgents();
+	      const saved = loadSavedAgents().filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
 	      if (!saved.length) {
 	        el.innerHTML = '<div class="helper-saved-empty">No saved agents yet. Browse all agents and click ☆ to keep favorites here.</div>';
 	        return;
@@ -12391,6 +12766,7 @@
 	    async function launchSavedAgentFromHelper(id = '') {
 	      const agent = loadSavedAgents().find((entry) => getAgentCompletionId(entry) === String(id || '')) || null;
 	      if (!agent) return;
+	      if (isSantaClawzRecommendationAgent(agent) && !isApprovedSantaClawzClientAgent(agent)) return;
 	      const helperKey = getHelperKeyForAgent(agent);
 	      if (helperKey && buildHelperLaunchSpec(helperKey)) {
 	        await launchHelper(helperKey);
@@ -12420,7 +12796,7 @@
 
 	    async function launchPlatformAgentFromHelper(id = '') {
 	      const agent = getHelperPlatformAgentById(id);
-	      if (!agent) return;
+	      if (!agent || !isApprovedSantaClawzClientAgent(agent)) return;
 	      closeHelperPopup();
 	      try {
 	        const capability = getAgentCompletionCapability(agent) || 'agent-execution';
@@ -12449,7 +12825,7 @@
 	      syncHelperFavoriteButtons();
 	      renderHelperPlatformAgents();
 	      if (!el) return;
-	      const saved = loadSavedAgents();
+	      const saved = loadSavedAgents().filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
 	      if (!saved.length) {
 	        el.innerHTML = '<div class="muted">No saved agents yet. Open agent completion and click ☆ on agents you want to keep handy.</div>';
 	        return;
@@ -12485,8 +12861,9 @@
 		      const agents = Array.isArray(agentFollowUp.agents) ? agentFollowUp.agents : [];
 		      const incoming = (agents.length ? agents : agentFollowUp.agent ? [agentFollowUp.agent] : [])
 		        .filter(Boolean)
-		        .filter((agent) => !isHiddenAgentCompletionAgent(agent));
-	      const saved = loadSavedAgents();
+		        .filter((agent) => !isHiddenAgentCompletionAgent(agent))
+		        .filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
+	      const saved = loadSavedAgents().filter((agent) => !isSantaClawzRecommendationAgent(agent) || isApprovedSantaClawzClientAgent(agent));
 	      const merged = [];
 	      const seen = new Set();
 	      for (const agent of [...saved, ...incoming]) {
@@ -12667,11 +13044,12 @@
 	      `;
 	    }
 
-	    function attachAgentCompletionCard(target, agentFollowUp = null, context = {}) {
-	      if (!target?.el || !agentFollowUp || typeof agentFollowUp !== 'object') return null;
+    function attachAgentCompletionCard(target, agentFollowUp = null, context = {}) {
+      if (!SANTACLAWZ_LIVE) return null;
+      if (!target?.el || !agentFollowUp || typeof agentFollowUp !== 'object') return null;
 	      target.el.querySelector('.agent-completion-card')?.remove();
 	      const santaClawzAgents = (Array.isArray(agentFollowUp.agents) ? agentFollowUp.agents : agentFollowUp.agent ? [agentFollowUp.agent] : [])
-	        .filter((agent) => isSantaClawzRecommendationAgent(agent) && !isHiddenAgentCompletionAgent(agent));
+	        .filter((agent) => isSantaClawzRecommendationAgent(agent) && isApprovedSantaClawzClientAgent(agent) && !isHiddenAgentCompletionAgent(agent));
 	      if (!santaClawzAgents.length) return null;
 	      const normalizedAgentFollowUp = {
 	        ...agentFollowUp,
@@ -12706,7 +13084,6 @@
 	            <span class="agent-completion-copy">${completionCopyHtml}</span>
 	            <span class="agent-completion-inline-links">
 	              ${matchCount > 1 ? `<button class="agent-completion-utility" type="button" data-agent-completion-toggle aria-expanded="false">${escapeHtml(browseMatchesLabel)}</button><span class="agent-completion-utility-divider" aria-hidden="true"></span>` : ''}
-	              <a class="agent-completion-utility-link" href="${escapeHtml(SANTACLAWZ_PROTOCOL_URL)}" target="_blank" rel="noopener noreferrer">Add your agent</a>
 	            </span>
 	          </div>
 	          <div class="agent-completion-primary-actions">
@@ -12733,18 +13110,28 @@
 	        if (morePanel) morePanel.hidden = expanded;
 	        moreButton.textContent = expanded ? 'More agents >>' : 'Less agents <<';
 	      });
-		      const hireAgent = async (agent, button = null) => {
-		        const status = card.querySelector('[data-agent-completion-status]');
-		        if (!agent || !status) return;
-		        const name = String(agent.agentName || agent.pluginId || 'Selected agent').trim();
-		        const capability = getAgentCompletionCapability(agent) || (canStartContextualExecutionForCapability(context.capability) ? context.capability : '');
-		        const starterPrompt = buildAgentCompletionStarterPrompt(agent, context);
-		        rememberSelectedAgentExecution({
-		          agent,
-		          capability: capability || 'agent-execution',
-		          starterPrompt,
-		          context
-		        });
+	      const hireAgent = async (agent, button = null) => {
+	        const status = card.querySelector('[data-agent-completion-status]');
+	        if (!agent || !status) return;
+	        const name = String(agent.agentName || agent.pluginId || 'Selected agent').trim();
+	        const agentId = String(agent.pluginId || agent.agentId || '').trim();
+	        const rememberedSelection = pendingSelectedAgentExecution;
+	        const rememberedSameAgent = rememberedSelection
+	          && String(rememberedSelection.pluginId || '').trim() === agentId;
+	        const rememberedSessionId = rememberedSameAgent ? String(rememberedSelection.sessionId || '').trim() : '';
+	        const openRequestId = rememberedSameAgent
+	          ? String(rememberedSelection.openRequestId || '').trim() || createExecutionOpenRequestId()
+	          : createExecutionOpenRequestId();
+	        const capability = getAgentCompletionCapability(agent) || (canStartContextualExecutionForCapability(context.capability) ? context.capability : '');
+	        const starterPrompt = buildAgentCompletionStarterPrompt(agent, context);
+	        rememberSelectedAgentExecution({
+	          agent,
+	          capability: capability || 'agent-execution',
+	          starterPrompt,
+	          context,
+	          sessionId: String(context.connectorSessionId || '').trim() || rememberedSessionId,
+	          openRequestId
+	        });
 		        if (
 		          getAgentCompletionKind(agent) === 'browser' &&
 		          !context.connectorSessionId &&
@@ -12763,8 +13150,8 @@
 		          button.textContent = 'Opening...';
 		        }
 	        status.textContent = `Opening ${name} in the execution widget...`;
-		        try {
-	          let reusableSessionId = String(context.connectorSessionId || '').trim();
+	        try {
+	          let reusableSessionId = String(context.connectorSessionId || '').trim() || rememberedSessionId;
 	          if (reusableSessionId) {
 	            const existing = await api(`/connectors/sessions/${encodeURIComponent(reusableSessionId)}`).catch(() => null);
 	            const sameAgent = existing?.session?.handoffData?.kind === 'agent'
@@ -12784,9 +13171,10 @@
 	              capability: capability || 'agent-execution',
 	              starterPrompt,
 	              context,
-	              sessionId: reusableSessionId
+	              sessionId: reusableSessionId,
+	              openRequestId
 	            });
-	            await renderExecutionSheet(reusableSessionId);
+	            await revealExecutionSheet(reusableSessionId, { awaitRender: true });
 	            status.textContent = `${name} is ready in the execution widget. Add task inputs there; chat can stay focused on questions.`;
 	          } else {
 	            const session = await openContextualExecutionSession({
@@ -12794,6 +13182,7 @@
 	              prompt: starterPrompt,
 	              preferredExecutionAgentId: agent.pluginId || '',
 	              selectedAgent: agent,
+	              clientRequestId: openRequestId,
 	              statusEl: status
 	            });
 	            rememberSelectedAgentExecution({
@@ -12801,26 +13190,26 @@
 	              capability: capability || 'agent-execution',
 	              starterPrompt,
 	              context,
-	              sessionId: session.id
+	              sessionId: session.id,
+	              openRequestId
 	            });
 	            const intake = formatAgentCompletionIntake(agent);
 	            status.textContent = `${name} is open in the execution widget.${intake ? ` ${intake}.` : ''}`;
 	          }
 	          if (button) {
-	            button.textContent = 'Hired';
+	            button.textContent = 'Selected';
 	            button.disabled = true;
 	          }
 	          card.querySelectorAll('[data-agent-completion-select]').forEach((entry) => {
-	            entry.textContent = entry === button ? 'Hired' : 'Hire';
+	            entry.textContent = entry === button ? 'Selected' : 'Hire';
 	            entry.disabled = entry === button;
 	          });
-		        } catch (error) {
-		          if (!context.connectorSessionId) clearSelectedAgentExecution();
-		          if (button) {
-		            button.disabled = false;
-		            button.textContent = previousText || 'Hire';
-		          }
-	          status.textContent = `Execution widget needs attention: ${normalizeExecutionErrorMessage(error)}`;
+	        } catch (error) {
+	          if (button) {
+	            button.disabled = false;
+	            button.textContent = previousText || 'Hire';
+	          }
+	          status.textContent = `Could not open the execution widget. Your selection is saved; retry to reopen it. ${normalizeExecutionErrorMessage(error)}`;
 	        }
 	      };
 		      card.querySelector('[data-agent-completion-primary]')?.addEventListener('click', (event) => {
@@ -12880,6 +13269,12 @@
 	          await hireAgent(agents[index] || null, event.currentTarget);
 	        });
 	      });
+	      if (agentFollowUp.autoOpenExecutionSheet === true && primaryAgent) {
+	        const primaryButton = card.querySelector('[data-agent-completion-primary]');
+	        queueMicrotask(() => {
+	          void hireAgent(primaryAgent, primaryButton);
+	        });
+	      }
 	      return card;
 	    }
 
@@ -13645,7 +14040,7 @@
         renderHelperSavedAgents();
         setHelperAgentView(loadSavedAgents().length ? 'saved' : 'all');
         positionHelperPopup();
-        refreshHelperPlatformAgents().catch(() => {});
+        if (SANTACLAWZ_LIVE) refreshHelperPlatformAgents().catch(() => {});
         ensurePlatformWorkflowRegistryLoaded().catch(() => {});
       }
     }
@@ -13756,6 +14151,7 @@
       prompt = '',
       preferredExecutionAgentId = '',
       selectedAgent = null,
+      clientRequestId = '',
       statusEl = null
     } = {}) {
       const hasSelectedAgent = Boolean(selectedAgent || preferredExecutionAgentId);
@@ -13775,6 +14171,7 @@
           prompt,
           preferredExecutionAgentId,
           selectedAgent,
+          clientRequestId,
           profileSummary: buildClientProfileSummary()
         })
       });
@@ -13851,6 +14248,7 @@
 
     let activeExecutionSessionId = null;
     let executionPollHandle = null;
+    let zekoNetworkStatus = null;
     let pendingSelectedAgentExecution = null;
     let softRecommendedAgentExecution = null;
     const MAX_LOCAL_EXECUTION_SESSIONS = 3;
@@ -13858,6 +14256,35 @@
     const executionSessionCache = new Map();
     const executionCollapsedSessions = new Set();
     const executionDraftCache = new Map();
+
+    async function refreshZekoNetworkStatus() {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 2_000);
+      try {
+        const response = await fetch('/network/zeko/status', {
+          cache: 'no-store',
+          signal: controller.signal
+        });
+        if (!response.ok) throw new Error(`status_${response.status}`);
+        zekoNetworkStatus = {
+          ...await response.json(),
+          statusCheck: 'fresh'
+        };
+      } catch {
+        zekoNetworkStatus = {
+          ...(zekoNetworkStatus || {}),
+          available: zekoNetworkStatus?.available ?? null,
+          statusCheck: 'failed',
+          checkedAt: new Date().toISOString()
+        };
+      } finally {
+        window.clearTimeout(timeout);
+      }
+      if (activeExecutionSessionId && executionSessionCache.has(activeExecutionSessionId)) {
+        renderExecutionDock();
+      }
+      return zekoNetworkStatus;
+    }
 
     function getActiveExecutionSessionIds() {
       return executionSessionOrder.filter((sessionId) => {
@@ -13883,7 +14310,11 @@
       return formatAgentCompletionName(agent) || String(agent.agentName || agent.metadata?.label || agent.pluginId || agent.agentId || 'Selected agent').trim();
     }
 
-    function rememberSelectedAgentExecution({ agent = null, capability = 'agent-execution', starterPrompt = '', context = {}, sessionId = '' } = {}) {
+    function createExecutionOpenRequestId() {
+      return globalThis.crypto?.randomUUID?.() || `execution-open-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function rememberSelectedAgentExecution({ agent = null, capability = 'agent-execution', starterPrompt = '', context = {}, sessionId = '', openRequestId = '' } = {}) {
       if (!agent) return null;
       const pluginId = String(agent.pluginId || agent.agentId || getAgentCompletionId(agent) || '').trim();
       pendingSelectedAgentExecution = {
@@ -13894,6 +14325,7 @@
         starterPrompt: String(starterPrompt || '').trim(),
         responseText: String(context?.responseText || '').trim(),
         sessionId: String(sessionId || context?.connectorSessionId || '').trim(),
+        openRequestId: String(openRequestId || '').trim() || createExecutionOpenRequestId(),
         selectedAt: new Date().toISOString()
       };
       return pendingSelectedAgentExecution;
@@ -14335,19 +14767,19 @@
               host ? `from ${host}` : '',
               budget ? `within the shared ${budget} budget` : '',
               `items: ${shoppingItems.slice(0, 12).join('; ')}${shoppingItems.length > 12 ? `; +${shoppingItems.length - 12} more` : ''}`
-            ].filter(Boolean).join(' ') + '. Pause before payment or final purchase.'
+            ].filter(Boolean).join(' ') + '. Pause only for login, payment, captcha, or a checkout mismatch.'
         : product
           ? (isTravelTask
             ? [
                 `Prepare ${product}`,
                 host ? `on ${host}` : '',
                 budget ? `within ${budget}` : ''
-              ].filter(Boolean).join(' ') + '. Pause before payment or final purchase.'
+              ].filter(Boolean).join(' ') + '. Pause only for login, payment, captcha, or a checkout mismatch.'
             : [
                 `Buy ${product}`,
                 host ? `from ${host}` : '',
                 budget ? `with max spend ${budget}` : ''
-              ].filter(Boolean).join(' ') + '. Pause before payment or final purchase.')
+              ].filter(Boolean).join(' ') + '. Pause only for login, payment, captcha, or a checkout mismatch.')
         : nextGoalSeed;
       return {
         ...current,
@@ -14375,7 +14807,7 @@
           finalApprovalPolicy: preferredBrowserFinalApprovalPolicy()
         } : {}),
         actionDepth: current.actionDepth || 'Prepare cart or form',
-        stopCondition: current.stopCondition || 'Pause before payment or final purchase',
+        stopCondition: current.stopCondition || 'Pause only for login, payment, captcha, or a checkout mismatch',
         paymentFundingMode: current.paymentFundingMode || 'magic_city_credits'
       };
     }
@@ -14559,6 +14991,8 @@
       if (!session) {
         if (!pending?.agent) return false;
         const combinedPrompt = appendExecutionDetail(pending.starterPrompt || pending.responseText || '', detail) || detail;
+        const openRequestId = pending.openRequestId || createExecutionOpenRequestId();
+        pending.openRequestId = openRequestId;
         if (
           getAgentCompletionKind(pending.agent) === 'browser' &&
           !hasRunnableBrowserExecutionContext(combinedPrompt, '')
@@ -14577,7 +15011,8 @@
           capability: pending.capability || 'agent-execution',
           prompt: combinedPrompt,
           preferredExecutionAgentId: pending.pluginId || pending.agent?.pluginId || '',
-          selectedAgent: pending.agent
+          selectedAgent: pending.agent,
+          clientRequestId: openRequestId
         });
         if (isMagicInternetHelperSession(created)) {
           const browserSelections = buildBrowserSelectionsFromExecutionDetail(created, combinedPrompt);
@@ -14606,7 +15041,8 @@
           capability: pending.capability,
           starterPrompt: pending.starterPrompt,
           context: { responseText: pending.responseText },
-          sessionId: created.id
+          sessionId: created.id,
+          openRequestId
         });
         addAssistantResult(
           isMagicInternetHelperSession(created)
@@ -14682,6 +15118,7 @@
 	      executionDraftCache.clear();
 	      executionPendingSessions.clear();
 	      executionProtocolPollingSessions.clear();
+	      executionPollingRequestsInFlight.clear();
 	      executionCancellingSessions.clear();
 	      clearSelectedAgentExecution();
       if (executionPollHandle) {
@@ -14699,6 +15136,7 @@
 	      executionDraftCache.delete(sessionId);
 	      executionPendingSessions.delete(sessionId);
 	      executionProtocolPollingSessions.delete(sessionId);
+	      executionPollingRequestsInFlight.delete(sessionId);
 	      executionCancellingSessions.delete(sessionId);
 	      executionLocalErrors.delete(sessionId);
 	      clearSelectedAgentExecution(sessionId);
@@ -14759,12 +15197,34 @@
       renderExecutionDock();
     }
 
+    function openExecutionPanel(sessionId) {
+      if (!sessionId) return;
+      activeExecutionSessionId = sessionId;
+      executionCollapsedSessions.delete(sessionId);
+      renderExecutionDock();
+    }
+
 		    function isTerminalExecutionStatus(status = '') {
 		      return ['fulfilled', 'failed'].includes(String(status || '').toLowerCase());
 		    }
 
+		    function isExecutionSessionDurablyCancelled(session) {
+		      const cancellation = session?.executionCancellation || {};
+		      return Boolean(cancellation.cancelledAt || cancellation.canceledAt)
+		        || ['cancelled', 'canceled'].includes(String(session?.status || '').toLowerCase());
+		    }
+
 		    function isTerminalSantaClawzDirectPaymentStatus(status = '') {
 		      return ['completed', 'payment_failed', 'failed', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
+		    }
+
+		    function markExecutionStartButtonStarting(button, label = 'Starting') {
+		      if (!button) return false;
+		      button.disabled = true;
+		      button.textContent = label;
+		      button.classList?.add('is-starting');
+		      button.setAttribute?.('aria-busy', 'true');
+		      return true;
 		    }
 
 		    function hasActiveSantaClawzDirectPayment(session) {
@@ -14772,6 +15232,39 @@
 		      if (!directPayment?.paymentPayloadDigestSha256) return false;
 		      if (isTerminalExecutionStatus(session?.status)) return false;
 		      return !isTerminalSantaClawzDirectPaymentStatus(directPayment.status);
+		    }
+
+		    function getSantaClawzDeliveryVerificationState(session) {
+		      const hasSantaClawz = session?.externalExecutionHandoff?.source === 'santaclawz'
+		        || Boolean(session?.santaclawzDirectPayment);
+		      if (!hasSantaClawz) return { available: false, accepted: false, pending: false, rejected: false };
+		      const directPayment = session.santaclawzDirectPayment || {};
+		      const summary = directPayment.summary || {};
+		      const items = collectSantaClawzDeliveryItems(session);
+		      const validationReason = String(summary.returnValidation?.reason || '').trim().toLowerCase();
+		      const validationRejected = summary.returnValidation?.ok === false
+		        && summary.returnValidation?.pending !== true
+		        && validationReason !== 'santaclawz_return_missing'
+		        && validationReason !== 'santaclawz_return_temporarily_unavailable';
+		      const rejected = validationRejected
+		        || summary.returnRejected === true
+		        || (summary.terminalFailure === true && summary.returnVerificationPending !== true);
+		      if (isExecutionSessionDurablyCancelled(session)) {
+		        return { available: items.length > 0, accepted: false, pending: false, rejected: false, cancelled: true, items };
+		      }
+		      const accepted = !rejected
+		        && !validationRejected
+		        && (
+		          summary.completed === true
+		          || String(session?.status || '').toLowerCase() === 'fulfilled'
+		          || String(directPayment.status || '').toLowerCase() === 'completed'
+		        );
+		      const pending = items.length > 0 && !accepted && !rejected;
+		      return { available: items.length > 0, accepted, pending, rejected, items };
+		    }
+
+		    function hasPendingSantaClawzDeliveryVerification(session) {
+		      return getSantaClawzDeliveryVerificationState(session).pending;
 		    }
 
 		    function syncExecutionProtocolPollingSession(session) {
@@ -14798,10 +15291,12 @@
 		      return syncExecutionProtocolPollingSession(pollableSession);
 		    }
 
-    function shouldPollExecutionSession(session) {
+	    function shouldPollExecutionSession(session) {
       if (!session) return false;
       if (executionDismissedSessions.has(session.id) || executionCancellingSessions.has(session.id)) return false;
 		      const status = String(session.status || '').toLowerCase();
+		      if (isExecutionSessionDurablyCancelled(session)) return false;
+		      if (hasPendingSantaClawzDeliveryVerification(session)) return true;
 		      if (['queued', 'claimed', 'executing'].includes(status)) return true;
 		      if (isTerminalExecutionStatus(status)) return false;
 		      return hasActiveSantaClawzDirectPayment(session);
@@ -14809,7 +15304,9 @@
 
 	    function executionPollingRenderBucket(session = null) {
 	      const status = String(session?.status || '').toLowerCase();
-	      const lifecycle = ['queued', 'claimed', 'executing'].includes(status)
+	      const lifecycle = hasReadySantaClawzDelivery(session)
+	        ? 'delivery-ready'
+	        : ['queued', 'claimed', 'executing'].includes(status)
 	        ? 'busy'
 	        : isTerminalExecutionStatus(status)
 	          ? status
@@ -14834,10 +15331,19 @@
 	      const latestStep = [...(Array.isArray(session.executionTrace) ? session.executionTrace : [])].reverse()[0] || null;
 	      const latestPhase = inferExecutionPhase(latestStep, session.fulfillment);
 	      const latestSummary = latestStep?.label || latestPhase.label;
-	      const runState = describeExecutionRunState(session, statusBadge, latestSummary);
+	      const runState = describeExecutionRunState(session, statusBadge, latestSummary, localExecutionError);
 	      const displayStatusLabel = runState.badgeLabel || statusBadge.label;
-	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', latestSummary].filter(Boolean).join(' · ');
+	      const santaClawzProgress = getSantaClawzExecutionProgress(session);
+	      const terminalSummary = sessionHasBrowserOrderSubmitted(session)
+	        ? 'Amazon confirmed the order.'
+	        : hasReadySantaClawzDelivery(session)
+	          ? 'Audit report ready.'
+	          : executionPendingSessions.has(session.id) && isSantaClawzExecutionSession(session)
+	            ? 'Checking readiness and payment terms'
+	          : santaClawzProgress?.summary || latestSummary;
+	      const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	      const statusLine = getConciseExecutionStatusLine(session, statusBadge, fundingStatus, localExecutionError);
+	      const showActivityBar = shouldShowExecutionActivityBar(session, statusBadge);
 
 	      const meta = panel.querySelector('.execution-panel-meta');
 	      if (meta) meta.textContent = compactMeta || statusLine;
@@ -14845,6 +15351,13 @@
 	        badge.className = `execution-status-badge ${statusBadge.cls}`;
 	        badge.textContent = displayStatusLabel;
 	      });
+	      const activityBar = panel.querySelector('.execution-activity-bar');
+	      if (showActivityBar && !activityBar) {
+	        const headTarget = panel.querySelector('.execution-panel-open-target');
+	        headTarget?.insertAdjacentHTML('afterend', '<div class="execution-activity-bar"></div>');
+	      } else if (!showActivityBar) {
+	        activityBar?.remove();
+	      }
 	      const runTitle = panel.querySelector('.execution-run-state > div > strong');
 	      const runDetail = panel.querySelector('.execution-run-state > div > span');
 	      if (runTitle) runTitle.textContent = runState.title;
@@ -14860,35 +15373,63 @@
 	      if (live) live.innerHTML = renderExecutionLiveView(session);
 	      const trace = panel.querySelector('#executionTrace');
 	      if (trace) trace.innerHTML = renderExecutionTrace(session);
+	      applyExecutionRunnerProgress(session, panel);
 	      return true;
 	    }
 
+		    function shouldApplyPolledExecutionSession(previousSession, nextSession) {
+		      if (!previousSession || !nextSession) return Boolean(nextSession);
+		      if (isExecutionSessionDurablyCancelled(previousSession)
+		        && !isExecutionSessionDurablyCancelled(nextSession)) return false;
+		      const previousUpdatedAt = Date.parse(String(previousSession.updatedAt || ''));
+		      const nextUpdatedAt = Date.parse(String(nextSession.updatedAt || ''));
+		      if (Number.isFinite(previousUpdatedAt) && Number.isFinite(nextUpdatedAt) && nextUpdatedAt < previousUpdatedAt) {
+		        return false;
+		      }
+		      if (sessionHasBrowserOrderSubmitted(previousSession) && !sessionHasBrowserOrderSubmitted(nextSession)) return false;
+		      if (hasReadySantaClawzDelivery(previousSession) && !hasReadySantaClawzDelivery(nextSession)) return false;
+		      return true;
+		    }
+
 		    async function refreshExecutionSessionForPolling(sessionId) {
 	      if (executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return;
-	      const previousSession = executionSessionCache.get(sessionId) || null;
-	      const previousBucket = executionPollingRenderBucket(previousSession);
+	      if (executionPollingRequestsInFlight.has(sessionId)) return { mode: 'coalesced' };
+	      executionPollingRequestsInFlight.add(sessionId);
+	      try {
+		      const requestSession = executionSessionCache.get(sessionId) || null;
 	      const { session } = await api(`/connectors/sessions/${sessionId}`);
-	      if (!session || executionCancellingSessions.has(session.id) || executionDismissedSessions.has(session.id)) return;
+	      if (!session || String(session.id || '') !== String(sessionId)) return { mode: 'session-mismatch' };
+	      if (executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return;
+	      const latestSession = executionSessionCache.get(sessionId) || requestSession;
+	      if (!shouldApplyPolledExecutionSession(latestSession, session)) return { mode: 'stale-response' };
+	      const previousBucket = executionPollingRenderBucket(latestSession);
 	      const draft = getExecutionDraft(sessionId);
 	      if (draft) {
 	        session.selections = { ...(session.selections || {}), ...(draft.selections || {}) };
 	        session.finalSelections = { ...(session.finalSelections || {}), ...(draft.selections || {}) };
 	        session.localPrivateContext = { ...(session.localPrivateContext || {}), ...(draft.localPrivateInputs || {}) };
 	      }
+	      reconcileExecutionWakeError(session);
 	      executionSessionCache.set(session.id, session);
 	      syncExecutionProtocolPollingSession(session);
+	      const terminalBrowserOrder = sessionHasBrowserOrderSubmitted(session);
+	      if (isTerminalExecutionStatus(session.status) || terminalBrowserOrder) {
+	        executionPendingSessions.delete(session.id);
+	        executionProtocolPollingSessions.delete(session.id);
+	        clearExecutionRunnerProgress(session.id);
+	        clearSelectedAgentExecution(session.id);
+	      }
 	      const nextBucket = executionPollingRenderBucket(session);
 	      if (previousBucket !== nextBucket || !refreshExecutionPanelInPlace(session)) {
 	        await renderExecutionSheet(session.id, { focus: false });
+	        ensureExecutionPolling();
 	        return { mode: 'lifecycle-render', previousBucket, nextBucket };
-	      }
-	      if (isTerminalExecutionStatus(session.status)) {
-	        executionPendingSessions.delete(session.id);
-	        executionProtocolPollingSessions.delete(session.id);
-	        clearSelectedAgentExecution(session.id);
 	      }
 	      ensureExecutionPolling();
 	      return { mode: 'in-place', previousBucket, nextBucket };
+	      } finally {
+	        executionPollingRequestsInFlight.delete(sessionId);
+	      }
 		    }
 
 	    function ensureExecutionPolling() {
@@ -14934,13 +15475,46 @@
     function getExecutionStatusModel(session) {
       const statusValue = String(session?.status || 'ready');
       const awaitingConfirmation = isAwaitingExecutionConfirmation(session);
+      reconcileExecutionWakeError(session);
       const locallyPending = session?.id && executionPendingSessions.has(session.id) && !isTerminalExecutionStatus(statusValue);
       const localError = session?.id ? executionLocalErrors.get(session.id) : null;
-      if (locallyPending) return { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
+      const localWakeError = executionLocalErrorApplies(session, localError)
+        && /^extension_wake_(failed|rejected):/.test(String(localError?.code || ''));
+      if (isExecutionSessionDurablyCancelled(session)) {
+        return { statusValue: 'cancelled', label: 'Cancelled', cls: 'failed', phase: 2 };
+      }
+      if (sessionHasBrowserOrderSubmitted(session)) {
+        return { statusValue: 'fulfilled', label: 'Order placed', cls: 'completed', phase: 2 };
+      }
+      if (hasReadySantaClawzDelivery(session)) {
+        return { statusValue: 'fulfilled', label: 'Done', cls: 'completed', phase: 2 };
+      }
+	      if (hasPendingSantaClawzDeliveryVerification(session)) {
+	        return { statusValue: 'verification_pending', label: 'Report available', cls: 'queued', phase: 2 };
+	      }
+      if (localWakeError) {
+        return { statusValue: 'failed', label: 'Runner needed', cls: 'failed', phase: 1 };
+      }
+      if (locallyPending) {
+        if (String(session?.handoffData?.kind || '') === 'browser') {
+          return { statusValue: 'executing', label: 'Connecting Runner', cls: 'running', phase: 1 };
+        }
+        if (isSantaClawzExecutionSession(session)) {
+          return { statusValue: 'executing', label: 'Connecting', cls: 'running', phase: 1 };
+        }
+        return { statusValue: 'executing', label: 'Starting', cls: 'running', phase: 1 };
+      }
+      if (localError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
+        return { statusValue: 'failed', label: 'Start failed', cls: 'failed', phase: 1 };
+      }
       if (localError && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusValue)) {
         return { statusValue: 'failed', label: 'Needs attention', cls: 'failed', phase: 1 };
       }
       if (awaitingConfirmation) return { statusValue, label: 'Ready', cls: 'queued', phase: 0 };
+      if (statusValue === 'queued' && String(session?.handoffData?.kind || '') === 'browser'
+        && Date.parse(session?.extensionRunDispatch?.expiresAt || '') > Date.now()) {
+        return { statusValue, label: 'Waiting for Runner', cls: 'queued', phase: 1 };
+      }
       if (statusValue === 'queued') return { statusValue, label: 'In queue', cls: 'queued', phase: 1 };
       if (statusValue === 'claimed' || statusValue === 'executing') return { statusValue, label: 'Running', cls: 'running', phase: 1 };
       if (statusValue === 'fulfilled') return { statusValue, label: 'Done', cls: 'completed', phase: 2 };
@@ -14989,11 +15563,16 @@
       const note = String(session?.fulfillment?.notes || fallback || '').replace(/\s+/g, ' ').trim();
       const browserExecution = session?.fulfillment?.result?.browserExecution || {};
       const stopState = String(browserExecution.stopState || '').toLowerCase();
+      if (sessionHasBrowserOrderSubmitted(session)) return 'Order placed and confirmed by Amazon.';
       if (String(session?.status || '').toLowerCase() === 'failed' && browserExecution.stopEvidence) {
         return compactExecutionSentence(browserExecution.stopEvidence, 96);
       }
       if (stopState === 'checkout_profile_mismatch') return 'Delivery address needs update before checkout can continue.';
+      if (stopState === 'address_verification_required') return 'Recheck the selected delivery address in the preserved Amazon tab.';
       if (stopState === 'payment_required' || stopState === 'needs_payment') return 'Select the saved payment method in Chrome to continue.';
+      if (stopState === 'local_checkout_profile_missing') return 'Unlock Local Data Vault, then retry checkout verification.';
+      if (stopState === 'pending_order_verification_required') return 'Amazon requested repeat-order confirmation. Review the preserved Amazon tab.';
+      if (stopState === 'final_submit_dispatch_failed') return 'The final order click did not dispatch. The order was not placed.';
       if (stopState === 'final_approval_required' || stopState === 'needs_final_approval') return 'Order is ready for final approval.';
       if (/Magic City Runner prepared the browser task locally and stopped before login, payment, or final order approval/i.test(note)) {
         return 'Checkout is ready for review.';
@@ -15002,6 +15581,37 @@
         return 'SantaClawz run complete.';
       }
       return compactExecutionSentence(note || 'Execution finished.', 96);
+    }
+
+    function hasBrowserOrderSubmitted(browserExecution = {}) {
+      const summary = browserExecution?.checkoutSummary || {};
+      return browserExecution?.orderSubmitted === true
+        || summary.orderSubmitted === true
+        || browserExecution?.milestoneSignals?.orderSubmitted === true
+        || (Array.isArray(browserExecution?.verifiedMilestones) && browserExecution.verifiedMilestones.includes('order_submitted'));
+    }
+
+    function sessionHasBrowserOrderSubmitted(session = {}) {
+      const result = session?.fulfillment?.result || {};
+      const browserExecution = result.browserExecution || session?.fulfillment?.browserExecution || {};
+      if (hasBrowserOrderSubmitted(browserExecution)) return true;
+      const verifiedMilestones = Array.isArray(session?.extensionMissionPlanState?.verifiedMilestones)
+        ? session.extensionMissionPlanState.verifiedMilestones
+        : [];
+      if (verifiedMilestones.includes('order_submitted')) return true;
+      const trace = Array.isArray(session?.missionBoundaryTrace)
+        ? session.missionBoundaryTrace
+        : Array.isArray(session?.executionTrace)
+          ? session.executionTrace
+          : [];
+      return trace.some((entry) => hasBrowserOrderSubmitted(
+        entry?.browserExecution || entry?.browser || entry?.result?.browserExecution || {}
+      ));
+    }
+
+    function shouldShowExecutionActivityBar(session, statusModel) {
+      return !sessionHasBrowserOrderSubmitted(session)
+        && ['queued', 'claimed', 'executing'].includes(String(statusModel?.statusValue || ''));
     }
 
     function canPlaceReviewedOrderFromSession(session = {}) {
@@ -15015,22 +15625,124 @@
       return ['needs_final_approval', 'final_approval_required', 'review_ready'].includes(stopState);
     }
 
-    function describeExecutionRunState(session, statusModel, latestSummary = '') {
+    function describeExecutionRunState(session, statusModel, latestSummary = '', localExecutionError = null) {
       const result = session?.fulfillment?.result || {};
       const handoff = session?.handoffData || {};
       const kind = String(handoff.kind || '');
       const browserExecution = result.browserExecution || session?.fulfillment?.result?.browserExecution || {};
       const browserSummary = browserExecution.checkoutSummary || {};
       const browserStopState = String(browserExecution.stopState || result.stopState || '').toLowerCase();
+      const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
+      const santaClawzDeliveryReady = hasReadySantaClawzDelivery(session);
+	      const santaClawzVerificationPending = hasPendingSantaClawzDeliveryVerification(session);
+	      const santaClawzProgress = getSantaClawzExecutionProgress(session);
       const travelMode = kind === 'travel'
         ? resolveTravelModeValue(session.selections?.travelMode || session.paymentOrchestration?.travelMode || 'itinerary_build')
         : '';
+      if (isExecutionSessionDurablyCancelled(session)) {
+        return {
+          title: 'Cancelled',
+          detail: 'This run was cancelled. Any report already returned remains available.',
+          badgeLabel: 'Cancelled'
+        };
+      }
+      if (kind === 'browser' && browserOrderSubmitted) {
+        return {
+          title: 'Order submitted',
+          detail: 'Amazon confirmed the order.',
+          badgeLabel: 'Done',
+          actionLabel: 'Open confirmation'
+        };
+      }
+      if (kind === 'agent' && santaClawzDeliveryReady) {
+        return {
+          title: 'Audit complete',
+          detail: 'The report and structured findings are ready.',
+          badgeLabel: 'Done'
+        };
+      }
+	      if (kind === 'agent' && santaClawzVerificationPending) {
+	        return {
+	          title: 'Report available',
+	          detail: 'Delivery verification is still pending. No additional hire or payment is needed.',
+	          badgeLabel: 'Verification pending'
+	        };
+	      }
+      if (kind === 'agent' && statusModel.statusValue === 'executing' && statusModel.label === 'Connecting') {
+        return {
+          title: 'Preparing audit',
+          detail: 'Checking SantaClawz readiness and payment terms.',
+          badgeLabel: 'Connecting'
+        };
+      }
+	      if (kind === 'agent' && santaClawzProgress && ['queued', 'claimed', 'executing'].includes(statusModel.statusValue)) {
+	        return statusModel.label === 'Starting'
+	          ? {
+	              title: 'Starting',
+	              detail: 'Sending the saved audit request to SantaClawz.',
+	              badgeLabel: 'Starting'
+	            }
+	          : {
+	              title: santaClawzProgress.title,
+	              detail: santaClawzProgress.detail,
+	              badgeLabel: santaClawzProgress.badgeLabel
+	            };
+	      }
+      if (kind === 'browser' && statusModel.statusValue === 'executing' && statusModel.label === 'Connecting Runner') {
+        return {
+          title: 'Connecting Runner',
+          detail: 'Claiming this mission, then opening Amazon.',
+          badgeLabel: 'Claiming'
+        };
+      }
       if (statusModel.statusValue === 'failed') {
+        if (kind === 'agent' && localExecutionError?.data?.unstartedSantaClawz && !santaClawzExecutionHasStarted(session)) {
+          return {
+            title: 'Could not start',
+            detail: 'Your inputs are saved. Retry this same session; no hire or payment was submitted.',
+            badgeLabel: 'Start failed'
+          };
+        }
+        if (kind === 'browser' && /^extension_wake_(failed|rejected):/.test(String(localExecutionError?.code || ''))) {
+          return {
+            title: 'Runner did not start',
+            detail: compactExecutionSentence(localExecutionError.message || 'Magic City Runner did not claim this mission.', 132),
+            badgeLabel: 'Runner needed',
+            actionLabel: 'Retry runner start'
+          };
+        }
+        if (kind === 'browser' && browserStopState === 'local_checkout_profile_missing') {
+          return {
+            title: 'Unlock checkout details',
+            detail: 'Unlock Local Data Vault, then retry this preserved checkout.',
+            badgeLabel: 'Vault needed',
+            actionLabel: 'Open checkout'
+          };
+        }
+        if (kind === 'browser' && browserStopState === 'final_submit_dispatch_failed') {
+          return {
+            title: 'Order was not submitted',
+            detail: 'The authorized final click did not dispatch. Reopen Amazon and retry the run.',
+            badgeLabel: 'Retry needed',
+            actionLabel: 'Open Amazon'
+          };
+        }
+        if (kind === 'browser' && browserStopState === 'pending_order_verification_required') {
+          return {
+            title: 'Pending order needs verification',
+            detail: browserExecution.stopEvidence || 'Review the matching product, quantity, and price in the preserved Amazon tab. No additional order click was issued.',
+            badgeLabel: 'Review needed',
+            actionLabel: 'Open Amazon'
+          };
+        }
         if (kind === 'browser' && (browserStopState === 'checkout_profile_mismatch' || browserSummary.addressMatches === false)) {
           const vaultUnavailable = browserExecution.localCheckoutProfileExpected && !browserExecution.localCheckoutProfileAvailable;
           return vaultUnavailable
             ? { title: 'Unlock delivery address', detail: 'Unlock Local Data Vault, then retry checkout.', badgeLabel: 'Address needed' }
             : { title: 'Confirm delivery address', detail: 'Open Amazon, confirm or add the saved address, then retry.', badgeLabel: 'Address needed', actionLabel: 'Open delivery address' };
+        }
+        if (kind === 'browser' && (browserStopState === 'address_verification_required' || browserSummary.addressVerification === 'unverified')) {
+          return { title: 'Recheck delivery address', detail: 'Amazon kept the selected address, but Magic City could not verify its row. Open the preserved checkout tab, then recheck it.', badgeLabel: 'Review needed', actionLabel: 'Open checkout' };
         }
         if (kind === 'browser' && (browserStopState === 'payment_required' || browserStopState === 'needs_payment')) {
           const expectedLast4 = String(browserSummary.expectedCardLast4 || '').replace(/\D/g, '').slice(-4);
@@ -15061,6 +15773,9 @@
         if (kind === 'browser' && stopState === 'checkout_profile_mismatch') {
           return { title: 'Confirm delivery address', detail: 'Open Amazon, confirm or add the saved address, then continue.', badgeLabel: 'Address needed', actionLabel: 'Open delivery address' };
         }
+        if (kind === 'browser' && stopState === 'address_verification_required') {
+          return { title: 'Recheck delivery address', detail: 'Amazon kept the selected address, but Magic City could not verify its row. Recheck the preserved checkout tab.', badgeLabel: 'Review needed', actionLabel: 'Open checkout' };
+        }
         if (kind === 'browser' && (stopState === 'payment_required' || stopState === 'needs_payment')) {
           return { title: 'Choose payment method', detail: 'Select your saved card or use Chrome autofill.', badgeLabel: 'Payment needed', actionLabel: 'Open payment' };
         }
@@ -15069,6 +15784,14 @@
         }
         if (kind === 'browser' && stopState === 'review_ready') {
           return { title: 'Checkout ready', detail: 'Approve in Magic City or open Amazon to inspect first.', badgeLabel: 'Approval needed', actionLabel: 'Open Amazon' };
+        }
+        if (kind === 'browser' && stopState === 'pending_order_verification_required') {
+          return {
+            title: 'Pending order needs verification',
+            detail: browserExecution.stopEvidence || 'Review the matching product, quantity, and price in the preserved Amazon tab. No additional order click was issued.',
+            badgeLabel: 'Review needed',
+            actionLabel: 'Open Amazon'
+          };
         }
         return {
           title: kind === 'browser' ? 'Browser paused' : 'Ready',
@@ -15145,6 +15868,25 @@
       const anchorUrl = verification?.anchorSubmissionId ? `/anchors/status/${encodeURIComponent(verification.anchorSubmissionId)}` : '';
       const txExplorerUrl = verification?.txExplorerUrl || verification?.explorerUrl || verification?.zekoScanUrl || '';
       const txHash = verification?.txHash || '';
+      const chainAuthorization = session.finalSubmitChainAuthorization || null;
+      const chainAuthorizationReady = chainAuthorization?.status === 'anchored';
+      const chainStatusCheckFailed = !chainAuthorization && zekoNetworkStatus?.statusCheck === 'failed';
+      const chainAuthorizationBypassed = (chainAuthorization?.status === 'unavailable' && chainAuthorization?.bypassAllowed === true)
+        || (!chainAuthorization && !chainStatusCheckFailed && zekoNetworkStatus?.available === false);
+      const chainAuthorizationLabel = chainAuthorizationReady
+        ? 'Zeko authorization ready'
+        : chainAuthorizationBypassed
+          ? 'Zeko Sepolia unavailable - continuing'
+          : chainStatusCheckFailed
+            ? 'Zeko status check failed'
+          : chainAuthorization?.status === 'preparing'
+            ? 'Preparing Zeko authorization'
+            : chainAuthorization?.status === 'failed'
+              ? 'Zeko authorization needs review'
+              : '';
+      const offchainProof = String(verification?.submitMode || '').toLowerCase() === 'record'
+        || String(verification?.network || '').toLowerCase() === 'offchain';
+      const offchainTarget = verification?.offchainTargetNetwork ? ` Zeko ${String(verification.offchainTargetNetwork).replace(/^zeko:/i, '')} anchoring is deferred.` : '';
       const bits = [target ? target : '', budget ? `cap ${budget}` : '', merchants ? merchants : ''].filter(Boolean).join(' · ');
       return `
         <div class="execution-mission-note">
@@ -15154,14 +15896,17 @@
             <span class="execution-proof-badge ${traceHash ? 'ready' : 'prepared'}">${escapeExecutionValue(traceHash ? `${traceCount} events` : 'Trace pending')}</span>
             ${missionContractHash ? `<span class="execution-proof-badge ready">contract ${escapeExecutionValue(String(missionContractHash).slice(0, 12))}</span>` : ''}
             ${traceHash ? `<span class="execution-proof-badge">trace ${escapeExecutionValue(String(traceHash).slice(0, 12))}</span>` : ''}
+            ${chainAuthorizationLabel ? `<span class="execution-proof-badge ${chainAuthorizationReady ? 'ready' : chainAuthorizationBypassed || chainAuthorization?.status === 'failed' ? 'failed' : 'prepared'}">${escapeExecutionValue(chainAuthorizationLabel)}</span>` : ''}
           </div>
           <div class="execution-proof-links">
             ${missionTraceUrl ? `<a href="${missionTraceUrl}" target="_blank" rel="noopener noreferrer">Trace</a>` : ''}
             ${receiptUrl ? `<a href="${receiptUrl}" target="_blank" rel="noopener noreferrer">Receipt</a>` : ''}
-            ${anchorUrl ? `<a href="${anchorUrl}" target="_blank" rel="noopener noreferrer">Anchor</a>` : ''}
+            ${anchorUrl ? `<a href="${anchorUrl}" target="_blank" rel="noopener noreferrer">${offchainProof ? 'Proof record' : 'Anchor'}</a>` : ''}
             ${txHash && txExplorerUrl ? `<a href="${escapeExecutionValue(txExplorerUrl)}" target="_blank" rel="noopener noreferrer">Zeko tx</a>` : ''}
           </div>
-          ${!txHash ? `<div class="execution-inline-note">Zeko anchor after receipt.</div>` : ''}
+          ${!txHash ? `<div class="execution-inline-note">${offchainProof ? `Off-chain proof retained locally.${escapeExecutionValue(offchainTarget)}` : 'Zeko anchor after receipt.'}</div>` : ''}
+          ${chainAuthorizationBypassed ? `<div class="execution-inline-note">Zeko Sepolia is unavailable. Checkout continues under the signed one-order authorization.</div>` : ''}
+          ${chainStatusCheckFailed ? `<div class="execution-inline-note">Zeko status could not be refreshed. The next execution-sheet open will check again.</div>` : ''}
         </div>
       `;
     }
@@ -15250,12 +15995,21 @@
         const latestStep = [...(Array.isArray(session.executionTrace) ? session.executionTrace : [])].reverse()[0] || null;
         const latestPhase = inferExecutionPhase(latestStep, session.fulfillment);
         const latestSummary = latestStep?.label || latestPhase.label;
-        const runState = describeExecutionRunState(session, statusBadge, latestSummary);
-        const displayStatusLabel = runState.badgeLabel || statusBadge.label;
-        const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', latestSummary].filter(Boolean).join(' · ');
+	        const runState = describeExecutionRunState(session, statusBadge, latestSummary, localExecutionError);
+	        const displayStatusLabel = runState.badgeLabel || statusBadge.label;
+	        const santaClawzDeliveryReady = hasReadySantaClawzDelivery(session);
+	        const santaClawzProgress = getSantaClawzExecutionProgress(session);
+	        const terminalSummary = sessionHasBrowserOrderSubmitted(session)
+	          ? 'Amazon confirmed the order.'
+	          : santaClawzDeliveryReady
+	            ? 'Audit report ready.'
+	            : executionPendingSessions.has(session.id) && isSantaClawzExecutionSession(session)
+	              ? 'Checking readiness and payment terms'
+	            : santaClawzProgress?.summary || latestSummary;
+	        const compactMeta = [displayStatusLabel, fundingStatus ? fundingStatus.replace(/^ · /, '') : '', terminalSummary].filter(Boolean).join(' · ');
 	        const isBrowserExecutionSheet = session.handoffData?.kind === 'browser';
 	        const isAgentExecutionSheet = session.handoffData?.kind === 'agent';
-	        const canCancelExecution = !isTerminalExecutionStatus(session.status);
+	        const canCancelExecution = !isTerminalExecutionStatus(session.status) && !santaClawzDeliveryReady;
 	        const cancellationPending = executionCancellingSessions.has(session.id);
 	        const taskInputsDetail = isAgentExecutionSheet
 	          ? 'Required fields only.'
@@ -15268,6 +16022,24 @@
 	          && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusBadge.statusValue);
 	        const agentMissingInputs = isAgentExecutionSheet ? getMissingAgentInputLabels(session) : [];
 	        const browserExecution = session.fulfillment?.result?.browserExecution || {};
+	        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
+	        const browserSummary = browserExecution.checkoutSummary || {};
+	        const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
+	        const showActivityBar = shouldShowExecutionActivityBar(session, statusBadge);
+		        const browserNeedsCheckoutReconcile = [
+	          'payment_required',
+	          'needs_payment',
+	          'checkout_profile_mismatch',
+	          'address_verification_required'
+	        ].includes(browserStopState)
+	          || browserSummary.cardMatches === false
+	          || browserSummary.addressMatches === false
+	          || browserSummary.addressVerification === 'unverified';
+		        const browserCanResumeCheckoutReconcile = isBrowserExecutionSheet
+		          && !browserOrderSubmitted
+		          && browserNeedsCheckoutReconcile
+	          && nativeRunnerSupportsLocalCheckoutProfile()
+	          && ['fulfilled', 'failed'].includes(String(session.status || '').toLowerCase());
 	        const browserActionUrl = latestStep?.browser?.url
 	          || browserExecution.finalUrl
 	          || session.fulfillment?.handoff?.url
@@ -15278,19 +16050,24 @@
 	        const browserNeedsAuth = /auth_required/.test(browserErrorCode);
 		        const browserNeedsFunds = executionCreditErrorNeedsTopup(session, localExecutionError);
             const browserFundingLabel = executionCreditTopupLabel(session, localExecutionError, 'Add Magic City credits');
-	        const browserRetryLabel = runState.title === 'Unlock delivery address'
-	          ? 'Unlock and retry'
-	          : (localExecutionError ? 'Retry agent' : 'Run agent');
-	        const browserRunButtonHtml = browserNeedsAuth
+        const browserRetryLabel = runState.title === 'Unlock delivery address'
+          ? 'Unlock and retry'
+          : runState.title === 'Runner did not start'
+            ? 'Retry runner start'
+          : (localExecutionError ? 'Retry agent' : 'Run agent');
+	        const browserResumeButtonHtml = browserCanResumeCheckoutReconcile
+	          ? `<button class="execution-primary" type="button" data-execution-continue-checkout="${escapeExecutionValue(session.id)}">Recheck checkout</button>`
+	          : '';
+	        const browserRunButtonHtml = browserResumeButtonHtml || (browserNeedsAuth
 	          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
 		          : browserNeedsFunds
 		            ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(browserFundingLabel)}</button>`
-	            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`;
-		        const browserQuickButtonHtml = browserNeedsAuth
-		          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
+	            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
+	        const browserQuickButtonHtml = browserResumeButtonHtml || (browserNeedsAuth
+	          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
 		          : browserNeedsFunds
 		            ? `<button class="execution-secondary" id="executionTopupQuickBtn" data-execution-topup="true" type="button">${escapeExecutionValue(browserFundingLabel)}</button>`
-	            : `<button class="execution-primary" id="executionQuickAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`;
+	            : `<button class="execution-primary" id="executionQuickAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
 	        const browserHandoffButtonHtml = isBrowserExecutionSheet && runState.actionLabel && browserActionUrl
 	          ? `<button class="execution-primary" type="button" data-native-runner-focus-tab="${escapeExecutionValue(session.id)}" data-fallback-url="${escapeExecutionValue(browserActionUrl)}">${escapeExecutionValue(runState.actionLabel)}</button>`
 	          : '';
@@ -15303,11 +16080,11 @@
 	        const browserRunSummaryActions = browserFinalSubmitButtonHtml
 	          ? `${browserFinalSubmitButtonHtml}${browserOpenTabButtonHtml}`
 	          : browserHandoffButtonHtml
-	          ? `${browserHandoffButtonHtml}${browserCanRunNow ? `<button class="execution-secondary" type="button" data-execution-run-agent="true">Retry after fixing</button>` : ''}`
+	          ? `${browserHandoffButtonHtml}${browserResumeButtonHtml || (browserCanRunNow ? `<button class="execution-secondary" type="button" data-execution-run-agent="true">Retry agent</button>` : '')}`
 	          : (browserCanRunNow ? browserQuickButtonHtml : '');
 	        const agentRunButtonHtml = santaClawzRetryBlocked
 	          ? '<button class="execution-secondary" type="button" disabled>Agent update required</button>'
-	          : `<button class="execution-primary" type="button" data-execution-fallback-run-session="${escapeExecutionValue(session.id)}">${localExecutionError ? 'Retry agent' : 'Run agent'}</button>`;
+	          : `<button class="execution-primary execution-agent-start" type="button" data-execution-fallback-run-session="${escapeExecutionValue(session.id)}">${localExecutionError ? 'Retry agent' : 'Run agent'}</button>`;
 	        const hireStepDescription = isBrowserExecutionSheet
 	          ? 'Runs until login, payment, captcha, or mismatch.'
 	          : compactExecutionSentence(getExecutionSelectedAgentDescription(session) || 'Review inputs, then run.', 120);
@@ -15317,10 +16094,10 @@
 		            || String(selectedAgentSnapshot.metadata?.source || '').toLowerCase() === 'santaclawz')
 		          && selectedAgentSnapshot.paymentRequired !== false;
 		        const paidSantaClawzCredits = Number(session.paymentOrchestration?.requiredCredits || selectedAgentSnapshot.creditPrice || selectedAgentSnapshot.metadata?.creditPrice || 0);
-		        const paidSantaClawzUsd = Number(selectedAgentSnapshot.price ?? selectedAgentSnapshot.metadata?.price ?? 0);
-		        const paidSantaClawzPricingNote = isPaidSantaClawzAgent && paidSantaClawzCredits > 0
-		          ? `${formatCreditCount(paidSantaClawzCredits)} credits locked on run${Number.isFinite(paidSantaClawzUsd) && paidSantaClawzUsd > 0 ? ` · $${paidSantaClawzUsd.toFixed(2)} USDC route` : ''}.`
-		          : '';
+	        const paidSantaClawzUsd = Number(selectedAgentSnapshot.price ?? selectedAgentSnapshot.metadata?.price ?? 0);
+	        const paidSantaClawzPricingNote = isPaidSantaClawzAgent && paidSantaClawzCredits > 0
+	          ? `${formatCreditCount(paidSantaClawzCredits)} credits will be held when the run starts${Number.isFinite(paidSantaClawzUsd) && paidSantaClawzUsd > 0 ? ` · $${paidSantaClawzUsd.toFixed(2)} USDC route` : ''}.`
+	          : '';
 	        const cancelExecutionButtonHtml = canCancelExecution
 	          ? `<div class="execution-actions execution-cancel-action"><button class="execution-secondary" type="button" data-execution-cancel-session="${escapeExecutionValue(session.id)}"${cancellationPending ? ' disabled' : ''}>${cancellationPending ? 'Cancelling...' : 'Cancel run'}</button></div>`
 	          : '';
@@ -15328,13 +16105,15 @@
           <div class="execution-panel ${expanded ? 'expanded' : 'collapsed'}" data-session-panel="${session.id}">
             <div class="execution-panel-head">
               <div class="execution-panel-head-main">
-                <div class="execution-panel-title">${escapeExecutionValue(title)}</div>
-                <div class="execution-panel-meta">${escapeExecutionValue(compactMeta || statusLine)}</div>
-                ${['queued', 'claimed', 'executing'].includes(statusBadge.statusValue) ? '<div class="execution-activity-bar"></div>' : ''}
+                <button class="execution-panel-open-target" type="button" data-execution-open="${session.id}" aria-label="Open execution panel">
+                  <span class="execution-panel-title">${escapeExecutionValue(title)}</span>
+                  <span class="execution-panel-meta">${escapeExecutionValue(compactMeta || statusLine)}</span>
+                </button>
+	                ${showActivityBar ? '<div class="execution-activity-bar"></div>' : ''}
               </div>
               <div class="execution-panel-controls">
                 <span class="execution-status-badge ${statusBadge.cls}">${escapeExecutionValue(displayStatusLabel)}</span>
-                <button class="execution-collapse" type="button" data-execution-toggle="${session.id}" aria-label="${expanded ? 'Collapse execution panel' : 'Expand execution panel'}">${expanded ? '&raquo;' : '&laquo;'}</button>
+                <button class="execution-collapse" type="button" ${expanded ? `data-execution-toggle="${session.id}"` : `data-execution-open="${session.id}"`} aria-label="${expanded ? 'Collapse execution panel' : 'Open execution panel'}">${expanded ? '&raquo;' : '&laquo;'}</button>
                 <button class="execution-close" type="button" data-execution-close="${session.id}">Close</button>
               </div>
             </div>
@@ -15410,6 +16189,9 @@
       dock.querySelectorAll('[data-execution-toggle]').forEach((button) => {
         button.addEventListener('click', () => toggleExecutionPanel(button.dataset.executionToggle));
       });
+      dock.querySelectorAll('[data-execution-open]').forEach((button) => {
+        button.addEventListener('click', () => openExecutionPanel(button.dataset.executionOpen));
+      });
       dock.querySelectorAll('[data-execution-close]').forEach((button) => {
         button.addEventListener('click', () => removeExecutionPanel(button.dataset.executionClose));
       });
@@ -15420,9 +16202,22 @@
 	      });
       dock.querySelectorAll('[data-execution-fallback-run-session]').forEach((button) => {
         button.addEventListener('click', () => {
-          void startAgentExecutionFromFallback(button.dataset.executionFallbackRunSession);
+	          const sessionId = button.dataset.executionFallbackRunSession;
+	          const pendingSession = executionSessionCache.get(sessionId);
+	          const buttonLabel = isSantaClawzExecutionSession(pendingSession) ? 'Connecting...' : 'Starting';
+	          if (!markExecutionStartButtonStarting(button, buttonLabel)) return;
+	          executionPendingSessions.add(sessionId);
+          void startAgentExecutionFromFallback(sessionId);
         });
       });
+      if (dock.dataset.santaClawzAuditOutputBound !== 'true') {
+        dock.dataset.santaClawzAuditOutputBound = 'true';
+        dock.addEventListener('click', (event) => {
+          const button = event.target.closest?.('[data-santaclawz-audit-output]');
+          if (!button || !dock.contains(button)) return;
+          openSantaClawzAuditOutput(button.dataset.sessionId, button.dataset.santaclawzAuditOutput);
+        });
+      }
     }
 
     function escapeExecutionValue(value) {
@@ -16612,6 +17407,31 @@
       return {};
     }
 
+    async function reconcileAgentExecutionStartFailure(session, error) {
+      let latestSession = error?.data?.session || session;
+      if (!santaClawzExecutionHasStarted(latestSession)) {
+        try {
+          const refreshed = await api(`/connectors/sessions/${encodeURIComponent(session.id)}`);
+          latestSession = refreshed.session || latestSession;
+        } catch {
+          // The original endpoint/status/request ID remains the useful error.
+        }
+      }
+      if (latestSession?.id) executionSessionCache.set(latestSession.id, latestSession);
+      executionPendingSessions.delete(session.id);
+      if (santaClawzExecutionHasStarted(latestSession)) {
+        clearExecutionStatusError(session.id);
+        syncExecutionProtocolPollingSession(latestSession);
+      } else {
+        rememberExecutionStatusError(latestSession, error);
+      }
+      ensureExecutionPolling();
+      void renderExecutionSheet(session.id, { focus: false }).catch(() => {
+        refreshExecutionPanelInPlace(latestSession);
+      });
+      return latestSession;
+    }
+
     async function startAgentExecutionFromFallback(sessionId = '') {
       const session = executionSessionCache.get(String(sessionId || '').trim());
       if (!session || session.handoffData?.kind !== 'agent') return;
@@ -16622,6 +17442,7 @@
         clearExecutionStatusError(session.id);
         const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(session));
         const localPrivateInputs = collectExecutionPrivateInputs(session);
+        executionDraftCache.set(session.id, { selections, localPrivateInputs });
         const missingInputs = getMissingAgentInputLabels(session, selections, localPrivateInputs);
         if (missingInputs.length) {
           throw new Error(`Add ${missingInputs.join(' and ')} before running this agent.`);
@@ -16630,7 +17451,7 @@
           await authorizeSensitiveAction('Authorize the locked local data needed for this agent run');
         }
         executionPendingSessions.add(session.id);
-        await renderExecutionSheet(session.id, { focus: false });
+        refreshExecutionPanelInPlace(session);
         let data = await api(`/connectors/sessions/${session.id}/start-execution`, {
           method: 'POST',
           body: JSON.stringify({
@@ -16659,16 +17480,12 @@
         await refreshCreditsBalance().catch(() => null);
         clearExecutionStatusError(session.id);
         if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
+        clearExecutionDraft(session.id);
         await renderExecutionSheet(session.id, { focus: false });
         ensureExecutionPolling();
       } catch (error) {
-        executionPendingSessions.delete(session.id);
-        const latestSession = error?.data?.session || session;
-        if (error?.data?.session?.id) executionSessionCache.set(error.data.session.id, error.data.session);
-        rememberExecutionStatusError(latestSession, error);
         await refreshCreditsBalance().catch(() => null);
-        await renderExecutionSheet(session.id, { focus: false });
-        setExecutionStatusError(latestSession, error);
+        await reconcileAgentExecutionStartFailure(session, error);
       }
     }
 
@@ -16825,7 +17642,8 @@
         return '<div class="execution-muted">No steps yet.</div>';
       }
       const terminalNeedsLocalRunner = String(fulfillment?.result?.completionState || '').toLowerCase() === 'needs_local_runner';
-      const terminalLabel = fulfillment?.status === 'failed' ? 'Failed' : terminalNeedsLocalRunner ? 'Local runner needed' : 'Fulfilled';
+      const terminalPaused = isBrowserHandoffPaused(fulfillment);
+      const terminalLabel = fulfillment?.status === 'failed' ? 'Failed' : terminalNeedsLocalRunner ? 'Local runner needed' : terminalPaused ? 'Paused' : 'Fulfilled';
       const conciseTrace = trace.reduce((rows, row) => {
         const previous = rows[rows.length - 1];
         const fingerprint = [row?.state, row?.label, row?.detail, row?.browser?.url].map((value) => String(value || '')).join('|');
@@ -16850,7 +17668,7 @@
       const terminalHtml = fulfillment ? `
         <div class="trace-row">
           <div class="trace-head">
-            <span class="trace-phase ${fulfillment?.status === 'failed' ? 'failed' : terminalNeedsLocalRunner ? 'queued' : 'completed'}">${terminalLabel === 'Fulfilled' ? 'Completed' : terminalLabel}</span>
+            <span class="trace-phase ${fulfillment?.status === 'failed' ? 'failed' : terminalNeedsLocalRunner || terminalPaused ? 'queued' : 'completed'}">${terminalLabel === 'Fulfilled' ? 'Completed' : terminalLabel}</span>
             <div class="trace-label">${terminalLabel}</div>
           </div>
 	          <div class="trace-meta">${escapeExecutionValue(compactExecutionCompletionNote(session, 'Done.'))}</div>
@@ -16873,6 +17691,8 @@
       if (stopState === 'needs_captcha' || stopState === 'captcha_or_challenge_required') return 'Needs captcha.';
       if (stopState === 'budget_exceeded') return 'Budget exceeded.';
       if (stopState === 'checkout_profile_mismatch') return 'Delivery address needs update.';
+      if (stopState === 'address_verification_required') return 'Recheck delivery address.';
+      if (stopState === 'pending_order_verification_required') return 'Pending order needs verification.';
       if (stopState === 'browser_ready') return 'Browser ready.';
       if (stopState) return `Paused: ${stopState.replace(/_/g, ' ')}.`;
       return 'Browser finished.';
@@ -16882,18 +17702,25 @@
       if (!summary || typeof summary !== 'object') return '';
       const stage = String(summary.stage || '').replace(/_/g, ' ');
       const next = summary.nextAction || '';
-      const payment = summary.expectedCardLast4
+      const orderSubmitted = summary.orderSubmitted === true;
+      const payment = orderSubmitted
+        ? ''
+        : summary.expectedCardLast4
         ? (summary.cardMatches
           ? `Card ${summary.expectedCardLast4} ready`
           : summary.selectedCardLast4
             ? `Card ${summary.selectedCardLast4}; need ${summary.expectedCardLast4}`
             : `Need card ${summary.expectedCardLast4}`)
         : (summary.paymentIssue || '');
-      const address = summary.addressMatches == null
+      const address = orderSubmitted
         ? ''
-        : summary.addressMatches
-          ? 'Address ready'
-          : 'Address mismatch';
+        : summary.addressVerification === 'unverified'
+        ? 'Address not yet verified'
+        : summary.addressMatches == null
+          ? ''
+          : summary.addressMatches
+            ? 'Address ready'
+            : 'Address mismatch';
       const facts = [
         stage ? ['Page', stage] : null,
         summary.likelyTotal ? ['Likely total', summary.likelyTotal] : null,
@@ -16924,18 +17751,20 @@
 	      const checkoutProgress = browserExecution?.checkoutProgress || result.checkoutProgress || {};
 	      const safeFieldsFilled = Array.isArray(browserExecution?.safeFieldsFilled) ? browserExecution.safeFieldsFilled : [];
       const checkoutSelections = Array.isArray(browserExecution?.checkoutSelections) ? browserExecution.checkoutSelections : [];
-      const checkoutSummary = browserExecution?.checkoutSummary || result.checkoutSummary || {};
+	      const checkoutSummary = browserExecution?.checkoutSummary || result.checkoutSummary || {};
+	      const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
       const milestoneStatus = getBrowserMilestoneStatus(browserExecution || result);
       const paymentProfile = browserExecution?.paymentProfile || result.paymentProfile || {};
       const selections = session.selections || session.finalSelections || {};
       const finalReviewReady = ['needs_final_approval', 'final_approval_required', 'review_ready'].includes(stopState);
       const canPlaceReviewedOrder = finalReviewReady && canPlaceReviewedOrderFromSession(session);
-      const checkoutDetailsNeedReconcile = ['payment_required', 'needs_payment', 'checkout_profile_mismatch'].includes(stopState)
+      const checkoutDetailsNeedReconcile = !browserOrderSubmitted && (['payment_required', 'needs_payment', 'checkout_profile_mismatch', 'address_verification_required'].includes(stopState)
         || checkoutSummary.cardMatches === false
-        || checkoutSummary.addressMatches === false;
+        || checkoutSummary.addressMatches === false
+        || checkoutSummary.addressVerification === 'unverified');
       const canResumeCheckoutReconcile = checkoutDetailsNeedReconcile
         && nativeRunnerSupportsLocalCheckoutProfile()
-        && String(session.status || '').trim().toLowerCase() === 'fulfilled';
+        && ['fulfilled', 'failed'].includes(String(session.status || '').trim().toLowerCase());
       const automaticFinalSubmitUnavailable = String(selections.finalApprovalPolicy || '').trim().toLowerCase() === 'auto_submit_after_verified_checkout'
         && !nativeRunnerSupportsAutomaticFinalSubmit();
       const cardLabel = paymentProfile.paymentCardLabel || selections.paymentCardLabel || paymentProfile.cardName || 'Saved card';
@@ -16944,8 +17773,14 @@
       const paymentProfileText = cardReady
         ? `${cardLabel}${cardLast4 ? ` ending ${cardLast4}` : ''}`
         : 'No local payment card cue was available to this run';
-      const progressLabel = milestoneStatus.completedLabel || (stopState === 'checkout_profile_mismatch'
+      const progressLabel = browserOrderSubmitted
+        ? 'Order submitted'
+        : milestoneStatus.completedLabel || (stopState === 'checkout_profile_mismatch'
         ? 'Delivery address needs update'
+        : stopState === 'address_verification_required'
+          ? 'Recheck delivery address'
+        : stopState === 'pending_order_verification_required'
+          ? 'Pending order needs verification'
         : stopState === 'needs_payment' || stopState === 'payment_required'
           ? 'Payment needs selection'
           : stopState === 'needs_final_approval' || stopState === 'final_approval_required'
@@ -16957,7 +17792,9 @@
           : checkoutProgress.productOpened
             ? 'Product selected'
             : 'Preparing browser task');
-      const nextStep = stopState === 'needs_login' || stopState === 'login_required'
+      const nextStep = browserOrderSubmitted
+        ? 'Amazon confirmed the order.'
+        : stopState === 'needs_login' || stopState === 'login_required'
         ? 'Sign in, then continue.'
         : stopState === 'needs_payment' || stopState === 'payment_required'
           ? cardLast4
@@ -16967,6 +17804,10 @@
             ? 'Reduce cart or raise max spend.'
           : stopState === 'checkout_profile_mismatch'
             ? 'Save a complete delivery address in Settings, then retry.'
+          : stopState === 'address_verification_required'
+              ? 'Open Amazon, then recheck this checkout tab.'
+          : stopState === 'pending_order_verification_required'
+            ? 'Review the product, quantity, and price in Amazon.'
           : stopState === 'needs_final_approval' || stopState === 'final_approval_required' || stopState === 'review_ready'
             ? automaticFinalSubmitUnavailable
               ? 'Checkout is prepared. Place the final order in Chrome.'
@@ -17001,7 +17842,7 @@
                   </div>
                 `).join('')}
               </div>
-              ${renderCheckoutSummary(checkoutSummary)}
+              ${renderCheckoutSummary({ ...checkoutSummary, orderSubmitted: browserOrderSubmitted })}
               <div class="execution-live-links execution-review-actions">
                 ${canResumeCheckoutReconcile ? `<button class="execution-live-link execution-live-link-primary" type="button" data-execution-continue-checkout="${escapeExecutionValue(session.id)}">Fix saved address and card</button>` : ''}
                 ${canPlaceReviewedOrder ? `<button class="execution-live-link execution-live-link-primary" type="button" data-execution-final-submit="${escapeExecutionValue(session.id)}">Approve and place order</button>` : ''}
@@ -17021,6 +17862,9 @@
       const fulfillmentBrowser = session.fulfillment?.result?.browserExecution || null;
       const liveBrowser = liveRow?.browser || fulfillmentBrowser || null;
       if (!liveBrowser) {
+        if (session?.handoffData?.kind === 'agent') {
+          return '<div class="execution-muted">Server-side agent. Browser activity is not used.</div>';
+        }
         if (permissionPause && !session.fulfillment) {
           return `<div class="execution-live"><div class="execution-live-head"><div><div class="trace-head"><span class="trace-phase queued">WAITING</span><div class="trace-label">Browser access needed</div></div><div class="trace-meta">${escapeExecutionValue(compactExecutionSentence(permissionPause.detail || 'Approve the site in Magic City Runner.', 80))}</div></div><div class="execution-live-state">WAITING</div></div></div>`;
         }
@@ -17045,7 +17889,7 @@
             <div class="execution-live-state">${escapeExecutionValue(phase.label)}</div>
           </div>
           ${preview?.url ? `<a class="execution-live-media" href="${preview.url}" target="_blank" rel="noopener noreferrer"><img src="${preview.url}" alt="Live execution preview" /></a>` : ''}
-          ${renderCheckoutSummary(checkoutSummary)}
+          ${renderCheckoutSummary({ ...checkoutSummary, orderSubmitted: browserOrderSubmitted })}
           <div class="execution-live-links execution-review-actions">
             ${pageUrl ? `<button class="execution-live-link execution-live-link-primary" type="button" data-native-runner-focus-tab="${escapeExecutionValue(session.id)}" data-fallback-url="${escapeExecutionValue(pageUrl)}">Open tab</button>` : ''}
             ${preview?.url ? `<a class="execution-live-link" href="${preview.url}" target="_blank" rel="noopener noreferrer">Snapshot</a>` : ''}
@@ -17059,6 +17903,8 @@
       if (!verification) return '';
       const proofStatus = String(verification.proofStatus || '').toLowerCase();
       const anchorStatus = String(verification.anchorStatus || '').toLowerCase();
+      const offchainProof = String(verification.submitMode || '').toLowerCase() === 'record'
+        || String(verification.network || '').toLowerCase() === 'offchain';
       const proofBadgeClass = ['ready', 'verified'].includes(proofStatus) ? 'ready' : proofStatus === 'failed' ? 'failed' : '';
       const anchorBadgeClass = ['failed', 'submission_unknown'].includes(anchorStatus)
         ? 'failed'
@@ -17067,7 +17913,13 @@
           : ['queued', 'preparing', 'prepared', 'pending'].includes(anchorStatus)
             ? 'prepared'
             : '';
-      const anchorLabel = anchorStatus === 'failed'
+      const anchorLabel = offchainProof && anchorStatus === 'prepared'
+        ? 'Off-chain receipt ready'
+        : offchainProof && anchorStatus === 'preparing'
+          ? 'Preparing off-chain proof'
+          : offchainProof && anchorStatus === 'queued'
+            ? 'Queued for local proof'
+            : anchorStatus === 'failed'
         ? 'Zeko submit failed'
         : anchorStatus === 'submission_unknown'
           ? 'Zeko submit uncertain'
@@ -17093,6 +17945,9 @@
           : '';
       const normalizedProofLabel = proofLabel || 'Proof pending';
       const txExplorerUrl = zekoScanTxUrl(verification.txHash, verification.txExplorerUrl || verification.explorerUrl || verification.zekoScanUrl || '');
+      const networkLabel = offchainProof
+        ? `off-chain${verification.offchainTargetNetwork ? ` · ${verification.offchainTargetNetwork} planned` : ''}`
+        : String(verification.network || 'zeko:zeko-mainnet');
       return `
         <div class="trace-row">
           <div class="trace-label">Verification</div>
@@ -17103,7 +17958,7 @@
             </div>
             ${verification.statementHash ? `<div style="margin-top:10px">statement: ${escapeExecutionValue(String(verification.statementHash).slice(0, 28))}…</div>` : ''}
             ${verification.txHash ? `<div style="margin-top:6px">tx: ${escapeExecutionValue(shortenHex(verification.txHash))}</div>` : ''}
-            <div style="margin-top:6px">${escapeExecutionValue(verification.network || 'zeko:zeko-mainnet')}${verification.submitMode ? ` · ${escapeExecutionValue(verification.submitMode)} mode` : ''}</div>
+            <div style="margin-top:6px">${escapeExecutionValue(networkLabel)}${verification.submitMode ? ` · ${escapeExecutionValue(verification.submitMode)} mode` : ''}</div>
             <div style="margin-top:6px">Private inputs stay local.</div>
             ${verification.error ? `<div style="margin-top:6px;color:#ffb0b0">${escapeExecutionValue(verification.error)}</div>` : ''}
             <div class="execution-proof-links">
@@ -17458,9 +18313,14 @@
 	      if (typeof entry !== 'object') return null;
 	      const url = String(entry.url || entry.href || entry.link || entry.downloadUrl || entry.artifactUrl || entry.publicUrl || '').trim();
 	      const label = String(entry.label || entry.title || entry.name || entry.filename || entry.kind || entry.type || (url ? 'Agent output' : 'Agent note')).trim();
-	      const text = String(entry.summary || entry.text || entry.content || entry.markdown || entry.description || '').trim();
+	      const structured = [entry.json, entry.structuredJson, entry.structuredOutput, entry.data, entry.content]
+	        .find((value) => value && typeof value === 'object') || null;
+	      const textValue = entry.summary || entry.text || entry.markdown || entry.description
+	        || (typeof entry.content === 'string' ? entry.content : '')
+	        || (structured ? JSON.stringify(structured) : '');
+	      const text = String(textValue || '').trim();
 	      if (!url && !text) return null;
-	      return { label, url, text };
+	      return { label, url, text, structured };
 	    }
 
 	    function collectSantaClawzDeliveryItemsFromValue(value, items = [], seen = new Set(), depth = 0) {
@@ -17595,10 +18455,17 @@
 
 	    function getSantaClawzAuditPayload(items = []) {
 	      for (const item of items) {
+	        if (item?.structured && typeof item.structured === 'object') return item.structured;
 	        const parsed = parseSantaClawzInlineJson(item?.text || '');
 	        if (parsed) return parsed;
 	      }
 	      return null;
+	    }
+
+	    function normalizeSantaClawzAuditStatus(value = '') {
+	      const normalized = String(value || '').trim().toLowerCase().replace(/_/g, ' ');
+	      if (['completed', 'complete', 'success', 'succeeded'].includes(normalized)) return 'complete';
+	      return normalized || 'available';
 	    }
 
 	    function getSantaClawzAuditMarkdown(items = []) {
@@ -17619,40 +18486,143 @@
 	      return '';
 	    }
 
-	    function renderSantaClawzCodeAuditPanel(session, items = []) {
-	      if (!items.length || !isSantaClawzCodeAuditDelivery(session, items)) return '';
-	      const payload = getSantaClawzAuditPayload(items);
-	      const markdown = getSantaClawzAuditMarkdown(items);
-	      const artifacts = Array.isArray(session?.fulfillment?.result?.artifacts)
-	        ? session.fulfillment.result.artifacts
-	        : [];
-	      const markdownArtifact = artifacts.find((artifact) => /\.md(?:$|\?)/i.test(String(artifact?.url || artifact?.label || '')));
-	      const jsonArtifact = artifacts.find((artifact) => /\.json(?:$|\?)/i.test(String(artifact?.url || artifact?.label || '')));
-	      const status = getSantaClawzAuditValue(payload, ['audit_status', 'status']) || (markdown ? 'completed' : 'available');
-	      const highestSeverity = getSantaClawzAuditValue(payload, ['highest_severity', 'severity']) || 'not reported';
-	      const findingCount = getSantaClawzAuditValue(payload, [
-	        'returned_findings',
+	    function getSantaClawzAuditFindings(payload) {
+	      const candidates = [payload?.findings, payload?.batch?.findings, payload?.audit?.findings, payload?.result?.findings, payload?.result?.batch?.findings];
+	      return candidates.find((value) => Array.isArray(value)) || [];
+	    }
+
+	    function getSantaClawzAuditHighestSeverity(payload, markdown = '') {
+	      const explicit = String(getSantaClawzAuditValue(payload, ['highest_severity', 'highestSeverity', 'severity']) || '').trim();
+	      const candidates = [
+	        !/^(?:not reported|unknown|none)$/i.test(explicit) ? explicit : '',
+	        ...getSantaClawzAuditFindings(payload).map((finding) => finding?.severity || finding?.priority || ''),
+	        String(markdown || '').match(/\b(CRITICAL|HIGH|MEDIUM|LOW)\b\s*[:\-]/i)?.[1] || ''
+	      ].filter(Boolean).map((value) => String(value).toLowerCase());
+	      return ['critical', 'high', 'medium', 'low'].find((severity) => candidates.some((value) => value === severity)) || 'not reported';
+	    }
+
+	    function getSantaClawzAuditFindingCount(payload, markdown = '') {
+	      const explicit = getSantaClawzAuditValue(payload, [
 	        'returned_finding_count',
 	        'returned_findings_count',
 	        'finding_count',
 	        'findingCount',
 	        'findings_count'
-	      ])
-	        || (Array.isArray(payload?.findings)
-	          ? payload.findings.length
-	          : Array.isArray(payload?.batch?.findings) ? payload.batch.findings.length : '');
+	      ]);
+	      if (explicit !== '') return String(explicit);
+	      const findings = getSantaClawzAuditFindings(payload);
+	      if (findings.length) return String(findings.length);
+	      return String(markdown || '').match(/returned\s+(\d+)\s+of\s+\d+/i)?.[1] || '';
+	    }
+
+	    function getSantaClawzAuditSummary(payload, markdown = '') {
+	      const explicit = getSantaClawzAuditValue(payload, ['executive_summary', 'executiveSummary', 'next_action', 'nextAction']);
+	      if (typeof explicit === 'string' && explicit.trim()) return compactExecutionSentence(explicit, 180);
+	      const nextAction = String(markdown || '').match(/(?:^|\n)#{1,4}\s+Next Action\s*\n+([^\n#]+)/i)?.[1]?.trim();
+	      if (nextAction) return compactExecutionSentence(nextAction, 180);
+	      const line = String(markdown || '').split('\n')
+	        .map((value) => value.replace(/^[-*#\d.\s]+/, '').trim())
+	        .find((value) => /^(?:Fix|Triage|Address)\b/i.test(value));
+	      return compactExecutionSentence(line || 'Review the prioritized findings in the full report.', 180);
+	    }
+
+	    function hasReadySantaClawzDelivery(session) {
+	      return getSantaClawzDeliveryVerificationState(session).accepted;
+	    }
+
+	    function getSantaClawzExecutionProgress(session) {
+	      const hasSantaClawz = session?.externalExecutionHandoff?.source === 'santaclawz'
+	        || Boolean(session?.santaclawzDirectPayment);
+	      if (!hasSantaClawz) return null;
+	      const directPayment = session.santaclawzDirectPayment || {};
+	      const summary = directPayment.summary || {};
+	      const paymentState = directPayment.paymentState || {};
+	      const executionState = directPayment.executionState || {};
+	      const operational = executionState.operationalStatus || paymentState.operationalStatus || {};
+	      const delivery = getSantaClawzDeliveryVerificationState(session);
+	      const agentStatus = String(
+	        summary.agentExecutionStatus
+	        || operational.agentExecutionStatus
+	        || executionState.status
+	        || paymentState.agentExecutionStatus
+	        || ''
+	      ).trim().toLowerCase();
+	      const relayStatus = String(summary.relayDeliveryStatus || operational.relayDeliveryStatus || paymentState.relayDeliveryStatus || '').trim().toLowerCase();
+	      const paymentStatus = String(summary.paymentStatus || operational.paymentStatus || paymentState.paymentStatus || directPayment.status || '').trim().toLowerCase();
+	      if (delivery.accepted) {
+	        return { title: 'Audit complete', detail: 'The Markdown report and structured JSON are ready.', badgeLabel: 'Done', summary: 'Audit complete · files ready' };
+	      }
+	      if (delivery.pending) {
+	        return { title: 'Verifying report', detail: 'SantaClawz returned the report. Magic City is verifying its delivery package.', badgeLabel: 'Verifying', summary: 'Report received · verifying delivery' };
+	      }
+	      if (delivery.rejected || /fail|reject|error|cancel/.test(agentStatus)) {
+	        return { title: 'Audit needs attention', detail: 'SantaClawz returned a failure or an invalid delivery package.', badgeLabel: 'Needs attention', summary: 'SantaClawz return needs attention' };
+	      }
+	      if (/complete|success|succeed|deliver/.test(agentStatus)) {
+	        return { title: 'Finalizing report', detail: 'The audit finished in SantaClawz. Magic City is collecting and verifying the files.', badgeLabel: 'Finalizing', summary: 'Audit finished · collecting files' };
+	      }
+	      if (/running|executing|working|processing|in.progress/.test(agentStatus)) {
+	        return { title: 'Auditing repository', detail: 'SantaClawz is reviewing the submitted repository.', badgeLabel: 'Working', summary: 'SantaClawz is auditing the repository' };
+	      }
+	      if (/forward|deliver|accepted/.test(relayStatus) || /submitted|paid|settled|accepted/.test(paymentStatus)) {
+	        return { title: 'Waiting for audit', detail: 'The paid request reached SantaClawz and is waiting for agent output.', badgeLabel: 'Working', summary: 'Request accepted · waiting for audit' };
+	      }
+	      return { title: 'SantaClawz ready', detail: 'Review the inputs, then start the audit.', badgeLabel: 'Ready', summary: 'SantaClawz agent ready' };
+	    }
+
+	    function openSantaClawzAuditOutput(sessionId = '', format = 'markdown') {
+	      const session = executionSessionCache.get(String(sessionId || ''));
+	      if (!session) return false;
+	      const items = collectSantaClawzDeliveryItems(session);
+	      const markdown = getSantaClawzAuditMarkdown(items);
+	      const payload = getSantaClawzAuditPayload(items);
+	      let content = '';
+	      let type = 'text/html;charset=utf-8';
+	      if (format === 'json') {
+	        if (!payload) return false;
+	        const json = JSON.stringify(payload, null, 2);
+	        content = `<!doctype html><html><head><meta charset="utf-8"><title>Code audit JSON</title><style>body{margin:0;background:#10141c;color:#dceaf5;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}pre{box-sizing:border-box;max-width:1100px;margin:0 auto;padding:32px;white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body><pre>${escapeHtml(json)}</pre></body></html>`;
+	      } else {
+	        if (!markdown) return false;
+	        content = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Code audit report</title><style>body{margin:0;background:#10141c;color:#dceaf5;font:16px/1.6 system-ui,-apple-system,sans-serif}article{box-sizing:border-box;max-width:900px;margin:0 auto;padding:40px 28px 72px}h1,h2,h3,h4{color:#f5faff;margin:1.5em 0 .5em}a{color:#8dffcf}pre{padding:16px;overflow:auto;background:#080b12;border-radius:8px}table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #33404d;text-align:left}</style></head><body><article>${renderAssistantRichText(markdown)}</article></body></html>`;
+	      }
+	      const url = URL.createObjectURL(new Blob([content], { type }));
+	      const opened = window.open(url, '_blank');
+	      if (opened) opened.opener = null;
+	      if (!opened) {
+	        const link = document.createElement('a');
+	        link.href = url;
+	        link.target = '_blank';
+	        link.rel = 'noopener noreferrer';
+	        link.click();
+	      }
+	      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+	      return true;
+	    }
+
+	    function renderSantaClawzCodeAuditPanel(session, items = []) {
+	      if (!items.length || !isSantaClawzCodeAuditDelivery(session, items)) return '';
+	      const payload = getSantaClawzAuditPayload(items);
+	      const markdown = getSantaClawzAuditMarkdown(items);
+	      const markdownArtifact = items.find((item) => item?.url && /(?:markdown|\.md(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
+	      const jsonArtifact = items.find((item) => item?.url && /(?:json|\.json(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
+	      const status = normalizeSantaClawzAuditStatus(getSantaClawzAuditValue(payload, ['audit_status', 'status']) || (markdown ? 'completed' : 'available'));
+	      const highestSeverity = getSantaClawzAuditHighestSeverity(payload, markdown);
+	      const findingCount = getSantaClawzAuditFindingCount(payload, markdown);
 	      const deferredCount = getSantaClawzAuditValue(payload, ['deferred_count', 'deferred_findings']);
+	      const summary = getSantaClawzAuditSummary(payload, markdown);
 	      const facts = [
-	        ['Status', String(status).replace(/_/g, ' ')],
+	        ['Status', status],
 	        ['Highest severity', String(highestSeverity).replace(/_/g, ' ')],
 	        ['Findings', findingCount === '' ? 'See report' : String(findingCount)],
 	        deferredCount !== '' ? ['Deferred', String(deferredCount)] : null
 	      ].filter(Boolean);
-	      const links = [
+	      const outputControls = [
 	        markdownArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(markdownArtifact.url)}" target="_blank" rel="noopener noreferrer">Open Markdown report</a>` : '',
-	        jsonArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(jsonArtifact.url)}" target="_blank" rel="noopener noreferrer">Open JSON data</a>` : ''
-	      ].filter(Boolean).join(' ');
-	      const rawJson = payload ? JSON.stringify(payload, null, 2) : '';
+	        !markdownArtifact?.url && markdown ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="markdown" data-session-id="${escapeExecutionValue(session.id)}">Open Markdown report</button>` : '',
+	        jsonArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(jsonArtifact.url)}" target="_blank" rel="noopener noreferrer">Open JSON data</a>` : '',
+	        !jsonArtifact?.url && payload ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="json" data-session-id="${escapeExecutionValue(session.id)}">Open JSON report</button>` : ''
+	      ].filter(Boolean).join('');
 	      return `
 	        <div class="execution-audit-report">
 	          <div class="execution-audit-report-head">
@@ -17662,19 +18632,8 @@
 	          <div class="execution-audit-facts">
 	            ${facts.map(([label, value]) => `<div class="execution-audit-fact"><small>${escapeExecutionValue(label)}</small><strong>${escapeExecutionValue(value)}</strong></div>`).join('')}
 	          </div>
-	          ${links ? `<div class="execution-audit-links">${links}</div>` : ''}
-	          ${markdown ? `
-	            <details open>
-	              <summary>Read the report</summary>
-	              <div class="execution-audit-markdown">${renderAssistantRichText(markdown)}</div>
-	            </details>
-	          ` : ''}
-	          ${rawJson ? `
-	            <details>
-	              <summary>View raw JSON</summary>
-	              <pre>${escapeExecutionValue(rawJson)}</pre>
-	            </details>
-	          ` : ''}
+	          <p class="execution-audit-summary">${escapeExecutionValue(summary)}</p>
+	          ${outputControls ? `<div class="execution-audit-actions">${outputControls}</div>` : ''}
 	        </div>
 	      `;
 	    }
@@ -17684,47 +18643,40 @@
 	      if (!hasSantaClawz) return '';
 	      const items = collectSantaClawzDeliveryItems(session);
 	      const codeAuditPanel = renderSantaClawzCodeAuditPanel(session, items);
+	      const outputReady = hasReadySantaClawzDelivery(session);
+	      const verificationPending = hasPendingSantaClawzDeliveryVerification(session);
+	      const progress = getSantaClawzExecutionProgress(session);
 	      const directPayment = session.santaclawzDirectPayment || {};
 	      const status = directPayment.status || session.status || 'ready';
 		      const paymentSummary = directPayment.summary || {};
-		      const terminalFailure = paymentSummary.terminalFailure === true
+		      const terminalFailure = !verificationPending && (paymentSummary.terminalFailure === true
 		        || String(status).toLowerCase() === 'failed'
-		        || String(session?.status || '').toLowerCase() === 'failed';
+		        || String(session?.status || '').toLowerCase() === 'failed');
 		      const failureMessage = paymentSummary.failureReason
 		        || directPayment?.executionState?.returnRejection?.message
 		        || session?.fulfillment?.result?.latestFailureReason
 		        || session?.fulfillment?.result?.error
 		        || 'SantaClawz did not return an accepted result package.';
 		      const statusLabel = describeSantaClawzDirectPaymentStatus(status);
-		      const submittedAt = directPayment.submittedAt || directPayment.preparedAt || session.executionRequestedAt || '';
-		      const elapsedSeconds = submittedAt ? Math.max(0, Math.round((Date.now() - new Date(submittedAt).getTime()) / 1000)) : null;
+		      const lastUpdateAt = directPayment.lastStatusAt || directPayment.updatedAt || session.updatedAt || '';
+		      const lastUpdateSeconds = lastUpdateAt ? Math.max(0, Math.round((Date.now() - new Date(lastUpdateAt).getTime()) / 1000)) : null;
 		      const requestId = directPayment.submittedRequestId || directPayment.x402RequestId || directPayment.paymentRequirementSummary?.requestId || '';
 		      const submittedToSantaClawz = Boolean(directPayment.paymentPayloadDigestSha256 || directPayment.submittedRequestId || directPayment.paymentStateUrl || directPayment.stateUrl);
-		      const activelyPolling = !terminalFailure && Boolean(
-		        session?.id
-		        && (
-		          executionPendingSessions.has(session.id)
-		          || executionProtocolPollingSessions.has(session.id)
-		          || shouldPollExecutionSession(session)
-		        )
-		      );
-		      const elapsedBadge = elapsedSeconds == null
+		      const elapsedBadge = outputReady || lastUpdateSeconds == null
 		        ? ''
-		        : activelyPolling
-		          ? `polling ${elapsedSeconds}s`
-		          : submittedToSantaClawz
-		            ? `last update ${elapsedSeconds}s`
-		            : `ready ${elapsedSeconds}s`;
+		        : `updated ${lastUpdateSeconds}s ago`;
 		      const retryBlocked = directPayment?.summary?.retryBlocked === true || directPayment?.summary?.returnRejected === true;
-		      const waitingText = terminalFailure
+		      const waitingText = verificationPending
+		        ? 'Report available. Delivery verification is pending.'
+		        : terminalFailure
 		        ? (retryBlocked
 		          ? 'The agent runtime returned a protocol-invalid package. No Base USDC settled; credits returned.'
 		          : 'No valid output was delivered. Credits returned.')
-		        : items.length
-		        ? 'Output ready.'
-		        : submittedToSantaClawz
-		          ? 'Waiting for output.'
-		          : 'Not sent yet.';
+		        : progress?.detail || (items.length
+		          ? 'Output ready.'
+		          : submittedToSantaClawz
+		            ? 'Waiting for output.'
+		            : 'Not sent yet.');
 		      const stateLinks = [
 		        directPayment.paymentStateUrl ? `<a class="execution-result-link" href="${escapeExecutionValue(directPayment.paymentStateUrl)}" target="_blank" rel="noopener noreferrer">Payment</a>` : '',
 		        directPayment.stateUrl ? `<a class="execution-result-link" href="${escapeExecutionValue(directPayment.stateUrl)}" target="_blank" rel="noopener noreferrer">Run</a>` : '',
@@ -17735,15 +18687,15 @@
 	          <div class="trace-label">SantaClawz delivery</div>
 	          <div class="trace-meta">
 	            <div class="execution-proof-row">
-		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : items.length ? 'Output ready' : statusLabel)}</span>
+		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : verificationPending ? 'Verification pending' : progress?.badgeLabel || statusLabel)}</span>
 		              ${requestId ? `<span class="execution-proof-badge">request ${escapeExecutionValue(String(requestId).slice(0, 18))}</span>` : ''}
 		              ${elapsedBadge ? `<span class="execution-proof-badge">${escapeExecutionValue(elapsedBadge)}</span>` : ''}
 		            </div>
-			            ${items.length && codeAuditPanel ? '' : `<div style="margin-top:8px">${escapeExecutionValue(waitingText)}</div>`}
+			            ${items.length && codeAuditPanel && !verificationPending ? '' : `<div style="margin-top:8px">${escapeExecutionValue(waitingText)}</div>`}
 			            ${stateLinks ? `<div class="execution-proof-links">${stateLinks}</div>` : ''}
 			            ${terminalFailure
 			              ? `<div class="execution-output-wait">${escapeExecutionValue(failureMessage)}</div>`
-			              : codeAuditPanel || (items.length ? renderExecutionDeliveryItems(items) : '<div class="execution-output-wait">Preparing delivery links...</div>')}
+			              : codeAuditPanel || (items.length ? renderExecutionDeliveryItems(items) : '')}
 		          </div>
 		        </div>
 		      `;
@@ -17767,7 +18719,7 @@
       const paymentState = directPayment?.paymentState || {};
       const proofNetworkBits = [
         `Magic City proof ${directPayment?.magicCityOrchestrationProofNetwork || handoff?.magicCityOrchestrationProofNetwork || 'zeko:zeko-mainnet'}`,
-        `SantaClawz proof ${directPayment?.santaclawzProofNetwork || handoff?.santaclawzProofNetwork || 'zeko:testnet'}`
+        `SantaClawz proof ${directPayment?.santaclawzProofNetwork || handoff?.santaclawzProofNetwork || 'network pending'}`
       ].join(' · ');
 	      const routeLabel = creditBacked
 	        ? (directPayment?.paymentPayloadDigestSha256 ? 'SantaClawz credit-backed x402' : 'SantaClawz credit-backed execution')
@@ -17907,13 +18859,16 @@
         `;
       }
       if (session.status === 'failed') {
+	      if (hasPendingSantaClawzDeliveryVerification(session)) {
+	        return `${directX402Panel}${santaClawzDeliveryPanel}`;
+	      }
         const failedReason = fulfillment?.result?.error
           ? normalizeExecutionErrorMessage(fulfillment.result.error, { lane: session.handoffData?.kind || '' })
           : '';
 	        return `${directX402Panel}${santaClawzDeliveryPanel}${verification}<div class="execution-muted">Failed.${failedReason ? `<br />${escapeExecutionValue(compactExecutionSentence(failedReason, 110))}` : ''}</div>`;
       }
 	      if (['queued', 'claimed', 'executing'].includes(String(session.status || ''))) {
-	        return `${directX402Panel}${santaClawzDeliveryPanel}<div class="execution-output-wait">${directX402Panel || santaClawzDeliveryPanel ? 'Polling delivery.' : 'Running.'}</div>`;
+	        return `${directX402Panel}${santaClawzDeliveryPanel}${directX402Panel || santaClawzDeliveryPanel ? '' : '<div class="execution-output-wait">Running.</div>'}`;
 	      }
 	      return `${directX402Panel}${santaClawzDeliveryPanel}<div class="execution-muted">No output yet.</div>`;
 	    }
@@ -18083,6 +19038,7 @@
 	        ? executionAgents.find((agent) => agent.pluginId === preferredExecutionAgentId || agent.ownerAgentId === preferredExecutionAgentId)
 	        : null) || selectedAgentFallback || executionAgents[0] || null;
 	      executionSessionCache.set(session.id, session);
+	      if (isBrowserSession && focus) void refreshZekoNetworkStatus();
 	      const protocolPollingActive = syncExecutionProtocolPollingSession(session);
 	      if (!executionSessionOrder.includes(session.id)) executionSessionOrder.push(session.id);
 	      if (focus || !activeExecutionSessionId || !executionSessionCache.has(activeExecutionSessionId)) {
@@ -18277,7 +19233,8 @@
       const artifactLinks = Array.isArray(session.fulfillment?.result?.artifacts) ? session.fulfillment.result.artifacts : [];
       const executionBusy = executionPendingSessions.has(session.id) || ['queued', 'claimed', 'executing'].includes(String(session.status || ''));
       const executionNeedsLocalRunner = String(session.fulfillment?.result?.completionState || '').toLowerCase() === 'needs_local_runner';
-      const executionFulfilled = String(session.status || '') === 'fulfilled' && !executionNeedsLocalRunner;
+      const executionPaused = isBrowserHandoffPaused(session.fulfillment);
+      const executionFulfilled = String(session.status || '') === 'fulfilled' && !executionNeedsLocalRunner && !executionPaused;
       const executionFailed = String(session.status || '') === 'failed';
       const directX402Payment = session.santaclawzDirectPayment || null;
       const santaClawzRetryBlocked = directX402Payment?.summary?.retryBlocked === true
@@ -18290,8 +19247,9 @@
       const directX402Status = String(directX402Payment?.status || '').toLowerCase();
       const directX402Submitted = Boolean(directX402Payment?.paymentPayloadDigestSha256);
       const santaClawzCreditBackedActive = santaClawzCreditBacked || directX402Payment?.rail === 'credit_backed_x402' || directX402Payment?.sponsor === 'magic_city_credits';
-      const showSantaClawzCreditBackedRun = santaClawzCreditBackedActive && !['fulfilled', 'failed'].includes(String(session.status || ''));
-      const showSantaClawzDirectPayment = hasSantaClawzDirectHandoff && !santaClawzCreditBackedActive && !['fulfilled', 'failed'].includes(String(session.status || ''));
+	      const santaClawzDeliveryReady = hasReadySantaClawzDelivery(session);
+	      const showSantaClawzCreditBackedRun = santaClawzCreditBackedActive && !santaClawzDeliveryReady && !['fulfilled', 'failed'].includes(String(session.status || ''));
+	      const showSantaClawzDirectPayment = hasSantaClawzDirectHandoff && !santaClawzDeliveryReady && !santaClawzCreditBackedActive && !['fulfilled', 'failed'].includes(String(session.status || ''));
       const directX402ActionPending = executionPendingSessions.has(session.id);
       const reservedCreditCount = Number(session.externalExecutionHandoff?.requiredCredits || session.paymentOrchestration?.requiredCredits || session.creditReservation?.requiredCredits || 0);
       const creditBackedButtonLabel = directX402Submitted
@@ -18334,7 +19292,7 @@
         ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
         : actionNeedsFunds
           ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(actionFundingLabel)}</button>`
-		          : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
+	          : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || executionPaused || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionPaused ? 'Paused in checkout' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
 	      const providerActionLabel = squareCheckoutUrl
         ? 'Open direct Square checkout'
         : kind === 'travel'
@@ -18358,14 +19316,16 @@
         || session.preferredExecutionAgentSnapshot?.endpoint
         || ''
       );
-		      setExecutionHtml('executionActions', `
-		        ${showSantaClawzCreditBackedRun
-		          ? `<button class="execution-primary" id="executionSantaClawzCreditBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Sending with credits…' : creditBackedButtonLabel}</button>`
+	      setExecutionHtml('executionActions', `
+	        ${santaClawzDeliveryReady
+	          ? ''
+	          : showSantaClawzCreditBackedRun
+	          ? `<button class="execution-primary" id="executionSantaClawzCreditBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Sending with credits…' : creditBackedButtonLabel}</button>`
 		        : showSantaClawzDirectPayment
 	          ? `<button class="execution-primary" id="executionSantaClawzPayBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Preparing wallet approval...' : directX402ButtonLabel}</button>`
 	          : isBrowserLane
 	            ? browserActionButtonHtml
-		            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`}
+		            : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`}
         ${agentViewUrl ? `<a class="execution-secondary" href="${escapeExecutionValue(agentViewUrl)}" target="_blank" rel="noopener noreferrer">View Agent</a>` : ''}
         ${session.handoffData?.kind === 'food' ? `<button class="execution-secondary" id="executionDiscoverBtn" type="button" ${executionBusy ? 'disabled' : ''}>Find live local restaurants</button>` : ''}
         ${showTopup ? `<button class="execution-secondary" id="executionTopupBtn" data-execution-topup="true" type="button" ${executionBusy ? 'disabled' : ''}>${topupButtonLabel}</button>` : ''}
@@ -18506,9 +19466,29 @@
       const setExecutionRunControlsBusy = (busy, label = 'Execution running...') => {
         const root = getExecutionSheetScrollElement(session.id);
         root?.querySelectorAll('[data-execution-run-agent="true"]').forEach((button) => {
-          button.disabled = busy;
-          if (busy) button.textContent = label;
+	          if (busy) {
+	            markExecutionStartButtonStarting(button);
+	            button.textContent = label;
+	          } else {
+	            button.disabled = false;
+	            button.classList?.remove('is-starting');
+	            button.removeAttribute?.('aria-busy');
+	          }
         });
+        if (busy && String(session?.handoffData?.kind || '') === 'browser') {
+          const runTitle = root?.querySelector('.execution-run-state > div > strong');
+          const runDetail = root?.querySelector('.execution-run-state > div > span');
+          const statusText = root?.querySelector('#executionStatusText');
+          const panelMeta = root?.querySelector('.execution-panel-meta');
+          if (runTitle) runTitle.textContent = 'Connecting Runner';
+          if (runDetail) runDetail.textContent = 'Claiming this mission, then opening Amazon.';
+          if (statusText) statusText.textContent = `Session ${session.id} · Connecting Runner`;
+          if (panelMeta) panelMeta.textContent = 'Claiming mission · Opening Amazon next';
+          root?.querySelectorAll('.execution-status-badge').forEach((badge) => {
+            badge.className = 'execution-status-badge running';
+            badge.textContent = 'Claiming';
+          });
+        }
       };
 
       const needsBrowserMissionRenewal = (candidate) => {
@@ -18523,13 +19503,14 @@
       };
 
 	      const startExecutionFromSheet = async () => {
+	        const clientRunStartedAt = new Date().toISOString();
+	        const isBrowserRun = session?.handoffData?.kind === 'browser';
 	        try {
 	          if (session.santaclawzDirectPayment?.summary?.retryBlocked === true || session.santaclawzDirectPayment?.summary?.returnRejected === true) {
 	            throw new Error('This agent returned an invalid SantaClawz result package. Retry is disabled until the agent runtime is updated.');
 	          }
 	          clearExecutionStatusError(session.id);
-	          setExecutionRunControlsBusy(true, 'Starting...');
-	          const isBrowserRun = session?.handoffData?.kind === 'browser';
+	          setExecutionRunControlsBusy(true, isBrowserRun ? 'Connecting...' : 'Starting');
 	          const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(session));
 	          const checkoutProfileNeeded = isBrowserRun && browserMissionNeedsCheckoutProfile(session, selections);
 	          if (checkoutProfileNeeded && getStoredVaultRecord()) {
@@ -18543,6 +19524,7 @@
 	            await populateVaultLocalitiesFromZip({ announce: false });
 	          }
 	          const localCheckoutProfile = isBrowserRun ? buildLocalCheckoutProfile(session) : null;
+	          let provisionedCheckoutProfileSessionId = '';
 	          if (checkoutProfileNeeded && getStoredVaultRecord() && !localCheckoutProfileHasValues(localCheckoutProfile)) {
 	            throw new Error('Complete the shipping address in Local Data Vault, then run again.');
 	          }
@@ -18555,6 +19537,7 @@
 	            isBrowserRun && nativeRunnerSupportsAutomaticFinalSubmit()
 	          );
 	          const localPrivateInputs = collectExecutionPrivateInputs(session);
+	          if (!isBrowserRun) executionDraftCache.set(session.id, { selections, localPrivateInputs });
 	          const missingAgentInputs = isBrowserRun ? [] : getMissingAgentInputLabels(session, selections, localPrivateInputs);
 	          if (missingAgentInputs.length) {
 	            throw new Error(`Add ${missingAgentInputs.join(' and ')} before running this agent.`);
@@ -18565,14 +19548,14 @@
           if (isBrowserRun) {
             await ensureNativeBrowserWorkerReadyForRun(session);
           }
-          if (isBrowserRun && extensionCheckoutProfileEnabled) {
-            await sendNativeRunnerExtensionMessage({
-              type: 'SET_LOCAL_CHECKOUT_PROFILE',
-              sessionId: session.id,
-              profile: localCheckoutProfile,
-              expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
-            });
-          }
+	          if (isBrowserRun && extensionCheckoutProfileEnabled) {
+	            await sendNativeRunnerExtensionMessage({
+	              type: 'SET_LOCAL_CHECKOUT_PROFILE',
+	              sessionId: session.id,
+	              profile: localCheckoutProfile
+	            });
+	            provisionedCheckoutProfileSessionId = session.id;
+	          }
           let executionSession = session;
           if (canRenewBrowserMissionInPlace(session)) {
             const renewed = await api(`/connectors/sessions/${session.id}/renew-mission`, {
@@ -18583,18 +19566,22 @@
             if (executionSession.id) executionSessionCache.set(executionSession.id, executionSession);
             if (['queued', 'claimed', 'executing'].includes(String(executionSession.status || '').toLowerCase())) {
               executionPendingSessions.add(executionSession.id);
-	              if (extensionCheckoutProfileEnabled) {
+	              if (extensionCheckoutProfileEnabled && provisionedCheckoutProfileSessionId !== executionSession.id) {
 	                await sendNativeRunnerExtensionMessage({
 	                  type: 'SET_LOCAL_CHECKOUT_PROFILE',
 	                  sessionId: executionSession.id,
-	                  profile: localCheckoutProfile,
-	                  expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+	                  profile: localCheckoutProfile
 	                });
+	                provisionedCheckoutProfileSessionId = executionSession.id;
 	              }
 	              // Claim the renewed mission before redrawing the execution sheet.
 	              // Rendering can issue several authenticated requests and must not
 	              // consume the runner's short claim window.
-                void requestNativeRunnerMissionWake(executionSession.id);
+	                void requestNativeRunnerMissionWake(
+	                  executionSession.id,
+	                  executionSession.extensionRunDispatch?.nonce || '',
+	                  clientRunStartedAt
+	                );
 	              await renderExecutionSheet(executionSession.id, { focus: false });
 	              ensureExecutionPolling();
 	              return;
@@ -18612,7 +19599,7 @@
             selections.stablecoinPaymentAmountUsdCents = stablecoinPayment.amountUsdCents;
 	          }
 	          executionPendingSessions.add(session.id);
-	          await renderExecutionSheet(session.id, { focus: false });
+	          refreshExecutionPanelInPlace(session);
 	          let data = await api(`/connectors/sessions/${session.id}/start-execution`, {
             method: 'POST',
             body: JSON.stringify({
@@ -18642,27 +19629,38 @@
 	            syncSantaClawzActionResultForPolling(session.id, data);
 	          }
 	          if (isBrowserRun && (data.session?.preferredExecutionAgentId === RUNNER_EXTENSION_PLUGIN_ID || data.executionAgent?.pluginId === RUNNER_EXTENSION_PLUGIN_ID)) {
-	            if (extensionCheckoutProfileEnabled) {
+	            const startedSessionId = data.session?.id || session.id;
+	            if (extensionCheckoutProfileEnabled && provisionedCheckoutProfileSessionId !== startedSessionId) {
 	              await sendNativeRunnerExtensionMessage({
 	                type: 'SET_LOCAL_CHECKOUT_PROFILE',
-	                sessionId: data.session?.id || session.id,
-	                profile: localCheckoutProfile,
-	                expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+	                sessionId: startedSessionId,
+	                profile: localCheckoutProfile
 	              });
+	              provisionedCheckoutProfileSessionId = startedSessionId;
 	            }
 	            // Send the exact wake before any UI or balance refresh. A fresh
 	            // heartbeat only proves liveness; this call is what claims work.
-                void requestNativeRunnerMissionWake(data.session?.id || session.id);
+                void requestNativeRunnerMissionWake(
+	                  startedSessionId,
+	                  data.session?.extensionRunDispatch?.nonce || '',
+	                  clientRunStartedAt
+	                );
 	          }
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(session.id);
-		          setExecutionHtml('executionAgentText', data.executionAgent
-		            ? renderExecutionAgentSummary(data.executionAgent, { handed: true })
-		            : renderExecutionAgentSummary(null));
+	          setExecutionHtml('executionAgentText', data.executionAgent
+	            ? renderExecutionAgentSummary(data.executionAgent, { handed: true })
+	            : renderExecutionAgentSummary(null));
 	          if (data.session) executionSessionCache.set(session.id, data.session);
+	          if (!isBrowserRun) clearExecutionDraft(session.id);
 	          await renderExecutionSheet(session.id, { focus: false });
 	          ensureExecutionPolling();
         } catch (error) {
+          if (!isBrowserRun && isSantaClawzExecutionSession(error?.data?.session || session)) {
+            await refreshCreditsBalance().catch(() => null);
+            await reconcileAgentExecutionStartFailure(session, error);
+            return;
+          }
           executionPendingSessions.delete(session.id);
           const latestErrorSession = error?.data?.session || session;
           if (error?.data?.session?.id) executionSessionCache.set(error.data.session.id, error.data.session);
@@ -18674,8 +19672,9 @@
 		        }
       };
 
-      const resumeCheckoutReconcileFromSheet = async () => {
-        const currentSession = executionSessionCache.get(session.id) || session;
+	      const resumeCheckoutReconcileFromSheet = async () => {
+	        const currentSession = executionSessionCache.get(session.id) || session;
+	        const clientRunStartedAt = new Date().toISOString();
         try {
           clearExecutionStatusError(currentSession.id);
           if (hasStoredVaultDeviceAuth() && !isVaultUnlocked()) {
@@ -18692,12 +19691,11 @@
           await sendNativeRunnerExtensionMessage({
             type: 'SET_LOCAL_CHECKOUT_PROFILE',
             sessionId: currentSession.id,
-            profile: localCheckoutProfile,
-            expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+            profile: localCheckoutProfile
           });
           const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(currentSession));
-          executionPendingSessions.add(currentSession.id);
-          await renderExecutionSheet(currentSession.id, { focus: false });
+	          executionPendingSessions.add(currentSession.id);
+	          refreshExecutionPanelInPlace(currentSession);
           const data = await api(`/connectors/sessions/${currentSession.id}/start-execution`, {
             method: 'POST',
             body: JSON.stringify({
@@ -18715,7 +19713,11 @@
 	          if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
 	          // Do not wait for the execution widget to re-render before the
 	          // runner claims this narrow, already-approved continuation.
-          void requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
+	          void requestNativeRunnerMissionWake(
+	            data.session?.id || currentSession.id,
+	            data.session?.extensionRunDispatch?.nonce || '',
+	            clientRunStartedAt
+	          );
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(currentSession.id);
           await renderExecutionSheet(currentSession.id, { focus: false });
@@ -18730,8 +19732,9 @@
         }
       };
 
-      const submitReviewedOrderFromSheet = async () => {
-        const currentSession = executionSessionCache.get(session.id) || session;
+	      const submitReviewedOrderFromSheet = async () => {
+	        const currentSession = executionSessionCache.get(session.id) || session;
+	        const clientRunStartedAt = new Date().toISOString();
         try {
           clearExecutionStatusError(currentSession.id);
           if (hasStoredVaultDeviceAuth()) {
@@ -18777,12 +19780,11 @@
             await sendNativeRunnerExtensionMessage({
               type: 'SET_LOCAL_CHECKOUT_PROFILE',
               sessionId: currentSession.id,
-              profile: localCheckoutProfile,
-              expiresAt: new Date(Date.now() + 8 * 60 * 1000).toISOString()
+              profile: localCheckoutProfile
             });
           }
-          executionPendingSessions.add(currentSession.id);
-          await renderExecutionSheet(currentSession.id, { focus: false });
+	          executionPendingSessions.add(currentSession.id);
+	          refreshExecutionPanelInPlace(currentSession);
           const data = await api(`/connectors/sessions/${currentSession.id}/start-execution`, {
             method: 'POST',
             body: JSON.stringify({
@@ -18801,7 +19803,11 @@
           if (data.session?.id) executionSessionCache.set(data.session.id, data.session);
 	          // Final submission uses the same immediate wake path as the
 	          // initial run; rendering must never spend its claim window.
-          void requestNativeRunnerMissionWake(data.session?.id || currentSession.id);
+	          void requestNativeRunnerMissionWake(
+	            data.session?.id || currentSession.id,
+	            data.session?.extensionRunDispatch?.nonce || '',
+	            clientRunStartedAt
+	          );
 	          await refreshCreditsBalance().catch(() => null);
 	          clearExecutionStatusError(currentSession.id);
           await renderExecutionSheet(currentSession.id, { focus: false });
@@ -18843,11 +19849,11 @@
 		        try {
 		          const selections = applySantaClawzPaymentPreferenceToSelections(collectExecutionSelections(session));
 		          const localPrivateInputs = collectExecutionPrivateInputs(session);
-		          if (hasStoredVaultDeviceAuth() && executionRequiresDeviceAuthorization(session, localPrivateInputs, selections)) {
-		            await authorizeSensitiveAction('Authorize the locked local data needed for this SantaClawz job');
-		          }
-		          executionPendingSessions.add(session.id);
-		          await renderExecutionSheet(session.id, { focus: false });
+	          if (hasStoredVaultDeviceAuth() && executionRequiresDeviceAuthorization(session, localPrivateInputs, selections)) {
+	            await authorizeSensitiveAction('Authorize the locked local data needed for this SantaClawz job');
+	          }
+	          executionPendingSessions.add(session.id);
+	          refreshExecutionPanelInPlace(session);
 		          let data = null;
 		          if (session.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
 		            data = await api(`/connectors/sessions/${session.id}/santaclawz-x402/status`);
@@ -18865,13 +19871,10 @@
 		          executionPendingSessions.delete(session.id);
 		          await renderExecutionSheet(session.id, { focus: false });
 		          ensureExecutionPolling();
-		        } catch (error) {
-		          executionPendingSessions.delete(session.id);
-		          ensureExecutionPolling();
-		          await renderExecutionSheet(session.id, { focus: false });
-		          setExecutionStatusError(session, error);
-		        }
-		      });
+	        } catch (error) {
+	          await reconcileAgentExecutionStartFailure(session, error);
+	        }
+	      });
 
 		      bindExecutionClick('executionSantaClawzPayBtn', async () => {
 		        try {
@@ -18881,7 +19884,7 @@
             await authorizeSensitiveAction('Authorize the locked local data needed for this SantaClawz job');
 	          }
 	          executionPendingSessions.add(session.id);
-	          await renderExecutionSheet(session.id, { focus: false });
+	          refreshExecutionPanelInPlace(session);
 	          let data = null;
 	          if (session.santaclawzDirectPayment?.paymentPayloadDigestSha256) {
 	            data = await api(`/connectors/sessions/${session.id}/santaclawz-x402/status`);
@@ -18896,10 +19899,7 @@
 	          await renderExecutionSheet(session.id, { focus: false });
 	          ensureExecutionPolling();
         } catch (error) {
-          executionPendingSessions.delete(session.id);
-          ensureExecutionPolling();
-          await renderExecutionSheet(session.id, { focus: false });
-          setExecutionStatusError(session, error);
+          await reconcileAgentExecutionStartFailure(session, error);
         }
       });
 
@@ -19473,22 +20473,9 @@
 			    async function submitIntentFromChat() {
 			      const prompt = $('chatPrompt').value.trim();
 			      if (!prompt) return;
-		      const addAgentIntent = isAddAgentIntent(prompt);
 
-		      prepareVisibleContextForUserPrompt();
-		      addMessage('user', prompt);
-		      if (addAgentIntent) {
-		        $('chatPrompt').value = '';
-		        $('chatPrompt').style.height = '24px';
-		        const addAgentTarget = addAssistantResult(
-		          'Register your agent with SantaClawz, then Magic City can surface it for matching work.',
-		          '',
-		          false
-		        );
-		        attachAddAgentCallToAction(addAgentTarget);
-		        saveChatHistory();
-		        return;
-		      }
+			      prepareVisibleContextForUserPrompt();
+			      addMessage('user', prompt);
 	      // Refresh identity in the background. A slow auth probe must not block
 	      // intent routing or make the chat submit action look unresponsive.
 	      void bootstrapSessionIfNeeded().catch(() => null);
@@ -19504,6 +20491,7 @@
       }
       const capability = $('intentCapability').value.trim() || 'general-chat';
       const effectivePrompt = prompt;
+      const addAgentIntent = isAddAgentIntent(prompt);
       const pending = addAssistantResult('Magic City · routing request', '', false, true);
       setAssistantPendingState(pending, 'Routing', capability);
       let streamStarted = false;
@@ -19623,8 +20611,7 @@
 	              attachAgentCompletionCard(pending, data.agentFollowUp, completionContext);
 	            }
 	            if (addAgentIntent) attachAddAgentCallToAction(pending);
-
-		            detailsText = buildResponseDetails({
+				            detailsText = buildResponseDetails({
               assistant: data.assistant,
               selectedAgent: data.selectedAgent,
               privacy: data.privacy,
@@ -19674,19 +20661,19 @@
             const details = existing.querySelector('div');
             if (details) details.textContent = detailsText;
           },
-	          error: async (data) => {
-	            stopAssistantPendingState(pending);
-	            pending.el.remove();
-	            const errorTarget = addAssistantResult(`Error: ${data.error || 'provider_execution_failed'}`);
-	            if (addAgentIntent) attachAddAgentCallToAction(errorTarget);
-	          }
-	        });
-	      } catch (e) {
-	        stopAssistantPendingState(pending);
-	        pending.el.remove();
-	        const errorTarget = addAssistantResult(`Error: ${e.message}`);
-	        if (addAgentIntent) attachAddAgentCallToAction(errorTarget);
-	      }
+		          error: async (data) => {
+		            stopAssistantPendingState(pending);
+		            pending.el.remove();
+		            const errorTarget = addAssistantResult(`Error: ${data.error || 'provider_execution_failed'}`);
+		            if (addAgentIntent) attachAddAgentCallToAction(errorTarget);
+		          }
+		        });
+		      } catch (e) {
+		        stopAssistantPendingState(pending);
+		        pending.el.remove();
+		        const errorTarget = addAssistantResult(`Error: ${e.message}`);
+		        if (addAgentIntent) attachAddAgentCallToAction(errorTarget);
+		      }
     }
 
     $('sendBtn').addEventListener('click', () => void submitIntentFromChat());
@@ -19801,11 +20788,11 @@
       }
     });
 
-    $('nativeRunnerSetupBtn')?.addEventListener('click', async () => {
+    $('nativeRunnerSetupBtn')?.addEventListener('click', async (event) => {
       try {
         const primaryMode = $('nativeRunnerSetupBtn')?.dataset.nativeRunnerPrimaryMode || 'setup';
         if (primaryMode === 'refresh') {
-          await refreshNativeRunnerStatus({ silent: false, wakeExtension: true });
+          await checkNativeRunnerWithPolling({ triggerButton: event.currentTarget });
           return;
         }
         if (primaryMode === 'show_pairing' && nativeRunnerPairingIsFresh(nativeRunnerSettings)) {
@@ -19891,9 +20878,9 @@
       }
     });
 
-    $('nativeRunnerRefreshBtn')?.addEventListener('click', async () => {
+    $('nativeRunnerRefreshBtn')?.addEventListener('click', async (event) => {
       try {
-        await checkNativeRunnerWithPolling();
+        await checkNativeRunnerWithPolling({ triggerButton: event.currentTarget });
       } catch {
         // Status text is set inside checkNativeRunnerWithPolling.
       }
@@ -20355,7 +21342,7 @@
         renderHelperSavedAgents();
         setHelperAgentView(loadSavedAgents().length ? 'saved' : 'all');
         positionHelperPopup();
-        refreshHelperPlatformAgents().catch(() => {});
+        if (SANTACLAWZ_LIVE) refreshHelperPlatformAgents().catch(() => {});
         ensurePlatformWorkflowRegistryLoaded().catch(() => {});
       }
     });
@@ -20431,6 +21418,7 @@
 
     $('vaultRequireFinalCheckoutReview')?.addEventListener('change', () => {
       localStorage.setItem(CHECKOUT_FINAL_REVIEW_KEY, $('vaultRequireFinalCheckoutReview').checked ? 'true' : 'false');
+      localStorage.setItem(CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY, 'explicit');
       syncFinalCheckoutReviewPreferenceUi();
       if (activeExecutionSessionId) void renderExecutionSheet(activeExecutionSessionId, { focus: false });
     });
@@ -20516,6 +21504,36 @@
         || message.includes('load failed');
     }
 
+    function actionApprovalRecoveryError(actionRunId, cause = null) {
+      const error = new Error('Connection interrupted while confirming approval. Check this same approval again.');
+      error.actionApprovalRecoverable = true;
+      error.actionRunId = actionRunId;
+      error.cause = cause;
+      return error;
+    }
+
+    function recoveredActionApprovalData(actionRun, connectorSession) {
+      return {
+        approved: true,
+        replayed: true,
+        approvalRecovered: true,
+        actionRun,
+        connectorSession,
+        assistant: {
+          content: actionRun.executionContent || 'Action approved. Execution is ready.',
+          providerMode: actionRun.executionMode || 'action-recovery',
+          generatedBy: actionRun.agentId || null,
+          providerId: actionRun.executionProviderId || actionRun.agentId || null,
+          receiptId: actionRun.receiptId || null,
+          handoff: actionRun.executionHandoff || actionRun.handoff || null
+        }
+      };
+    }
+
+    function approvedSessionAlreadyStarted(data = {}) {
+      return ['queued', 'claimed', 'executing', 'fulfilled', 'failed'].includes(String(data.connectorSession?.status || ''));
+    }
+
     async function approveActionWithRecovery(actionRunId) {
       const path = `/actions/${encodeURIComponent(actionRunId)}/approve`;
       const request = () => api(path, { method: 'POST', body: JSON.stringify({}) });
@@ -20524,7 +21542,32 @@
       } catch (error) {
         if (!isAmbiguousActionApprovalError(error)) throw error;
         await new Promise((resolve) => window.setTimeout(resolve, 300));
-        return request();
+        let actionRun = null;
+        try {
+          const recovered = await api(`/actions/${encodeURIComponent(actionRunId)}`);
+          actionRun = recovered?.actionRun || null;
+        } catch (recoveryError) {
+          throw actionApprovalRecoveryError(actionRunId, recoveryError);
+        }
+        if (actionRun?.status === 'completed' && actionRun.connectorSessionId) {
+          try {
+            const recoveredSession = await api(`/connectors/sessions/${encodeURIComponent(actionRun.connectorSessionId)}`);
+            if (recoveredSession?.session?.id === actionRun.connectorSessionId) {
+              return recoveredActionApprovalData(actionRun, recoveredSession.session);
+            }
+          } catch (recoveryError) {
+            throw actionApprovalRecoveryError(actionRunId, recoveryError);
+          }
+        }
+        if (actionRun?.status === 'awaiting_approval') {
+          try {
+            return await request();
+          } catch (retryError) {
+            if (!isAmbiguousActionApprovalError(retryError)) throw retryError;
+            throw actionApprovalRecoveryError(actionRunId, retryError);
+          }
+        }
+        throw actionApprovalRecoveryError(actionRunId, error);
       }
     }
 
@@ -20554,7 +21597,7 @@
 		            triggerButton.textContent = 'Starting...';
 		          }
 			          const data = await approveActionWithRecovery(approveId);
-			          const autoRunAction = shouldAutoRunApprovedAction(data);
+				          const autoRunAction = shouldAutoRunApprovedAction(data) && !approvedSessionAlreadyStarted(data);
 			          if (magicInternetAction && !data.connectorSession?.id) {
 			            throw new Error('Magic Internet Agent did not return an execution session.');
 			          }
@@ -20595,11 +21638,17 @@
         }
         saveChatHistory();
       } catch (error) {
-        setAssistantBodyContent(messageEl.querySelector('.msg-body'), `Error: ${error.message}`);
+	        setAssistantBodyContent(
+	          messageEl.querySelector('.msg-body'),
+	          error?.actionApprovalRecoverable
+	            ? 'Connection interrupted while confirming approval. Check this same approval again; Magic City will not create a new task.'
+	            : `Error: ${error.message}`
+	        );
         buttons.forEach((button) => {
           button.disabled = false;
           button.textContent = buttonLabels.get(button) || button.textContent;
         });
+	        if (error?.actionApprovalRecoverable && triggerButton) triggerButton.textContent = 'Check approval';
       }
     });
 
@@ -20705,6 +21754,7 @@
           return;
         }
         if (sectionId === 'settingsAgentHubSection') {
+          if (!SANTACLAWZ_LIVE) return;
           bootstrapSessionIfNeeded(false)
             .then(() => refreshAgentHub(true))
             .catch(() => {});
@@ -20911,6 +21961,7 @@
       if (unlocked) writeVaultDraftToInputs(JSON.parse(unlocked));
     } catch {}
     syncRequesterFields();
+    void refreshZekoNetworkStatus();
 	    bootstrapSessionIfNeeded(false)
       .then(() => {
         if ($('settingsWalletSection')?.open) return ensureWalletSectionData(true);

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { validateSantaClawzCompletedReturn } from '../src/santaclawzReturnPolicy.js';
 
 const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
 const start = server.indexOf('function summarizeSantaClawzPaidExecution(');
@@ -8,8 +10,12 @@ assert.ok(start >= 0 && end > start, 'summary function not found');
 
 const summarize = new Function(
   'extractSantaClawzDelivery',
+  'validateSantaClawzCompletedReturn',
   `${server.slice(start, end)}\nreturn summarizeSantaClawzPaidExecution;`
-)(() => ({ artifacts: [], inlineOutputs: [] }));
+)(
+  (payload) => ({ artifacts: payload?.protocolReturn ? [{ url: 'https://api.santaclawz.ai/output' }] : [], inlineOutputs: [] }),
+  validateSantaClawzCompletedReturn
+);
 
 const rejected = summarize(true, {
   paymentStatus: 'return_rejected',
@@ -73,5 +79,83 @@ const unknownFailure = summarize(true, {
 });
 assert.equal(unknownFailure.safeToCreateFreshPayment, true);
 assert.match(unknownFailure.failureReason, /acknowledged the job but failed before delivering/i);
+
+const partial = summarize(true, {
+  paymentStatus: 'seller_settled',
+  settlementStatus: 'partially_settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed'
+});
+assert.equal(partial.completed, false);
+
+const protocolOutput = '# Audit';
+const protocolOutputHash = crypto.createHash('sha256').update(protocolOutput).digest('hex');
+const protocolFileHashes = { 'audit.md': protocolOutputHash };
+const protocolPackageHash = crypto.createHash('sha256').update(JSON.stringify(protocolFileHashes)).digest('hex');
+const protocolReturn = {
+  schema_version: 'santaclawz-return/1.0',
+  request_id: 'hire_terminal_complete',
+  status: 'completed',
+  agent_private: true,
+  verified_output: {
+    package_hash: protocolPackageHash,
+    hash_algorithm: 'sha256',
+    verification_manifest: {
+      input_digest_sha256: 'b'.repeat(64),
+      checks_performed: ['audit'],
+      request_id: 'hire_terminal_complete',
+      package_hash: protocolPackageHash,
+      files_produced: [{ name: 'audit.md', sha256: protocolOutputHash }],
+      file_hashes: protocolFileHashes,
+      blocked_suspicious_instructions: []
+    },
+    deliverables: [{ name: 'audit.md', sha256: protocolOutputHash }],
+    buyer_visible_outputs: [{ name: 'audit.md', text: protocolOutput, sha256: protocolOutputHash }]
+  }
+};
+const completed = summarize(true, {
+  paymentStatus: 'seller_settled',
+  settlementStatus: 'partially_settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: {
+    protocolState: 'DELIVERED_SETTLED',
+    paymentFinality: 'settled',
+    terminal: true,
+    sellerOutcome: 'completed'
+  },
+  protocolReturn
+}, { expectedRequestId: 'hire_terminal_complete' });
+assert.equal(completed.completed, true);
+assert.equal(completed.returnValidation.ok, true);
+
+const pendingReturnVerification = summarize(true, {
+  paymentStatus: 'seller_settled',
+  settlementStatus: 'partially_settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: {
+    protocolState: 'DELIVERED_SETTLED',
+    paymentFinality: 'settled',
+    terminal: true,
+    sellerOutcome: 'completed'
+  },
+  protocolReturn
+}, {
+  expectedRequestId: 'hire_terminal_complete',
+  verifiedReturn: {
+    ok: false,
+    pending: true,
+    retryable: true,
+    reason: 'santaclawz_deliverable_temporarily_unavailable'
+  }
+});
+assert.equal(pendingReturnVerification.completed, false);
+assert.equal(pendingReturnVerification.paymentAccepted, true);
+assert.equal(pendingReturnVerification.terminalFailure, false);
+assert.equal(pendingReturnVerification.returnRejected, false);
+assert.equal(pendingReturnVerification.returnVerificationPending, true);
+assert.equal(pendingReturnVerification.safeToCreateFreshPayment, false);
+assert.equal(pendingReturnVerification.nextAction, 'retry_return_verification');
 
 console.log('santaclawz terminal-state regression passed');

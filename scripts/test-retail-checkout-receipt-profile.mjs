@@ -101,6 +101,23 @@ assert.equal(verifyMbaRetailCheckoutStepReceipt(forgedFinalSubmitStep, {
   holderKeyCommitment: 'different_holder_thumbprint'
 }).valid, false, 'a final submit receipt cannot be reassigned to another runtime holder');
 
+const cardConfirmationReceipt = buildMbaRetailCheckoutStepReceipt({
+  ...base,
+  actionId: 'reconcile-payment-profile',
+  actionType: 'fill_checkout_profile',
+  actionStatus: 'completed',
+  verifiedMilestones: ['checkout_open', 'address_confirmed', 'card_confirmed'],
+  previousStepHash: latestStep.stepReceiptHash,
+  previousBoundaryHash: 'boundary_card_confirmation',
+  // This mimics a local card cue supplied to the runtime. The portable MBA
+  // receipt proves the milestone, not the last four or any payment credential.
+  paymentCardLast4: '6383',
+  observedAt: '2026-08-13T00:01:03Z'
+});
+assert.equal(verifyMbaRetailCheckoutStepReceipt(cardConfirmationReceipt, base).valid, true);
+assert.ok(cardConfirmationReceipt.verifiedMilestones.includes('card_confirmed'));
+assert.equal(JSON.stringify(cardConfirmationReceipt).includes('6383'), false, 'MBA card confirmation receipts must not disclose the payment-card cue');
+
 console.log(JSON.stringify({
   ok: true,
   requiredMilestones: MBA_RETAIL_CHECKOUT_REQUIRED_MILESTONES,

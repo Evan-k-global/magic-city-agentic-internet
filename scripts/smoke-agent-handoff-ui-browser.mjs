@@ -18,6 +18,15 @@ function sseEvent(event, data) {
 }
 
 let responseMode = 'add-agent-error';
+let loseNextSessionStartResponse = false;
+let lostSessionId = '';
+const sessionStartRequestIds = [];
+let executionStartCount = 0;
+page.on('request', (request) => {
+  if (/\/connectors\/sessions\/[^/]+\/start-execution$/.test(new URL(request.url()).pathname)) {
+    executionStartCount += 1;
+  }
+});
 await page.route('**/intent/stream', async (route) => {
   if (responseMode === 'add-agent-error') {
     await route.fulfill({
@@ -28,7 +37,7 @@ await page.route('**/intent/stream', async (route) => {
     return;
   }
   const codeAuditAgent = {
-    pluginId: 'santaclawz:code-audit-smoke',
+    pluginId: 'santaclawz:hosted-code-audit-agent--session_agent_0e86fd7829bd',
     agentName: 'Code Audit Agent',
     description: 'Reviews a public GitHub repository and returns prioritized findings.',
     sourceLabel: 'SantaClawz marketplace',
@@ -52,16 +61,27 @@ await page.route('**/intent/stream', async (route) => {
       ]
     }
   };
+  const request = route.request().postDataJSON();
+  const prompt = String(request?.prompt || request?.metadata?.prompt || '');
+  const repoUrl = prompt.match(/https:\/\/github\.com\/[^\s]+/i)?.[0] || '';
+  const continuingAudit = Boolean(repoUrl);
   await route.fulfill({
     status: 200,
     contentType: 'text/event-stream',
     body: [
       sseEvent('start', {}),
       sseEvent('final', {
-        assistant: { content: 'I can prepare a Code Audit Agent handoff after you choose to hire it.', providerId: 'smoke' },
+        assistant: {
+          content: continuingAudit
+            ? `Verified public GitHub repository for Code Audit Agent: ${repoUrl}`
+            : 'I can prepare a Code Audit Agent handoff after you choose to hire it.',
+          providerId: 'smoke'
+        },
         agentFollowUp: {
           kind: 'developer',
-          chatIntake: { required: true, githubUrl: '' },
+          reason: continuingAudit ? 'pending_code_audit_continuation' : 'literal_audit_keyword',
+          autoOpenExecutionSheet: continuingAudit,
+          chatIntake: { required: !continuingAudit, githubUrl: repoUrl },
           agent: codeAuditAgent,
           agents: [codeAuditAgent]
         },
@@ -70,12 +90,35 @@ await page.route('**/intent/stream', async (route) => {
     ].join('')
   });
 });
+await page.route('**/connectors/sessions/start', async (route) => {
+  const body = route.request().postDataJSON();
+  sessionStartRequestIds.push(String(body?.clientRequestId || ''));
+  const response = await route.fetch();
+  const payload = await response.json();
+  if (loseNextSessionStartResponse) {
+    loseNextSessionStartResponse = false;
+    lostSessionId = String(payload?.session?.id || '');
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      headers: { 'x-request-id': 'req-simulated-session-response-loss' },
+      body: JSON.stringify({ error: 'simulated_session_response_lost' })
+    });
+    return;
+  }
+  await route.fulfill({ response });
+});
 
 await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
 await page.locator('#chatPrompt').fill('can i add an agent that can help with that?');
 await page.locator('#sendBtn').click();
 const activateLink = page.locator(`a[href="https://www.santaclawz.ai/activate"]`);
-await activateLink.waitFor({ state: 'visible' });
+try {
+  await activateLink.waitFor({ state: 'visible' });
+} catch (error) {
+  const pageText = await page.locator('body').innerText().catch(() => '');
+  throw new Error(`SantaClawz activation fallback did not render. Runtime: ${runtimeErrors.join(' | ')}. Page: ${pageText.slice(0, 1200)}`, { cause: error });
+}
 assert.equal(await activateLink.textContent(), 'Add your agent');
 
 if (process.env.MAGIC_CITY_SMOKE_PUBLIC_ONLY === '1') {
@@ -101,29 +144,54 @@ const completionCard = codeAuditMessage.locator('.agent-completion-card');
 await completionCard.waitFor({ state: 'visible' });
 assert.equal(await completionCard.locator('.agent-completion-utilities').count(), 0, 'match alternatives must not consume a separate utility row');
 assert.equal(await completionCard.locator('.agent-completion-inline-links').count(), 1, 'match alternatives must stay inline with the recommendation');
-assert.equal(await completionCard.getByRole('link', { name: 'Add your agent', exact: true }).count(), 1, 'the agent-publishing path must remain available');
 const completionCardBox = await completionCard.boundingBox();
 assert.ok(completionCardBox && completionCardBox.height < 104, `default match card should stay compact, got ${completionCardBox?.height}px`);
 
-await codeAuditMessage.getByRole('button', { name: 'Hire', exact: true }).first().click();
+const repoUrl = 'https://github.com/zeko-labs/santa_clawz-private_agents';
+loseNextSessionStartResponse = true;
+await page.locator('#chatPrompt').fill(repoUrl);
+await page.locator('#sendBtn').click();
+const firstContinuation = page.locator('.msg.assistant').filter({ hasText: 'Verified public GitHub repository' }).last();
+await firstContinuation.locator('[data-agent-completion-status]').filter({ hasText: 'Your selection is saved' }).waitFor({ state: 'visible' });
+assert.ok(lostSessionId, 'the interrupted opening must have created one recoverable server session');
+assert.equal(await page.locator('[data-session-panel]').count(), 0, 'a lost create response must not invent a client-side session');
+await page.locator('#chatPrompt').fill(repoUrl);
+await page.locator('#sendBtn').click();
+const recoveredContinuation = page.locator('.msg.assistant').filter({ hasText: 'Verified public GitHub repository' }).last();
 const executionPanel = page.locator('[data-session-panel]').last();
 try {
   await executionPanel.waitFor({ state: 'visible', timeout: 10000 });
 } catch (error) {
-  const cardText = await codeAuditMessage.textContent().catch(() => '');
-  throw new Error(`Code Audit Hire did not open a session. Card: ${cardText}. Runtime: ${runtimeErrors.join(' | ')}`, { cause: error });
+  const cardText = await recoveredContinuation.textContent().catch(() => '');
+  throw new Error(`Code Audit continuation did not open a session. Card: ${cardText}. Runtime: ${runtimeErrors.join(' | ')}`, { cause: error });
 }
+assert.equal(await executionPanel.getAttribute('data-session-panel'), lostSessionId, 'retry must reopen the original draft session');
+assert.equal(sessionStartRequestIds.length, 2, 'opening recovery must make one idempotent retry');
+assert.ok(sessionStartRequestIds[0], 'opening requests must carry an idempotency key');
+assert.equal(sessionStartRequestIds[1], sessionStartRequestIds[0], 'opening recovery must reuse the same idempotency key');
 const githubField = executionPanel.locator('[data-agent-field="githubUrl"]');
 await githubField.waitFor({ state: 'visible' });
-assert.equal(await githubField.inputValue(), '');
+assert.equal(await githubField.inputValue(), repoUrl, 'repository-only continuation must prefill the execution sheet');
+assert.equal(executionStartCount, 0, 'opening the prefilled sheet must not start a hire or payment');
 
-const repoUrl = 'https://github.com/zeko-labs/santa_clawz-private_agents';
-await page.locator('#chatPrompt').fill(repoUrl);
-await page.locator('#sendBtn').click();
-await page.waitForFunction(
-  ({ selector, expected }) => document.querySelector(selector)?.value === expected,
-  { selector: '[data-agent-field="githubUrl"]', expected: repoUrl }
-);
+const auditFocusField = executionPanel.locator('[data-agent-field="auditFocus"]');
+await auditFocusField.fill('performance and reliability');
+await page.route('**/connectors/sessions/*/start-execution', async (route) => {
+  await route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      error: 'santaclawz_runtime_ready_timeout',
+      unstartedSantaClawz: true
+    })
+  });
+});
+await executionPanel.locator('[data-execution-run-agent="true"]').first().click();
+await executionPanel.getByText(/SantaClawz did not answer its readiness check in time/i).waitFor({ state: 'visible' });
+assert.equal(await githubField.inputValue(), repoUrl, 'repository must survive a readiness timeout');
+assert.equal(await auditFocusField.inputValue(), 'performance and reliability', 'local draft must survive a readiness timeout');
+await page.waitForTimeout(250);
+assert.equal(executionStartCount, 1, 'a readiness timeout must not duplicate the hire request');
 
 const scrollResult = await page.evaluate(async () => {
   let panel = document.querySelector('[data-session-panel]');

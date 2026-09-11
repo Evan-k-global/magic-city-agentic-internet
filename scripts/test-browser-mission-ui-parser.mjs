@@ -54,36 +54,66 @@ assert.doesNotMatch(
 assert.match(html, /async function revealExecutionSheet\(sessionId(?:, \{ awaitRender = false \} = \{\})?\)/, 'new execution sessions must force their panel open');
 assert.match(html, /await revealExecutionSheet\(data\.connectorSession\.id\)/, 'approved browser actions must reveal their execution sheet');
 assert.match(html, /async function approveActionWithRecovery\(actionRunId\)/, 'ambiguous action approval failures must recover automatically');
-assert.match(html, /if \(!isAmbiguousActionApprovalError\(error\)\) throw error;[\s\S]*return request\(\);/, 'action approval recovery must retry only ambiguous network failures');
+assert.match(
+  html,
+  /if \(!isAmbiguousActionApprovalError\(error\)\) throw error;[\s\S]*api\(`\/actions\/\$\{encodeURIComponent\(actionRunId\)\}`\)[\s\S]*actionRun\?\.status === 'awaiting_approval'[\s\S]*return await request\(\)/,
+  'ambiguous approval recovery must inspect the same action and retry only while it still awaits approval'
+);
+assert.match(
+  html,
+  /actionRun\?\.status === 'completed' && actionRun\.connectorSessionId[\s\S]*api\(`\/connectors\/sessions\/\$\{encodeURIComponent\(actionRun\.connectorSessionId\)\}`\)/,
+  'completed approval recovery must fetch the original connector session'
+);
+assert.match(html, /approvedSessionAlreadyStarted\(data\)/, 'an already-running recovered session must not be restarted');
+assert.doesNotMatch(
+  html,
+  /function approvedSessionAlreadyStarted\(data = \{\}\) \{[\s\S]{0,120}approvalRecovered/,
+  'restart protection must apply to replayed approval responses as well as GET recovery'
+);
 assert.match(serverSource, /if \(actionRun\.status === 'completed'\)[\s\S]*replayed: true/, 'completed action approvals must replay their existing result');
 assert.match(serverSource, /connectorSessionId: connectorSession\?\.id \|\| null/, 'completed actions must retain their connector session for idempotent replay');
 assert.match(
   html,
-  /async function requestNativeRunnerMissionWake\(sessionId = ''\)[\s\S]*setTimeout\(\(\) => resolve\(timeoutResult\), 2000\)/,
+  /async function requestNativeRunnerMissionWake\(sessionId = '', extensionDispatchNonce = '', clientRunStartedAt = ''\)[\s\S]*setTimeout\(\(\) => resolve\(timeoutResult\), 2000\)/,
   'the page-to-extension wake must have a short, bounded acknowledgement window'
 );
 assert.match(
   html,
-  /sendNativeRunnerExtensionMessage\(\{ type: 'RUN_PENDING_SESSIONS', sessionId \}\)/,
-  'the browser UI must target the exact approved connector session when it wakes the runner'
+  /type: 'RUN_PENDING_SESSIONS',[\s\S]{0,180}sessionId,[\s\S]{0,180}extensionDispatchNonce/,
+  'the browser UI must target the exact approved connector session and dispatch nonce when it wakes the runner'
 );
 const startExecutionSource = html.slice(
   html.indexOf('const startExecutionFromSheet = async () => {'),
   html.indexOf('const resumeCheckoutReconcileFromSheet = async () => {')
 );
 const startExecutionRequestIndex = startExecutionSource.indexOf('let data = await api(`/connectors/sessions/${session.id}/start-execution`');
-const startExecutionWakeIndex = startExecutionSource.indexOf('void requestNativeRunnerMissionWake(data.session?.id || session.id);');
+const startExecutionWakeIndex = startExecutionSource.indexOf('void requestNativeRunnerMissionWake(', startExecutionRequestIndex);
 const startExecutionRenderIndex = startExecutionSource.indexOf('await renderExecutionSheet(session.id, { focus: false });', startExecutionRequestIndex);
+const blockingPreStartRenderIndex = startExecutionSource.indexOf('await renderExecutionSheet(session.id, { focus: false });');
 assert.ok(startExecutionRequestIndex >= 0, 'browser runs must start an execution session');
 assert.ok(startExecutionWakeIndex > startExecutionRequestIndex, 'browser runs must wake the runner after a session exists');
 assert.ok(
   startExecutionWakeIndex < startExecutionRenderIndex,
   'browser runs must wake the runner before expensive execution-sheet rendering can consume its claim window'
 );
+assert.ok(
+  blockingPreStartRenderIndex < 0 || blockingPreStartRenderIndex > startExecutionRequestIndex,
+  'browser startup must not await a full execution-sheet redraw before start-execution'
+);
 assert.doesNotMatch(
   html,
   /requestNativeRunnerMissionWake\(sessionId = '', attempt = 0\)|wake\.pending && attempt < 2/,
   'one browser run must never create duplicate page-to-extension wake requests'
+);
+assert.match(
+  html,
+  /waiting for Magic City Runner to claim this mission/,
+  'a dispatched browser mission must identify its pending claim state instead of presenting a generic queue'
+);
+assert.match(
+  html,
+  /extension_wake_rejected:[\s\S]*Runner did not start/,
+  'a nested extension wake or claim rejection must surface before the server watchdog expires the queued mission'
 );
 assert.match(html, /data-execution-continue-checkout/, 'checkout mismatches must offer an in-place saved-detail repair action');
 assert.match(html, /resumeCheckoutReconcile:\s*true/, 'checkout repair must create a narrow reconciliation continuation');
@@ -92,6 +122,16 @@ assert.match(html, /Approve and place order/, 'the execution UI must make Magic 
 assert.match(html, /finalSubmitApproval/, 'final order approval must send a bounded approval payload to the server');
 assert.match(serverSource, /magic-city-final-submit-approval-v1/, 'server must commit final-order approval receipts');
 assert.match(serverSource, /finalSubmitApprovalHash/, 'mission contracts must bind the final-order approval hash');
+assert.match(
+  html,
+  /CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY[\s\S]*function requiresFinalCheckoutReview\(\)[\s\S]*=== 'explicit'[\s\S]*CHECKOUT_FINAL_REVIEW_KEY\) === 'true'/,
+  'legacy final-review preferences must not silently pause new Amazon missions'
+);
+assert.match(
+  html,
+  /vaultRequireFinalCheckoutReview[\s\S]*CHECKOUT_FINAL_REVIEW_PREFERENCE_VERSION_KEY, 'explicit'/,
+  'a user must be able to explicitly opt back into final review'
+);
 assert.match(
   serverSource,
   /const canDispatchExtensionWake = Boolean\([\s\S]*declarativeExtensionRun[\s\S]*nativeRunnerReadiness\.device[\s\S]*!nativeRunnerReadiness\.extensionUpdateRequired/,
@@ -104,6 +144,12 @@ assert.match(
 );
 assert.match(html, /Confirm delivery address/, 'address handoff must replace generic needs-attention copy');
 assert.match(html, /Choose payment method/, 'payment handoff must replace generic needs-attention copy');
+assert.match(html, /Pending order needs verification/, 'a pending-order identity mismatch must identify the real manual review boundary');
+assert.match(
+  localRunnerLegacyBackground,
+  /pendingOrderContinuationStep[\s\S]*pending_order_verification_required/,
+  'the sparse pending-order page must not be reclassified as an address-verification failure'
+);
 assert.match(html, /runState\.actionLabel[\s\S]*data-native-runner-focus-tab/, 'known browser handoffs must promote the prepared tab action to the run summary');
 assert.match(
   html,
@@ -129,16 +175,16 @@ assert.match(localRunnerBackground, /Preserve recovery across a service-worker r
 assert.match(localRunnerBackground, /Keep the external message open through the exact-session claim/, 'an external runner wake must stay alive until it has begun the exact approved mission');
 assert.match(localRunnerBackground, /return dispatch\(message, \{ origin \}\);/, 'an external runner wake must execute the requested session directly');
 assert.doesNotMatch(localRunnerBackground, /queueExplicitMissionWake|dispatchExplicitMissionWake|EXPLICIT_WAKE_ALARM/, 'the runner must not detach startup into an MV3 one-shot alarm');
-assert.match(localRunnerLegacyBackground, /async function pollAndExecute\(requestedSessionId = ''\)/, 'the runner must support an exact approved session target');
+assert.match(localRunnerLegacyBackground, /async function pollAndExecute\(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = ''\)/, 'the runner must support an exact approved session and dispatch target');
 assert.match(localRunnerLegacyBackground, /String\(session\?\.id \|\| ''\) === normalizedSessionId/, 'a targeted runner wake must not execute a different queued session');
-assert.match(localRunnerLegacyBackground, /async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id\)/, 'the heartbeat may recover only an unexpired, user-dispatched extension mission');
+assert.match(localRunnerLegacyBackground, /async function pollOnly\(\)[\s\S]*extensionRunDispatch\?\.expiresAt[\s\S]*pollAndExecute\(dispatchedSession\.id, dispatchedSession\.extensionRunDispatch\?\.nonce/, 'the heartbeat may recover only an unexpired, user-dispatched extension mission');
 assert.match(serverSource, /extensionRunDispatch: hasActiveExtensionRunDispatch\(session\)/, 'the extension poll payload must carry the short-lived user dispatch required for heartbeat recovery');
 assert.match(localRunnerExecutor, /function amazonAccountState/, 'Amazon missions must distinguish signed-in, signed-out, and unknown account state');
 assert.match(localRunnerExecutor, /function applyAmazonFulfillmentPreference/, 'Amazon search must apply a bounded delivery refinement');
 assert.match(localRunnerExecutor, /const selected = primeRequired \? prime : \(prime \|\| freeShipping\)/, 'Prime-only missions must never fall back to a generic free-shipping refinement');
 assert.match(browserMissionPlan, /intent: 'prefer_free_delivery'/, 'Amazon mission plans must include a reversible delivery-filter action');
 assert.match(localRunnerLegacyBackground, /'add_to_cart', 'checkout', 'prefer_free_delivery'/, 'the signed mission validator must explicitly allow the bounded delivery-filter intent');
-assert.match(localRunnerExecutor, /selectPreferredDeliveryOption\(\{ primeRequired = false \} = \{\}\)/, 'checkout must select fastest free delivery and reject paid fallback for Prime-only missions');
+assert.match(localRunnerExecutor, /selectPreferredDeliveryOption\(\{ primeRequired = false, fulfillmentMode = '' \} = \{\}\)/, 'checkout must select fastest free delivery and reject paid fallback for Prime-only missions');
 assert.match(localRunnerExecutor, /shippingTotalEvidenceForSurface/, 'checkout must verify the final shipping total separately');
 assert.match(localRunnerExecutor, /\.a-button/, 'final order submission must inspect Amazon-style nested yellow buttons');
 assert.match(localRunnerExecutor, /finalOrderControls\(\)[\s\S]*visibleControlLabel\(root, 220\)/, 'final order submission must use visible wrapper labels');
@@ -146,6 +192,21 @@ assert.match(browserMissionPlan, /budgetBasis = 'merchandise_subtotal'/, 'browse
 assert.match(browserMissionPlan, /amazon_free_shipping_preferred/, 'Amazon plans must bind the free-delivery preference');
 assert.match(browserMissionPlan, /deliveryStrategy: targetDomain === 'amazon\.com' \? 'prime_fastest_free_only'/, 'Amazon plans must bind Prime fastest-free delivery only');
 assert.match(browserMissionPlan, /const primeRequired = session\.extensionPrimeRequired === true/, 'Amazon plans must explicitly require Prime evidence');
+assert.match(
+  browserMissionPlan,
+  /autoSubmitAfterVerifiedCheckout = \(finalApprovalPolicy === 'auto_submit_after_verified_checkout'/,
+  'Amazon plans must bind automatic final submit to the signed approval policy'
+);
+assert.match(
+  serverSource,
+  /autoSubmitAfterVerifiedCheckout = finalApprovalPolicy === 'auto_submit_after_verified_checkout'/,
+  'MBA capabilities must omit final-submit pause only for signed auto-submit plans'
+);
+assert.doesNotMatch(
+  fs.readFileSync(new URL('../src/connectors.js', import.meta.url), 'utf8'),
+  /checkoutRunnerStopBeforeFinalSubmit:\s*true/,
+  'connector defaults must not inject a stale final-submit stop flag into Amazon sessions'
+);
 assert.match(html, /Applies to merchandise\. Tax and delivery are shown separately\./, 'the execution sheet must explain the item-budget basis');
 assert.match(localRunnerLegacyBackground, /acquireMissionTab/, 'browser missions must reuse a runner-owned merchant tab');
 assert.doesNotMatch(

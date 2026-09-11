@@ -33,8 +33,16 @@ const githubUrl = 'https://github.com/zeko-labs/santa_clawz-private_agents';
 let repositoryStatus = 'public';
 const context = {
   URL,
+  MAGIC_CITY_SANTACLAWZ_LIVE: true,
+  SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID: 'hosted-code-audit-agent--session_agent_0e86fd7829bd',
   isCodeAuditAgentChatRequest(value = '') {
-    return /code audit/i.test(String(value || ''));
+    return /code audit|code review|security review|bug hunt/i.test(String(value || ''));
+  },
+  isSantaClawzAuditOfferMessage(value = '') {
+    return /\baudit\b/i.test(String(value || ''));
+  },
+  isMagicInternetPurchaseRequest() {
+    return false;
   },
   extractPublicJobUrlsFromText(value = '') {
     return String(value || '').match(/https?:\/\/[^\s<>"']+/gi) || [];
@@ -51,13 +59,27 @@ const context = {
       httpStatus: repositoryStatus === 'not_publicly_reachable' ? 404 : 200,
       repositoryUrl: value
     };
+  },
+  getSantaClawzSourceStatus() {
+    return { live: true };
+  },
+  async getSantaClawzExecutionAgentByMagicId() {
+    return {
+      pluginId: 'santaclawz:hosted-code-audit-agent--session_agent_0e86fd7829bd',
+      agentName: 'Code Audit Agent'
+    };
+  },
+  formatSantaClawzFollowUpAgent(agent) {
+    return agent;
   }
 };
 vm.createContext(context);
 vm.runInContext([
   'recentCodeAuditConversationText',
+  'hasPendingLiteralCodeAuditRequest',
   'isCodeAuditConversationContinuation',
-  'buildCodeAuditChatIntake'
+  'buildCodeAuditChatIntake',
+  'buildSantaClawzAgentFollowUp'
 ].map(extractFunctionSource).join('\n\n'), context);
 
 const priorContext = [
@@ -74,6 +96,38 @@ assert.equal(accepted.githubUrl, githubUrl);
 assert.equal(accepted.repositoryAccess.status, 'public');
 assert.match(accepted.message, /Verified public GitHub repository/);
 assert.match(accepted.message, /prefill this repository in the dedicated execution sheet/);
+
+const continuedFollowUp = await context.buildSantaClawzAgentFollowUp({
+  prompt: githubUrl,
+  context: priorContext
+});
+assert.equal(continuedFollowUp.reason, 'pending_code_audit_continuation');
+assert.equal(continuedFollowUp.autoOpenExecutionSheet, true);
+assert.equal(continuedFollowUp.chatIntake.githubUrl, githubUrl);
+
+const directFollowUp = await context.buildSantaClawzAgentFollowUp({
+  prompt: 'i want a code audit please',
+  context: []
+});
+assert.equal(directFollowUp.reason, 'literal_audit_keyword');
+assert.equal(directFollowUp.autoOpenExecutionSheet, false, 'an initial audit request must wait for the repository');
+
+const assistantOnlyHistory = await context.buildSantaClawzAgentFollowUp({
+  prompt: githubUrl,
+  context: [{ role: 'assistant', content: 'I can offer a code audit.' }]
+});
+assert.equal(assistantOnlyHistory, null, 'assistant text alone must not authorize an audit continuation');
+
+const broadIntakeWithoutPendingAudit = await context.buildCodeAuditChatIntake({
+  prompt: `code review this ${githubUrl}`,
+  context: []
+});
+assert.equal(broadIntakeWithoutPendingAudit.githubUrl, githubUrl, 'the broad intake parser may still extract the repository');
+const broadRoutingWithoutPendingAudit = await context.buildSantaClawzAgentFollowUp({
+  prompt: `code review this ${githubUrl}`,
+  context: []
+});
+assert.equal(broadRoutingWithoutPendingAudit, null, 'broad review language must not create a pending literal-audit route');
 
 const recovered = await context.buildCodeAuditChatIntake({
   prompt: "it's not private",

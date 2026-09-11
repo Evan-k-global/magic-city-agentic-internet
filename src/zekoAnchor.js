@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { MBA_MISSION_REGISTRY_ADDRESS } from './mba/registryConfig.js';
 
 const DEFAULT_MAGIC_CITY_MISSION_PROOF_NETWORK_ID = 'zeko:testnet';
 function resolveMissionProofNetworkId() {
@@ -10,22 +11,29 @@ function resolveMissionProofNetworkId() {
 
 const ZEKO_SUBMIT_MODE = process.env.ZEKO_SUBMIT_MODE || 'record';
 const ZEKO_NETWORK_ID = resolveMissionProofNetworkId();
+const ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = String(process.env.ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK || '').trim();
 const ZEKO_O1JS_NETWORK_ID =
   process.env.ZEKO_O1JS_NETWORK_ID ||
   (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'zeko-mainnet' : 'testnet');
 const ZEKO_RELAYER_URL = process.env.ZEKO_RELAYER_URL || process.env.ZEKO_SUBMITTER_URL || '';
 const ZEKO_EXPLICIT_RELAYER_URL = process.env.ZEKO_RELAYER_URL || '';
+// MBA proof work is intentionally never run in the web process. This URL
+// must point at a separately deployed relayer when on-chain MBA anchoring is
+// enabled again; the legacy localhost relayer is not an MBA worker.
+const ZEKO_MBA_RELAYER_URL = process.env.ZEKO_MBA_RELAYER_URL || '';
 const ZEKO_RELAYER_TOKEN = process.env.ZEKO_RELAYER_TOKEN || process.env.ZEKO_SUBMITTER_TOKEN || '';
+const ZEKO_MBA_RELAYER_TOKEN = process.env.ZEKO_MBA_RELAYER_TOKEN || '';
 const ZEKO_RELAYER_TIMEOUT_MS = Math.max(
   30_000,
   Number(process.env.ZEKO_RELAYER_TIMEOUT_MS || 6 * 60 * 1000) || 6 * 60 * 1000
 );
 const ZEKO_IS_MAINNET = String(ZEKO_NETWORK_ID).includes('mainnet');
-const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
-const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
+const ZEKO_IS_SEPOLIA = String(ZEKO_NETWORK_ID).includes('sepolia');
+const ZEKO_GRAPHQL = process.env.ZEKO_GRAPHQL || (ZEKO_IS_SEPOLIA ? 'https://sepolia.zeko.io/graphql' : ZEKO_IS_MAINNET ? 'https://mainnet.zeko.io/graphql' : 'https://testnet.zeko.io/graphql');
+const ZEKO_ARCHIVE = process.env.ZEKO_ARCHIVE || (ZEKO_IS_SEPOLIA ? ZEKO_GRAPHQL : ZEKO_IS_MAINNET ? 'https://archive.mainnet.zeko.io/graphql' : ZEKO_GRAPHQL);
 const ZEKO_EXPLORER_TX_BASE = process.env.ZEKO_EXPLORER_TX_BASE ||
-  (String(ZEKO_NETWORK_ID).includes('mainnet') ? 'https://zekoscan.io/mainnet/tx/{tx}?type=zk-tx' : 'https://zekoscan.io/testnet/tx/{tx}?type=zk-tx');
-const TX_FEE = process.env.TX_FEE || '100000000';
+  (ZEKO_IS_SEPOLIA ? 'https://sepolia.zeko.io/v1/explorer/transactions/{tx}' : String(ZEKO_NETWORK_ID).includes('mainnet') ? 'https://zekoscan.io/mainnet/tx/{tx}?type=zk-tx' : 'https://zekoscan.io/testnet/tx/{tx}?type=zk-tx');
+const TX_FEE = process.env.TX_FEE || (ZEKO_IS_SEPOLIA ? '200000' : '100000000');
 const ZEKO_RELAYER_MODE = process.env.ZEKO_RELAYER_MODE || process.env.ZEKO_SUBMITTER_MODE || 'record';
 const ZEKO_RELAYER_PRIVATE_KEY =
   process.env.ZEKO_RELAYER_PRIVATE_KEY ||
@@ -34,6 +42,7 @@ const ZEKO_RELAYER_PRIVATE_KEY =
   '';
 const ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PUBLIC_KEY || '';
 const ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY = process.env.ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY || '';
+const ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY = process.env.ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || process.env.MISSION_REGISTRY_PUBLIC_KEY || '';
 
 function hasInProcessMissionAuthRelayer() {
   return Boolean(
@@ -41,6 +50,14 @@ function hasInProcessMissionAuthRelayer() {
     ZEKO_RELAYER_PRIVATE_KEY &&
     ZEKO_MISSION_AUTH_REGISTRY_PRIVATE_KEY
   );
+}
+
+function hasExternalMbaMissionRegistryRelayer() {
+  return Boolean(ZEKO_RELAYER_MODE === 'mba_mission_registry' && ZEKO_MBA_RELAYER_URL);
+}
+
+function usesMbaMissionRegistryRelayer() {
+  return ZEKO_RELAYER_MODE === 'mba_mission_registry';
 }
 
 function stableHash(value) {
@@ -55,17 +72,96 @@ function makeTimeoutSignal(timeoutMs) {
 }
 
 export function getAnchorConfig() {
+  const mbaRelayerMode = usesMbaMissionRegistryRelayer();
+  const mbaRelayerConfigured = hasExternalMbaMissionRegistryRelayer();
+  const mbaRegistryAddress = ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY || MBA_MISSION_REGISTRY_ADDRESS;
   return {
     mode: ZEKO_SUBMIT_MODE,
     networkId: ZEKO_NETWORK_ID,
+    offchain: ZEKO_SUBMIT_MODE !== 'relay',
+    offchainTargetNetwork: ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK || null,
     o1jsNetworkId: ZEKO_O1JS_NETWORK_ID,
     explorerTxBase: ZEKO_EXPLORER_TX_BASE,
     relayerMode: ZEKO_RELAYER_MODE,
-    relayerConfigured: Boolean(ZEKO_RELAYER_URL),
-    externalRelayerConfigured: Boolean(ZEKO_EXPLICIT_RELAYER_URL),
+    // MBA writes are never routed through the legacy relayer URL. Report
+    // readiness for the active mode only so status cannot imply a usable MBA
+    // relayer when the dedicated service has not been configured.
+    relayerConfigured: mbaRelayerMode ? mbaRelayerConfigured : Boolean(ZEKO_RELAYER_URL),
+    externalRelayerConfigured: mbaRelayerMode ? mbaRelayerConfigured : Boolean(ZEKO_EXPLICIT_RELAYER_URL),
     inProcessRelayerConfigured: hasInProcessMissionAuthRelayer(),
-    submitterConfigured: Boolean(ZEKO_RELAYER_URL || hasInProcessMissionAuthRelayer())
+    mbaMissionRegistry: {
+      mode: 'mba_mission_registry',
+      registryAddress: mbaRegistryAddress || null,
+      externalRelayerConfigured: mbaRelayerConfigured,
+      // The web process never decides MBA readiness from private keys. When
+      // this gate is eventually enabled, the external relayer's authenticated
+      // health/capabilities response must establish operational readiness.
+      readiness: mbaRelayerMode
+        ? (mbaRelayerConfigured ? 'external_relayer_configured' : 'external_relayer_not_configured')
+        : 'not_active',
+      configured: Boolean(mbaRegistryAddress && mbaRelayerConfigured)
+    },
+    submitterConfigured: mbaRelayerMode
+      ? mbaRelayerConfigured
+      : Boolean(ZEKO_RELAYER_URL || hasInProcessMissionAuthRelayer())
   };
+}
+
+function mbaRelayerHealthUrl() {
+  if (!ZEKO_MBA_RELAYER_URL) return null;
+  try {
+    const url = new URL(ZEKO_MBA_RELAYER_URL);
+    url.pathname = '/health';
+    url.search = '';
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export async function getMbaRelayerReadiness() {
+  const config = getAnchorConfig();
+  const expectedRegistryAddress = config.mbaMissionRegistry?.registryAddress || null;
+  const healthUrl = mbaRelayerHealthUrl();
+  if (!usesMbaMissionRegistryRelayer()) {
+    return { ready: false, status: 'not_active', healthUrl: null };
+  }
+  if (!healthUrl || !expectedRegistryAddress) {
+    return { ready: false, status: 'not_configured', healthUrl: null };
+  }
+  const { controller, timeout } = makeTimeoutSignal(2_000);
+  try {
+    const response = await fetch(healthUrl, { signal: controller.signal });
+    const health = await response.json();
+    const capabilities = Array.isArray(health?.mba?.capabilities) ? health.mba.capabilities : [];
+    const ready = Boolean(
+      response.ok
+      && health?.status === 'ok'
+      && health?.service === 'magic-city-mba-relayer'
+      && health?.mode === 'mba_mission_registry'
+      && health?.mba?.ready === true
+      && health?.mba?.registryAddress === expectedRegistryAddress
+      && capabilities.includes('mba_mission_registry')
+      && capabilities.includes('registry_state_sync')
+    );
+    return {
+      ready,
+      status: ready ? 'ready' : 'not_ready',
+      healthUrl,
+      capabilities,
+      chain: health?.mba?.chain || null,
+      mirror: health?.mba?.mirror || null
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      status: 'unreachable',
+      healthUrl,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function zekoExplorerTxUrl(txHash) {
@@ -93,40 +189,11 @@ function fieldFromHashLike(value, Field, Poseidon) {
 const ACCOUNT_CACHE_QUERY = `query Account($pk: PublicKey!) {
   account(publicKey: $pk) {
     publicKey
-    token
     nonce
     balance { total }
-    tokenSymbol
-    receiptChainHash
-    timing {
-      initialMinimumBalance
-      cliffTime
-      cliffAmount
-      vestingPeriod
-      vestingIncrement
-    }
-    permissions {
-      editState
-      access
-      send
-      receive
-      setDelegate
-      setPermissions
-      setVerificationKey { auth txnVersion }
-      setZkappUri
-      editActionState
-      setTokenSymbol
-      incrementNonce
-      setVotingFor
-      setTiming
-    }
-    delegateAccount { publicKey }
-    votingFor
     zkappState
-    verificationKey { verificationKey hash }
-    actionState
+    verificationKey { hash }
     provedState
-    zkappUri
   }
 }`;
 
@@ -296,6 +363,11 @@ export async function submitAnchorPayload(anchorPayload) {
   const payloadHash = `0x${stableHash(anchorPayload)}`;
 
   if (ZEKO_SUBMIT_MODE === 'relay') {
+    if (ZEKO_RELAYER_MODE === 'mba_mission_registry' && !hasExternalMbaMissionRegistryRelayer()) {
+      const err = new Error('mba_external_relayer_not_configured');
+      err.statusCode = 503;
+      throw err;
+    }
     if (!ZEKO_EXPLICIT_RELAYER_URL && hasInProcessMissionAuthRelayer()) {
       const direct = await submitInProcessMissionAuthAnchor(anchorPayload, payloadHash);
       return {
@@ -311,7 +383,13 @@ export async function submitAnchorPayload(anchorPayload) {
       };
     }
 
-    if (!ZEKO_RELAYER_URL) {
+    const relayerUrl = ZEKO_RELAYER_MODE === 'mba_mission_registry'
+      ? ZEKO_MBA_RELAYER_URL
+      : ZEKO_RELAYER_URL;
+    const relayerToken = ZEKO_RELAYER_MODE === 'mba_mission_registry'
+      ? ZEKO_MBA_RELAYER_TOKEN
+      : ZEKO_RELAYER_TOKEN;
+    if (!relayerUrl) {
       const err = new Error('zeko_relayer_not_configured');
       err.statusCode = 503;
       throw err;
@@ -320,12 +398,12 @@ export async function submitAnchorPayload(anchorPayload) {
     const { controller, timeout } = makeTimeoutSignal(ZEKO_RELAYER_TIMEOUT_MS);
     let response;
     try {
-      response = await fetch(ZEKO_RELAYER_URL, {
+      response = await fetch(relayerUrl, {
         method: 'POST',
         signal: controller.signal,
         headers: {
           'content-type': 'application/json',
-          ...(ZEKO_RELAYER_TOKEN ? { authorization: `Bearer ${ZEKO_RELAYER_TOKEN}` } : {})
+          ...(relayerToken ? { authorization: `Bearer ${relayerToken}` } : {})
         },
         body: JSON.stringify({
           networkId: ZEKO_NETWORK_ID,
@@ -337,7 +415,7 @@ export async function submitAnchorPayload(anchorPayload) {
         ? `zeko_relayer_timeout:${ZEKO_RELAYER_TIMEOUT_MS}`
         : `zeko_relayer_fetch_failed:${error instanceof Error ? error.message : String(error)}`);
       err.statusCode = error?.name === 'AbortError' ? 504 : 502;
-      err.details = { relayerUrl: ZEKO_RELAYER_URL, timeoutMs: ZEKO_RELAYER_TIMEOUT_MS };
+      err.details = { relayerUrl, timeoutMs: ZEKO_RELAYER_TIMEOUT_MS };
       throw err;
     } finally {
       clearTimeout(timeout);
@@ -358,19 +436,27 @@ export async function submitAnchorPayload(anchorPayload) {
       throw err;
     }
 
+    const mbaRegistry = ZEKO_RELAYER_MODE === 'mba_mission_registry'
+      ? (parsed?.result?.mode === 'mba_mission_registry' ? parsed.result : null)
+      : null;
+
     return {
       mode: 'relay',
       status: parsed?.status || 'submitted',
       payloadHash,
       relayer: {
-        url: ZEKO_RELAYER_URL,
+        url: relayerUrl,
         response: parsed
       },
       relay: {
-        url: ZEKO_RELAYER_URL,
+        url: relayerUrl,
         response: parsed
       },
       txHash: parsed?.txHash ?? null,
+      registryAddress: mbaRegistry?.registryAddress ?? null,
+      previousRegistryRoot: mbaRegistry?.previousRegistryRoot ?? null,
+      registryRoot: mbaRegistry?.registryRoot ?? null,
+      registrySequence: mbaRegistry?.sequence ?? null,
       networkId: ZEKO_NETWORK_ID
     };
   }

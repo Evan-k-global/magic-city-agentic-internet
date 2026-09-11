@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import pg from 'pg';
 import { CREDIT_SCALE, toUnits } from './units.js';
 import { buildPostgresPoolOptions } from './postgresConfig.js';
@@ -23,6 +24,10 @@ const MAX_CONNECTOR_ACTIVITY_ROWS = Math.max(
   100,
   Math.min(Number(process.env.MAGIC_CITY_MAX_CONNECTOR_ACTIVITY_ROWS || 1000) || 1000, 10000)
 );
+const POSTGRES_PERSIST_TIMING_LOG_MS = Math.max(
+  100,
+  Number(process.env.MAGIC_CITY_POSTGRES_PERSIST_TIMING_LOG_MS || 1000) || 1000
+);
 
 const defaultState = () => ({
   agents: {},
@@ -36,6 +41,7 @@ const defaultState = () => ({
   santaclawzPreflightSnapshots: [],
   santaclawzRuntimeHealth: [],
   anchorSubmissions: [],
+  mbaMissionRegistryStates: {},
   settlementRegistry: [],
   balances: {},
   stakes: {},
@@ -99,6 +105,7 @@ function withDefaults(raw = {}) {
   raw.santaclawzPreflightSnapshots = raw.santaclawzPreflightSnapshots ?? [];
   raw.santaclawzRuntimeHealth = raw.santaclawzRuntimeHealth ?? [];
   raw.anchorSubmissions = raw.anchorSubmissions ?? [];
+  raw.mbaMissionRegistryStates = raw.mbaMissionRegistryStates ?? {};
   raw.settlementRegistry = raw.settlementRegistry ?? [];
   raw.balances = raw.balances ?? {};
   raw.stakes = raw.stakes ?? {};
@@ -327,13 +334,17 @@ function stateEncryptionStatus() {
 
 function serializePostgresState(snapshot = JSON.stringify(state)) {
   if (!stateEncryptionKey) return snapshot;
+  const compressed = zlib.gzipSync(Buffer.from(snapshot, 'utf8'), {
+    level: zlib.constants.Z_BEST_SPEED
+  });
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', stateEncryptionKey, iv);
-  const ciphertext = Buffer.concat([cipher.update(snapshot, 'utf8'), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(compressed), cipher.final()]);
   const tag = cipher.getAuthTag();
   return JSON.stringify({
-    schema: 'magic-city-encrypted-state-v1',
+    schema: 'magic-city-encrypted-state-v2',
     alg: 'aes-256-gcm',
+    compression: 'gzip',
     keyId: stateEncryptionStatus().keyId,
     iv: iv.toString('base64'),
     tag: tag.toString('base64'),
@@ -342,7 +353,9 @@ function serializePostgresState(snapshot = JSON.stringify(state)) {
 }
 
 function hydratePostgresState(value) {
-  if (!value || typeof value !== 'object' || value.schema !== 'magic-city-encrypted-state-v1') {
+  const encryptedSchema = value?.schema === 'magic-city-encrypted-state-v1'
+    || value?.schema === 'magic-city-encrypted-state-v2';
+  if (!value || typeof value !== 'object' || !encryptedSchema) {
     if (REQUIRE_STATE_ENCRYPTION && value) {
       throw new Error('unencrypted_postgres_state_not_allowed');
     }
@@ -353,10 +366,16 @@ function hydratePostgresState(value) {
   try {
     const decipher = crypto.createDecipheriv('aes-256-gcm', stateEncryptionKey, Buffer.from(value.iv, 'base64'));
     decipher.setAuthTag(Buffer.from(value.tag, 'base64'));
-    const plaintext = Buffer.concat([
+    const decrypted = Buffer.concat([
       decipher.update(Buffer.from(value.ciphertext, 'base64')),
       decipher.final()
-    ]).toString('utf8');
+    ]);
+    const plaintext = value.schema === 'magic-city-encrypted-state-v2'
+      ? (() => {
+          if (value.compression !== 'gzip') throw new Error('unsupported_magic_city_state_compression');
+          return zlib.gunzipSync(decrypted).toString('utf8');
+        })()
+      : decrypted.toString('utf8');
     return withDefaults(JSON.parse(plaintext));
   } catch (error) {
     throw new Error(`postgres_state_decryption_failed:${error instanceof Error ? error.message : String(error)}`);
@@ -393,6 +412,11 @@ let postgresWriterLockClient = null;
 let postgresWriterLockAcquirePromise = null;
 let postgresPersistDirty = false;
 let postgresPersistScheduled = false;
+// Revisions let each response wait for its own captured snapshot boundary.
+let postgresPersistRequestedRevision = 0;
+let postgresPersistCommittedRevision = 0;
+let postgresPersistFailure = null;
+let postgresPersistWaiters = [];
 let filePersistTimer = null;
 let filePersistDirty = false;
 let filePersistLastError = null;
@@ -556,8 +580,11 @@ if (pool) {
 }
 
 async function writePostgresSnapshot(snapshot = JSON.stringify(state)) {
+  const startedAt = Date.now();
   await ensurePostgresWriterLock();
+  const serializeStartedAt = Date.now();
   const storedSnapshot = serializePostgresState(snapshot);
+  const serializedAt = Date.now();
   await pool.query(
     `
       insert into app_state (state_key, state_json, updated_at)
@@ -567,29 +594,77 @@ async function writePostgresSnapshot(snapshot = JSON.stringify(state)) {
     `,
     [STATE_ROW_KEY, storedSnapshot]
   );
+  const completedAt = Date.now();
+  persistence.lastWriteMetrics = {
+    plaintextBytes: Buffer.byteLength(snapshot),
+    storedBytes: Buffer.byteLength(storedSnapshot),
+    lockWaitMs: serializeStartedAt - startedAt,
+    serializeEncryptMs: serializedAt - serializeStartedAt,
+    databaseWriteMs: completedAt - serializedAt,
+    totalMs: completedAt - startedAt
+  };
+  if (persistence.lastWriteMetrics.totalMs >= POSTGRES_PERSIST_TIMING_LOG_MS) {
+    console.info('[agent-verification] postgres_persist_timing', JSON.stringify(persistence.lastWriteMetrics));
+  }
   markPostgresWriteSuccess();
+}
+
+function settlePostgresPersistWaiters() {
+  const pending = [];
+  for (const waiter of postgresPersistWaiters) {
+    if (waiter.revision <= postgresPersistCommittedRevision) {
+      waiter.resolve();
+    } else if (postgresPersistFailure && waiter.revision <= postgresPersistFailure.revision) {
+      waiter.reject(postgresPersistFailure.error);
+    } else {
+      pending.push(waiter);
+    }
+  }
+  postgresPersistWaiters = pending;
+}
+
+function waitForPostgresRevision(revision) {
+  if (revision <= postgresPersistCommittedRevision) return Promise.resolve();
+  if (postgresPersistFailure && revision <= postgresPersistFailure.revision) {
+    return Promise.reject(postgresPersistFailure.error);
+  }
+  return new Promise((resolve, reject) => {
+    postgresPersistWaiters.push({ revision, resolve, reject });
+  });
+}
+
+function schedulePostgresPersist() {
+  if (postgresPersistScheduled || !postgresPersistDirty) return;
+  postgresPersistScheduled = true;
+  persistQueue = persistQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const snapshotRevision = postgresPersistRequestedRevision;
+      const snapshot = JSON.stringify(state);
+      postgresPersistDirty = false;
+      try {
+        await writePostgresSnapshot(snapshot);
+        postgresPersistCommittedRevision = Math.max(postgresPersistCommittedRevision, snapshotRevision);
+        if (postgresPersistFailure?.revision <= postgresPersistCommittedRevision) {
+          postgresPersistFailure = null;
+        }
+      } catch (error) {
+        markPostgresWriteFailure(error);
+        postgresPersistFailure = { revision: snapshotRevision, error };
+      }
+      settlePostgresPersistWaiters();
+    })
+    .finally(() => {
+      postgresPersistScheduled = false;
+      if (postgresPersistDirty) schedulePostgresPersist();
+    });
 }
 
 function persistState() {
   if (pool && persistence.driver === 'postgres') {
+    postgresPersistRequestedRevision += 1;
     postgresPersistDirty = true;
-    if (postgresPersistScheduled) return;
-    postgresPersistScheduled = true;
-    persistQueue = persistQueue
-      .catch(() => undefined)
-      .then(async () => {
-        while (postgresPersistDirty) {
-          postgresPersistDirty = false;
-          await writePostgresSnapshot();
-        }
-      })
-      .catch((error) => {
-        markPostgresWriteFailure(error);
-      })
-      .finally(() => {
-        postgresPersistScheduled = false;
-        if (postgresPersistDirty) persistState();
-      });
+    schedulePostgresPersist();
     return;
   }
 
@@ -758,6 +833,12 @@ export function getPersistenceStatus() {
 }
 
 export async function flushPersistence() {
+  if (persistence.driver === 'postgres') {
+    const requiredRevision = postgresPersistRequestedRevision;
+    if (postgresPersistDirty) schedulePostgresPersist();
+    await waitForPostgresRevision(requiredRevision);
+    return getPersistenceStatus();
+  }
   if (ASYNC_FILE_PERSIST && filePersistDirty) {
     if (filePersistTimer) {
       clearTimeout(filePersistTimer);
@@ -766,9 +847,6 @@ export async function flushPersistence() {
     flushFilePersistAsync();
   }
   await persistQueue;
-  if (persistence.driver === 'postgres' && !persistence.healthy) {
-    throw new Error(`postgres_persistence_unhealthy:${persistence.lastWriteError || 'unknown'}`);
-  }
   return getPersistenceStatus();
 }
 
@@ -871,6 +949,34 @@ export function createAnchorSubmission(submission) {
   state.anchorSubmissions.push(row);
   persistState();
   return row;
+}
+
+// This mirror contains only public Merkle keys, roots, and transaction state.
+// It lets the single Magic City writer resume a submitted MBA registry anchor
+// without guessing whether a prior transaction landed on Zeko.
+export function getMbaMissionRegistryState(registryAddress) {
+  const key = String(registryAddress || '').trim();
+  if (!key) return null;
+  return state.mbaMissionRegistryStates[key] ?? null;
+}
+
+export function upsertMbaMissionRegistryState(registryAddress, patch = {}) {
+  const key = String(registryAddress || '').trim();
+  if (!key) throw new Error('mba_mission_registry_address_required');
+  const now = new Date().toISOString();
+  const current = state.mbaMissionRegistryStates[key] ?? {
+    registryAddress: key,
+    createdAt: now
+  };
+  const next = {
+    ...current,
+    ...patch,
+    registryAddress: key,
+    updatedAt: now
+  };
+  state.mbaMissionRegistryStates[key] = next;
+  persistState();
+  return next;
 }
 
 export function createSettlementRegistryEntry(entry) {
@@ -1237,6 +1343,17 @@ export function updateNativeRunnerDevice(id, patch = {}) {
   return state.nativeRunnerDevices[idx];
 }
 
+export function updateNativeRunnerDeviceEphemeral(id, patch = {}) {
+  const idx = state.nativeRunnerDevices.findIndex((row) => row.id === id);
+  if (idx < 0) return null;
+  state.nativeRunnerDevices[idx] = {
+    ...state.nativeRunnerDevices[idx],
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  return state.nativeRunnerDevices[idx];
+}
+
 export function listNativeRunnerDevices(limit = 100) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
   return state.nativeRunnerDevices.slice(-safeLimit).reverse();
@@ -1364,6 +1481,7 @@ export function recordSantaClawzRuntimeRejection({
     && existing.sourceSessionId === normalizedSourceSessionId
     && existing.reasonCode === String(reasonCode || 'return_schema_rejected').slice(0, 120)
   );
+  if (sameIncident) return existing;
   const row = {
     ...(existing || {}),
     schemaVersion: 'magic-city-santaclawz-runtime-health-v1',
@@ -1395,6 +1513,9 @@ export function clearSantaClawzRuntimeRejection(agentId, { reason = 'accepted_re
   if (!normalizedAgentId) return null;
   const existingIndex = state.santaclawzRuntimeHealth.findIndex((row) => row.agentId === normalizedAgentId);
   if (existingIndex < 0) return null;
+  if (state.santaclawzRuntimeHealth[existingIndex]?.status === 'healthy') {
+    return state.santaclawzRuntimeHealth[existingIndex];
+  }
   const now = new Date().toISOString();
   const row = {
     ...state.santaclawzRuntimeHealth[existingIndex],

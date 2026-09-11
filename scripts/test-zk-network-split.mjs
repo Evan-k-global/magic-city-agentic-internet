@@ -5,23 +5,65 @@ import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-process.env.ZEKO_NETWORK_ID = 'zeko:testnet';
+process.env.ZEKO_NETWORK_ID = 'zeko:sepolia';
+process.env.ZEKO_SUBMIT_MODE = 'record';
+delete process.env.ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK;
 delete process.env.MAGIC_CITY_MISSION_PROOF_NETWORK_ID;
 delete process.env.ZEKO_GRAPHQL;
 delete process.env.ZEKO_ARCHIVE;
 delete process.env.ZEKO_EXPLORER_TX_BASE;
 
-const { getAnchorConfig } = await import('../src/zekoAnchor.js');
+const { getAnchorConfig, submitAnchorPayload } = await import('../src/zekoAnchor.js');
 const { buildMbaDiscoveryDocument, buildMbaRegistryAnchor } = await import('../src/agentMissionBoundAuth.js');
 
 const anchorConfig = getAnchorConfig();
-assert.equal(anchorConfig.networkId, 'zeko:testnet');
+assert.equal(anchorConfig.networkId, 'zeko:sepolia');
 assert.equal(anchorConfig.o1jsNetworkId, 'testnet');
-assert.match(anchorConfig.explorerTxBase, /zekoscan\.io\/testnet/);
+assert.match(anchorConfig.explorerTxBase, /sepolia\.zeko\.io\/v1\/explorer\/transactions/);
+assert.equal(anchorConfig.offchain, true);
+assert.equal(anchorConfig.offchainTargetNetwork, null);
+
+const offchainSubmission = await submitAnchorPayload({ statementHash: '0x01', network: 'offchain' });
+assert.equal(offchainSubmission.mode, 'record');
+assert.equal(offchainSubmission.status, 'prepared');
+assert.equal(offchainSubmission.txHash, null);
+
+// MBA registry writes must never fall back to an o1js path in the web process.
+// A separately deployed relayer is required before relay mode can be enabled.
+process.env.ZEKO_SUBMIT_MODE = 'relay';
+process.env.ZEKO_RELAYER_MODE = 'mba_mission_registry';
+// This reproduces the stale production configuration: the legacy relayer is
+// present, but MBA anchoring has no separately deployed relayer.
+process.env.ZEKO_RELAYER_URL = 'http://127.0.0.1:4412/submit';
+delete process.env.ZEKO_MBA_RELAYER_URL;
+const { getAnchorConfig: getMbaAnchorConfig, submitAnchorPayload: submitMbaAnchor } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-relayer-boundary=${Date.now()}`);
+const mbaAnchorConfig = getMbaAnchorConfig();
+assert.equal(mbaAnchorConfig.relayerConfigured, false);
+assert.equal(mbaAnchorConfig.externalRelayerConfigured, false);
+assert.equal(mbaAnchorConfig.submitterConfigured, false);
+assert.equal(mbaAnchorConfig.mbaMissionRegistry.externalRelayerConfigured, false);
+assert.equal(mbaAnchorConfig.mbaMissionRegistry.configured, false);
+assert.equal(mbaAnchorConfig.mbaMissionRegistry.readiness, 'external_relayer_not_configured');
+await assert.rejects(
+  () => submitMbaAnchor({ statementHash: '0x01', network: 'zeko:sepolia' }),
+  /mba_external_relayer_not_configured/
+);
+
+// MBA configuration is endpoint-based. Web-process private keys must not be
+// required or surfaced to decide that a dedicated relayer is configured.
+process.env.ZEKO_MBA_RELAYER_URL = 'https://mba-relayer.example.test/submit';
+const { getAnchorConfig: getExternalMbaAnchorConfig } = await import(`${new URL('../src/zekoAnchor.js', import.meta.url).href}?mba-external-readiness=${Date.now()}`);
+const externalMbaAnchorConfig = getExternalMbaAnchorConfig();
+assert.equal(externalMbaAnchorConfig.relayerConfigured, true);
+assert.equal(externalMbaAnchorConfig.externalRelayerConfigured, true);
+assert.equal(externalMbaAnchorConfig.submitterConfigured, true);
+assert.equal(externalMbaAnchorConfig.mbaMissionRegistry.externalRelayerConfigured, true);
+assert.equal(externalMbaAnchorConfig.mbaMissionRegistry.configured, true);
+assert.equal(externalMbaAnchorConfig.mbaMissionRegistry.readiness, 'external_relayer_configured');
 
 const discovery = buildMbaDiscoveryDocument({ baseUrl: 'https://magic-city-staging.fly.dev' });
 assert.deepEqual(discovery.capabilities.anchoring, [
-  'zeko:testnet',
+  'zeko:sepolia',
   'mission-auth-registry-zkapp',
   'receipt-root-anchor'
 ]);
@@ -33,15 +75,17 @@ const registryAnchor = buildMbaRegistryAnchor({
   receiptIdHash: '0x04',
   nullifier: '0x05'
 });
-assert.equal(registryAnchor.networkId, 'zeko:testnet');
+assert.equal(registryAnchor.networkId, 'zeko:sepolia');
 
 const envExample = fs.readFileSync(path.join(rootDir, '.env.example'), 'utf8');
-assert.match(envExample, /^MAGIC_CITY_MISSION_PROOF_NETWORK_ID=zeko:testnet$/m);
+assert.match(envExample, /^MAGIC_CITY_MISSION_PROOF_NETWORK_ID=zeko:sepolia$/m);
 assert.match(envExample, /^SANTACLAWZ_PROOF_NETWORK=zeko:testnet$/m);
 
 const flyToml = fs.readFileSync(path.join(rootDir, 'fly.toml'), 'utf8');
-assert.match(flyToml, /MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:testnet"/);
+assert.match(flyToml, /MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:sepolia"/);
 assert.match(flyToml, /SANTACLAWZ_PROOF_NETWORK = "zeko:testnet"/);
+assert.match(flyToml, /ZEKO_SUBMIT_MODE = "relay"/);
+assert.doesNotMatch(flyToml, /ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = "zeko:sepolia"/);
 
 const serverSource = fs.readFileSync(path.join(rootDir, 'src', 'server.js'), 'utf8');
 assert.match(serverSource, /Boolean\(String\(process\.env\.ZEKO_PROOF_WORKER_URL/);
