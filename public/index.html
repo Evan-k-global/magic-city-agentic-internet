@@ -4207,7 +4207,7 @@
 
 	    .wallet-topup-row {
 	      display: grid;
-	      grid-template-columns: minmax(78px, 0.72fr) minmax(132px, 1fr);
+	      grid-template-columns: minmax(0, 1fr);
 	      gap: 8px;
 	      align-items: stretch;
 	      margin-top: 10px;
@@ -4267,24 +4267,6 @@
 	        rgba(4, 8, 16, 0.82);
 	      border-color: rgba(109, 230, 255, 0.24);
 	      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-	    }
-
-	    .wallet-topup-field > .wallet-payment-pill {
-	      min-height: 42px;
-	      display: flex;
-	      align-items: center;
-	      padding: 8px 12px;
-	      border: 1px solid rgba(109, 230, 255, 0.24);
-	      border-radius: 14px;
-	      color: rgba(244, 250, 255, 0.95);
-	      background:
-	        linear-gradient(135deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.028)),
-	        rgba(4, 8, 16, 0.82);
-	      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-	      font-size: 13px;
-	      font-weight: 700;
-	      line-height: 1.1;
-	      text-transform: none;
 	    }
 
 	    .wallet-topup-row #controlsTopupBtn {
@@ -4412,7 +4394,7 @@
 
 	    @media (max-width: 520px) {
 	      .wallet-topup-row {
-	        grid-template-columns: minmax(74px, 0.72fr) minmax(118px, 1fr);
+	        grid-template-columns: minmax(0, 1fr);
 	      }
 	      .wallet-compact-row {
 	        align-items: stretch;
@@ -5584,31 +5566,27 @@
               <span>Credits</span>
               <input id="controlsTopupCreditsInput" type="number" min="50" step="50" value="2500" aria-label="Credits to add" />
             </label>
-            <div class="wallet-topup-field wallet-topup-payment">
-              <span class="wallet-payment-pill">Pay with Stripe</span>
-              <input id="controlsFundingRail" type="hidden" value="stripe" />
-            </div>
-            <button class="action action-soft" id="controlsTopupBtn">Add credits</button>
+            <input id="controlsFundingRail" type="hidden" value="stripe" />
+            <button class="action action-soft" id="controlsTopupBtn">Add credits with Stripe</button>
           </div>
-          <div id="controlsTopupHint" class="wallet-policy-line">Choose credits and payment method.</div>
+          <div id="controlsTopupHint" class="wallet-policy-line">Choose how many credits to add.</div>
           <div id="controlsCreditsMsg" class="muted"></div>
           <div id="stripeTopupSuccess" class="wallet-success-note" hidden></div>
+          <div id="stripeTopupHistory" class="wallet-topup-history" hidden></div>
           <input id="santaclawzPaymentPreference" type="hidden" value="credits" />
-          <div class="wallet-compact-row" hidden>
-            <div>
-              <div class="wallet-compact-label">Wallet</div>
-              <div id="evmWalletStatus" class="muted">Checking wallet…</div>
+          <div hidden data-dormant-payment-controls>
+            <div class="wallet-compact-row" hidden>
+              <div>
+                <div class="wallet-compact-label">Wallet</div>
+                <div id="evmWalletStatus" class="muted">Checking wallet…</div>
+              </div>
+              <div class="wallet-inline-actions">
+                <button type="button" class="action action-provider" id="evmWalletConnectBtn">Link Base</button>
+                <button type="button" class="action action-soft" id="evmWalletDisconnectBtn" hidden>Disconnect</button>
+              </div>
             </div>
-            <div class="wallet-inline-actions">
-              <button type="button" class="action action-provider" id="evmWalletConnectBtn">Link Base</button>
-              <button type="button" class="action action-soft" id="evmWalletDisconnectBtn" hidden>Disconnect</button>
-            </div>
-          </div>
-          <div id="evmTopupSummary" class="muted" hidden></div>
-          <div id="controlsAlphaSummary" class="muted" hidden></div>
-
-          <details class="settings-subdetails wallet-advanced-details">
-            <summary>Advanced</summary>
+            <div id="evmTopupSummary" class="muted" hidden></div>
+            <div id="controlsAlphaSummary" class="muted" hidden></div>
             <div class="wallet-model-note" id="creditUsdRateLine"><strong>1 credit = $0.01.</strong></div>
             <div class="wallet-fx-converter" aria-label="Local currency credit estimator">
               <div class="wallet-fx-title">Local buying power</div>
@@ -5626,7 +5604,6 @@
               </div>
               <div id="fxQuoteResult" class="wallet-policy-line wallet-fx-result">Credits are USD-backed. Local estimates include a 2% FX buffer.</div>
             </div>
-            <div id="stripeTopupHistory" class="wallet-topup-history" hidden></div>
             <div class="wallet-runtime-panel" hidden>
               <div id="evmWalletRuntimeSummary" class="wallet-runtime-summary">Wallet payments and receipts appear here.</div>
               <div class="settings-badges" id="evmWalletRuntimeBadges"></div>
@@ -5656,7 +5633,7 @@
               <div id="evmWalletConfigStatus" class="muted"></div>
               <div class="connector-activity-list" id="evmWalletActivity"></div>
             </div>
-          </details>
+          </div>
         </div>
       </details>
 
@@ -10217,7 +10194,7 @@
 	      }
 	      button.hidden = false;
 	      button.classList.toggle('wallet-stripe-primary', fundingRail === 'stripe');
-	      button.textContent = 'Add credits';
+	      button.textContent = 'Add credits with Stripe';
 	      if (!authSessionUser) {
 	        button.disabled = true;
 	        hint.textContent = 'Sign in to add credits.';
