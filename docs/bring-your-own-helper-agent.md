@@ -69,10 +69,13 @@ The rule is simple:
    }
    ```
 
-6. The helper polls for sessions with its bearer token.
+6. The user explicitly starts execution. Magic City creates a short-lived,
+   device-scoped `extensionRunDispatch` authorization on that session.
 
-7. For each session, it claims with a runtime holder public key, then executes
-   only the server-issued `magic-city-browser-plan-v1`.
+7. The helper polls for sessions with its bearer token. For each dispatched
+   session, it claims with the returned `extensionRunDispatch.nonce` and a
+   runtime holder public key, then executes only the server-issued
+   `magic-city-browser-plan-v1`.
 
 8. Each meaningful boundary emits:
 
@@ -166,6 +169,7 @@ Before shipping a custom helper:
 
 - Pairing token is scoped to the helper's own `pluginId`.
 - Helper cannot register or claim as Magic City's default runner.
+- Helper cannot claim without the current nonce issued for that paired device.
 - All actions map to the server-issued plan hash and ordered action ID.
 - Every checkpoint has a valid holder signature.
 - No private fields or raw HTML leave the browser.
