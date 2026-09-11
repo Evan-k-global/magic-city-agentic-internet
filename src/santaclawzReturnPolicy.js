@@ -192,16 +192,125 @@ export function validateSantaClawzCompletedReturn(payload = {}, {
   };
 }
 
+function validateSantaClawzDirectOutputProjection(payload = {}, {
+  expectedRequestId = '',
+  expectedInputDigestSha256 = ''
+} = {}) {
+  const executionState = isRecord(payload?.executionState) ? payload.executionState : null;
+  const verifiedOutput = isRecord(executionState?.delivery?.protocolVerifiedOutput)
+    ? executionState.delivery.protocolVerifiedOutput
+    : null;
+  if (!executionState || !verifiedOutput) return { ok: false, reason: 'santaclawz_return_missing' };
+
+  const requestId = String(executionState.requestId || executionState.ids?.executionRequestId || '').trim();
+  if (!requestId || (expectedRequestId && requestId !== String(expectedRequestId).trim())) {
+    return { ok: false, reason: 'santaclawz_return_request_mismatch' };
+  }
+  if (executionState.stateAccess?.mode !== 'payment_digest_recovery') {
+    return { ok: false, reason: 'santaclawz_direct_output_auth_invalid' };
+  }
+  if (
+    String(executionState.currentPhase || '').toLowerCase() !== 'return_verified'
+    || String(executionState.lifecycle?.proofStatus || '').toLowerCase() !== 'return_validated'
+  ) {
+    return { ok: false, reason: 'santaclawz_return_not_completed' };
+  }
+
+  const packageHash = String(verifiedOutput.packageHash || '').trim().toLowerCase();
+  const inputDigestSha256 = String(verifiedOutput.inputDigestSha256 || '').trim().toLowerCase();
+  const outputBundleDigestSha256 = String(verifiedOutput.buyerOutputBundleDigestSha256 || '').trim().toLowerCase();
+  if (!SHA256_HEX.test(packageHash) || verifiedOutput.packageHashVerified !== true) {
+    return { ok: false, reason: 'santaclawz_package_hash_unverifiable' };
+  }
+  if (!SHA256_HEX.test(inputDigestSha256)) {
+    return { ok: false, reason: 'santaclawz_verification_manifest_invalid' };
+  }
+  if (
+    expectedInputDigestSha256
+    && inputDigestSha256 !== String(expectedInputDigestSha256).trim().toLowerCase()
+  ) {
+    return { ok: false, reason: 'santaclawz_return_input_mismatch' };
+  }
+  if (!SHA256_HEX.test(outputBundleDigestSha256)) {
+    return { ok: false, reason: 'santaclawz_output_bundle_hash_invalid' };
+  }
+
+  const outputs = Array.isArray(verifiedOutput.buyerVisibleOutputs)
+    ? verifiedOutput.buyerVisibleOutputs
+    : [];
+  const verifiedInlineOutputs = [];
+  const outputHashes = {};
+  for (const entry of outputs) {
+    if (!isRecord(entry)) return { ok: false, reason: 'santaclawz_inline_output_invalid' };
+    const name = String(entry.name || '').trim();
+    const text = typeof entry.text === 'string' ? entry.text : '';
+    const declaredHash = String(entry.sha256 || '').trim().toLowerCase();
+    if (!name || !text || !SHA256_HEX.test(declaredHash) || outputHashes[name]) {
+      return { ok: false, reason: 'santaclawz_inline_output_hash_missing' };
+    }
+    const actualHash = sha256Hex(Buffer.from(text, 'utf8'));
+    if (actualHash !== declaredHash) {
+      return { ok: false, reason: 'santaclawz_inline_output_hash_mismatch' };
+    }
+    if (/\.json$/i.test(name)) {
+      try {
+        JSON.parse(text);
+      } catch {
+        return { ok: false, reason: 'santaclawz_inline_json_invalid' };
+      }
+    }
+    outputHashes[name] = actualHash;
+    verifiedInlineOutputs.push({ name, sha256: actualHash, bytes: Buffer.byteLength(text, 'utf8') });
+  }
+  if (!verifiedInlineOutputs.some((entry) => /\.md$/i.test(entry.name))
+    || !verifiedInlineOutputs.some((entry) => /\.json$/i.test(entry.name))) {
+    return { ok: false, reason: 'santaclawz_buyer_delivery_missing' };
+  }
+  const normalizedHashes = Object.fromEntries(
+    Object.entries(outputHashes).sort(([left], [right]) => left.localeCompare(right))
+  );
+  if (sha256Hex(Buffer.from(JSON.stringify(normalizedHashes), 'utf8')) !== outputBundleDigestSha256) {
+    return { ok: false, reason: 'santaclawz_output_bundle_hash_mismatch' };
+  }
+
+  return {
+    ok: true,
+    mode: 'authenticated_direct_output',
+    requestId,
+    packageHash,
+    packageHashVerified: true,
+    verifiedOutput,
+    buyerVisibleOutputs: outputs,
+    verifiedInlineOutputs,
+    deliverables: outputs.map((entry) => ({
+      name: String(entry.name).trim(),
+      sha256: String(entry.sha256).trim().toLowerCase()
+    }))
+  };
+}
+
 export async function verifySantaClawzCompletedReturn(payload = {}, {
   expectedRequestId = '',
   expectedInputDigestSha256 = '',
   resolveArtifactBytes = null
 } = {}) {
-  const validation = validateSantaClawzCompletedReturn(payload, {
+  let validation = validateSantaClawzCompletedReturn(payload, {
     expectedRequestId,
     expectedInputDigestSha256
   });
+  if (!validation.ok && validation.reason === 'santaclawz_return_missing') {
+    validation = validateSantaClawzDirectOutputProjection(payload, {
+      expectedRequestId,
+      expectedInputDigestSha256
+    });
+  }
   if (!validation.ok) return validation;
+  if (validation.mode === 'authenticated_direct_output') {
+    return {
+      ...validation,
+      verifiedDeliverableCount: validation.verifiedInlineOutputs.length
+    };
+  }
   const manifestRequestId = String(validation.verifiedOutput.verification_manifest?.request_id || '').trim();
   if (!manifestRequestId || manifestRequestId !== validation.requestId) {
     return { ...validation, ok: false, reason: 'santaclawz_manifest_request_mismatch' };

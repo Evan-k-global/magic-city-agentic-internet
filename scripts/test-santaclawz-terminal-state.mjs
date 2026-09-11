@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { validateSantaClawzCompletedReturn } from '../src/santaclawzReturnPolicy.js';
+import {
+  validateSantaClawzCompletedReturn,
+  verifySantaClawzCompletedReturn
+} from '../src/santaclawzReturnPolicy.js';
 
 const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
 const start = server.indexOf('function summarizeSantaClawzPaidExecution(');
@@ -128,6 +131,92 @@ const completed = summarize(true, {
 }, { expectedRequestId: 'hire_terminal_complete' });
 assert.equal(completed.completed, true);
 assert.equal(completed.returnValidation.ok, true);
+
+const directMarkdown = '# Audit summary\n\nComplete.\n';
+const directJson = `${JSON.stringify({ findings: Array.from({ length: 700 }, (_, index) => ({ id: index, detail: 'verified finding' })) })}\n`;
+assert.ok(directJson.length > 8000);
+const directOutputs = [
+  { name: 'code-audit-summary.md', contentType: 'text/markdown', text: directMarkdown },
+  { name: 'code-audit-result.json', contentType: 'application/json', text: directJson }
+].map((entry) => ({
+  ...entry,
+  sha256: crypto.createHash('sha256').update(entry.text).digest('hex')
+}));
+const directOutputHashes = Object.fromEntries(
+  directOutputs.map((entry) => [entry.name, entry.sha256]).sort(([left], [right]) => left.localeCompare(right))
+);
+const directOutputBundleDigestSha256 = crypto.createHash('sha256')
+  .update(JSON.stringify(directOutputHashes))
+  .digest('hex');
+const directPayload = {
+  executionState: {
+    requestId: 'hire_direct_complete',
+    stateAccess: { mode: 'payment_digest_recovery' },
+    currentPhase: 'return_verified',
+    protocolState: 'DELIVERED_SETTLED',
+    lifecycle: { proofStatus: 'return_validated' },
+    delivery: {
+      protocolVerifiedOutput: {
+        packageHash: 'c'.repeat(64),
+        inputDigestSha256: 'd'.repeat(64),
+        packageHashVerified: true,
+        buyerOutputBundleDigestSha256: directOutputBundleDigestSha256,
+        buyerVisibleOutputs: directOutputs
+      }
+    }
+  }
+};
+const directVerified = await verifySantaClawzCompletedReturn(directPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(directVerified.ok, true);
+assert.equal(directVerified.mode, 'authenticated_direct_output');
+assert.equal(directVerified.verifiedDeliverableCount, 2);
+assert.equal(JSON.parse(directOutputs[1].text).findings.length, 700);
+const directCompleted = summarize(true, {
+  ...directPayload,
+  paymentStatus: 'settled',
+  settlementStatus: 'settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: {
+    protocolState: 'DELIVERED_SETTLED',
+    paymentFinality: 'settled',
+    terminal: true,
+    sellerOutcome: 'completed'
+  }
+}, {
+  expectedRequestId: 'hire_direct_complete',
+  verifiedReturn: directVerified
+});
+assert.equal(directCompleted.completed, true);
+assert.equal(directCompleted.returnValidation.ok, true);
+
+const truncatedDirectPayload = structuredClone(directPayload);
+truncatedDirectPayload.executionState.delivery.protocolVerifiedOutput.buyerVisibleOutputs[1].text = directJson.slice(0, 8000);
+const truncatedDirect = await verifySantaClawzCompletedReturn(truncatedDirectPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(truncatedDirect.ok, false);
+assert.equal(truncatedDirect.reason, 'santaclawz_inline_output_hash_mismatch');
+
+const missingJsonPayload = structuredClone(directPayload);
+missingJsonPayload.executionState.delivery.protocolVerifiedOutput.buyerVisibleOutputs.pop();
+const missingJsonDirect = await verifySantaClawzCompletedReturn(missingJsonPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(missingJsonDirect.ok, false);
+assert.equal(missingJsonDirect.reason, 'santaclawz_buyer_delivery_missing');
+
+const wrongInputDirect = await verifySantaClawzCompletedReturn(directPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'e'.repeat(64)
+});
+assert.equal(wrongInputDirect.ok, false);
+assert.equal(wrongInputDirect.reason, 'santaclawz_return_input_mismatch');
 
 const pendingReturnVerification = summarize(true, {
   paymentStatus: 'seller_settled',
