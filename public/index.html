@@ -13134,6 +13134,7 @@
 		        }
 	        status.textContent = `Opening ${name} in the execution widget...`;
 	        try {
+	          let openedSessionId = '';
 	          let reusableSessionId = String(context.connectorSessionId || '').trim() || rememberedSessionId;
 	          if (reusableSessionId) {
 	            const existing = await api(`/connectors/sessions/${encodeURIComponent(reusableSessionId)}`).catch(() => null);
@@ -13158,6 +13159,7 @@
 	              openRequestId
 	            });
 	            await revealExecutionSheet(reusableSessionId, { awaitRender: true });
+	            openedSessionId = reusableSessionId;
 	            status.textContent = `${name} is ready in the execution widget. Add task inputs there; chat can stay focused on questions.`;
 	          } else {
 	            const session = await openContextualExecutionSession({
@@ -13176,9 +13178,12 @@
 	              sessionId: session.id,
 	              openRequestId
 	            });
+	            openedSessionId = session.id;
 	            const intake = formatAgentCompletionIntake(agent);
 	            status.textContent = `${name} is open in the execution widget.${intake ? ` ${intake}.` : ''}`;
 	          }
+	          const autoStarted = await autoStartReadyCodeAuditHire(openedSessionId);
+	          if (autoStarted) status.textContent = `${name} is starting in the execution widget.`;
 	          if (button) {
 	            button.textContent = 'Selected';
 	            button.disabled = true;
@@ -20295,6 +20300,37 @@
 	    async function autoRunExecutionSessionFromChat(sessionId) {
 	      if (!sessionId || executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return false;
 	      await renderExecutionSheet(sessionId, { focus: false });
+	      const root = getExecutionSheetScrollElement(sessionId);
+	      const runButton = root?.querySelector?.('[data-execution-run-agent="true"]');
+	      if (!runButton || runButton.disabled) return false;
+	      runButton.click();
+	      return true;
+	    }
+
+	    function canAutoStartReadyCodeAuditHire(session = {}, availableCredits = null) {
+	      const selectedAgent = session?.handoffData?.selectedAgent || session?.preferredExecutionAgentSnapshot || {
+	        pluginId: session?.preferredExecutionAgentId || ''
+	      };
+	      if (!isSantaClawzExecutionSession(session) || !isCodeAuditCompletionAgent(selectedAgent)) return false;
+	      if (String(session?.status || '').toLowerCase() !== 'ready' || santaClawzExecutionHasStarted(session)) return false;
+	      if (getMissingAgentInputLabels(session).length) return false;
+	      const requiredCredits = executionRequiredCredits(session);
+	      return requiredCredits <= 0
+	        || (Number.isFinite(Number(availableCredits)) && Number(availableCredits) >= requiredCredits);
+	    }
+
+	    async function autoStartReadyCodeAuditHire(sessionId = '') {
+	      if (!sessionId || executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return false;
+	      await renderExecutionSheet(sessionId, { focus: false });
+	      let session = executionSessionCache.get(sessionId) || null;
+	      if (!session || !isSantaClawzExecutionSession(session)) return false;
+	      let availableCredits = executionKnownAvailableCredits();
+	      if (executionRequiredCredits(session) > 0 && availableCredits == null) {
+	        await refreshCreditsBalance().catch(() => null);
+	        availableCredits = executionKnownAvailableCredits();
+	        session = executionSessionCache.get(sessionId) || session;
+	      }
+	      if (!canAutoStartReadyCodeAuditHire(session, availableCredits)) return false;
 	      const root = getExecutionSheetScrollElement(sessionId);
 	      const runButton = root?.querySelector?.('[data-execution-run-agent="true"]');
 	      if (!runButton || runButton.disabled) return false;
