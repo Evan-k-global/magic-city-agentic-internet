@@ -72,6 +72,7 @@ import {
   grantRewardCredits,
   debitUserAccount,
   lockUserCreditsForIntent,
+  restoreReleasedCreditsForIntent,
   settleLockedCredits,
   refundSettledCredits,
   releaseLockedCredits,
@@ -169,6 +170,11 @@ import {
   recordSantaClawzRuntimeRejection,
   clearSantaClawzRuntimeRejection
 } from './store.js';
+import {
+  assessStaleSantaClawzCreditRestore,
+  hasSantaClawzSubmissionEvidence,
+  isActiveCreditReservationSessionStatus
+} from './creditReservationLifecycle.js';
 import { computeLaneProfiles, computeReputation, getBondTier } from './reputation.js';
 import { verifyReceiptSignature } from './crypto.js';
 import { hashIdentifier, hashPrompt, sanitizeMetadata, sealPayload } from './privacy.js';
@@ -8162,7 +8168,6 @@ function updateSessionTravelFromAgent(session, travel = {}, runtime = null, note
   }));
 }
 
-const ACTIVE_SESSION_LOCK_STATUSES = new Set(['queued', 'claimed', 'executing']);
 const STALE_LOCK_WINDOW_MS = 30 * 60 * 1000;
 const EXECUTION_WATCHDOG_RELEASABLE_SETTLEMENT_STATUSES = new Set([
   'pending_execution',
@@ -8182,7 +8187,7 @@ function listActiveAccountLocks(userHash) {
       const lock = getEscrowLock(session.id);
       const updatedAt = session.updatedAt || session.createdAt || null;
       const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
-      const stale = !ACTIVE_SESSION_LOCK_STATUSES.has(String(session.status || '')) ||
+      const stale = !isActiveCreditReservationSessionStatus(session.status) ||
         (Number.isFinite(updatedMs) && Date.now() - updatedMs > STALE_LOCK_WINDOW_MS);
       return {
         sessionId: session.id,
@@ -8669,7 +8674,7 @@ async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {})
     const activeSessions = candidates.filter((session) => (
       session
       && session.completionMode === 'agent_checkout'
-      && ACTIVE_SESSION_LOCK_STATUSES.has(String(session.status || '').trim().toLowerCase())
+      && isActiveCreditReservationSessionStatus(session.status)
     ));
     for (const session of activeSessions) {
       const timeoutMs = resolveConnectorSessionWatchdogTimeoutMs(session);
@@ -19877,6 +19882,25 @@ const server = http.createServer(async (req, res) => {
         const userHash = hashIdentifier(requesterId);
         const amountUnits = toUnits(paymentOrchestration.requiredCredits);
         const existingLock = getEscrowLock(sessionId);
+        const creditBackedSantaClawz = directSantaClawzX402Payment && !santaclawzDirectWalletPayment;
+        if (creditBackedSantaClawz && existingLock?.status === 'released' && hasSantaClawzSubmissionEvidence(session)) {
+          const paymentDigest = String(session.santaclawzDirectPayment?.paymentPayloadDigestSha256 || '').trim();
+          if (!paymentDigest) {
+            return sendJson(res, 409, {
+              error: 'santaclawz_submission_reconciliation_required',
+              message: 'This session already records a SantaClawz submission. Reconcile that payment before restoring credits.',
+              session
+            });
+          }
+          const refreshed = await refreshSantaClawzPaidSessionStatus(session, { force: true });
+          return sendJson(res, 200, {
+            started: true,
+            alreadySubmitted: true,
+            reconciliationOnly: true,
+            session: refreshed.session || session,
+            ...(refreshed.error ? { statusWarning: refreshed.error.message || 'santaclawz_status_unavailable' } : {})
+          });
+        }
         if (
           existingLock?.status === 'locked' &&
           existingLock.userHash === userHash &&
@@ -19896,10 +19920,22 @@ const server = http.createServer(async (req, res) => {
           if (existingLock?.status === 'locked') {
             releaseLockedCredits(sessionId, 'session_repriced');
           }
-          const lockResult = lockUserCreditsForIntent(userHash, amountUnits, sessionId);
+          const restoreAssessment = assessStaleSantaClawzCreditRestore({
+            session,
+            lock: existingLock,
+            requesterHash: userHash,
+            amountUnits,
+            creditBacked: creditBackedSantaClawz
+          });
+          const lockResult = restoreAssessment.ok
+            ? restoreReleasedCreditsForIntent(userHash, amountUnits, sessionId)
+            : lockUserCreditsForIntent(userHash, amountUnits, sessionId);
           if (!lockResult.ok) {
             return sendJson(res, 409, {
-              error: 'insufficient_credits',
+              error: lockResult.reason || 'credit_reservation_failed',
+              message: lockResult.reason === 'insufficient_credits'
+                ? 'Not enough Magic City credits are available for this run.'
+                : 'The existing credit reservation cannot be reused for this session.',
               requiredCredits: paymentOrchestration.requiredCredits,
               creditValueUsd: 1 / CREDITS_PER_USD,
               shortfallCredits: Math.max(0, Number(paymentOrchestration.requiredCredits || 0) - fromUnits(lockResult.account?.available || 0)),
@@ -19915,6 +19951,10 @@ const server = http.createServer(async (req, res) => {
             requiredCredits: paymentOrchestration.requiredCredits,
             amountUnits,
             reservedAt: lockResult.lock.createdAt,
+            ...(lockResult.restored ? {
+              restoredAt: lockResult.lock.restoredAt,
+              restorationReason: lockResult.lock.restoredFromReason
+            } : {}),
             account: formatUserAccountForApi(lockResult.account)
           };
         }
