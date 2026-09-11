@@ -2730,6 +2730,8 @@ function finalSubmitChainAuthorizationForRunner(value = null) {
     nextRetryAt: value.nextRetryAt || null,
     attemptCount: Math.max(0, Number(value.attemptCount || 0)),
     settledAt: value.settledAt || null,
+    anchoredAfterApprovalExpiry: value.anchoredAfterApprovalExpiry === true,
+    anchoredAfterExecution: value.anchoredAfterExecution === true,
     bypassAllowed: value.bypassAllowed === true,
     bypassReason: value.bypassReason || null,
     gateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
@@ -2812,9 +2814,7 @@ function localFinalSubmitChainBypass(prepared, reason, detail) {
 function finalSubmitChainAuthorizationCanRetry(session = null) {
   const authorization = session?.finalSubmitChainAuthorization || null;
   if (!MISSION_AUTH_ANCHOR_ENABLED || !authorization) return false;
-  if (!['preparing', 'unavailable'].includes(String(authorization.status || ''))) return false;
-  const expiresAt = Date.parse(String(authorization.expiresAt || session?.finalSubmitApproval?.expiresAt || ''));
-  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+  return ['preparing', 'unavailable'].includes(String(authorization.status || ''));
 }
 
 function scheduleFinalSubmitChainAuthorization(sessionId, delayMs = 0) {
@@ -2979,6 +2979,19 @@ function beginFinalSubmitChainAuthorization(sessionId) {
         err.statusCode = 409;
         throw err;
       }
+      const settledAt = new Date().toISOString();
+      const latestSession = getConnectorSession(sessionId) || session;
+      const approvalExpiresAtMs = Date.parse(String(prepared.expiresAt || ''));
+      const executionCompletedAtMs = Date.parse(String(
+        latestSession?.fulfilledAt
+        || latestSession?.completedAt
+        || latestSession?.executionCompletedAt
+        || ''
+      ));
+      const anchoredAfterApprovalExpiry = Number.isFinite(approvalExpiresAtMs)
+        && approvalExpiresAtMs <= Date.parse(settledAt);
+      const anchoredAfterExecution = Number.isFinite(executionCompletedAtMs)
+        && executionCompletedAtMs <= Date.parse(settledAt);
       const settled = finalSubmitChainAuthorizationForRunner({
         ...prepared,
         status: 'anchored',
@@ -2995,13 +3008,19 @@ function beginFinalSubmitChainAuthorization(sessionId) {
         registryKey: anchor.registryKey || null,
         payloadDigest: anchor.payloadDigest || null,
         verificationKeyHash: anchor.verificationKeyHash || null,
-        settledAt: new Date().toISOString(),
-        detail: 'Zeko confirmed this exact one-order authorization.'
+        settledAt,
+        anchoredAfterApprovalExpiry,
+        anchoredAfterExecution,
+        detail: anchoredAfterExecution
+          ? 'Zeko confirmed this historical one-order authorization after execution completed.'
+          : 'Zeko confirmed this exact one-order authorization.'
       });
       setFinalSubmitChainAuthorization(sessionId, settled, {
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
         label: 'Zeko authorization anchored',
-        detail: 'The signed final-submit authorization settled before checkout completed.',
+        detail: anchoredAfterExecution
+          ? 'The signed authorization was anchored after execution completed.'
+          : 'The signed authorization was anchored while execution continued.',
         state: 'final_submit_chain_anchored',
         createdAt: new Date().toISOString()
       });

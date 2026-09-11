@@ -346,6 +346,19 @@ try {
 
   const source = fs.readFileSync(path.join(rootDir, 'src/server.js'), 'utf8');
   assert.match(source, /finalSubmitChainAuthorization: FINAL_SUBMIT_CHAIN_GATE_ENABLED\s*\? finalSubmitChainAuthorizationForRunner/);
+  const retryFunctionSource = source.match(/function finalSubmitChainAuthorizationCanRetry\(session = null\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(retryFunctionSource, 'missing mission authorization retry predicate');
+  const canRetry = new Function(
+    'MISSION_AUTH_ANCHOR_ENABLED',
+    `${retryFunctionSource}; return finalSubmitChainAuthorizationCanRetry;`
+  )(true);
+  assert.equal(canRetry({
+    finalSubmitChainAuthorization: {
+      status: 'unavailable',
+      expiresAt: new Date(Date.now() - 60_000).toISOString()
+    }
+  }), true, 'historical authorization stopped retrying after checkout approval expiry');
+  assert.equal(canRetry({ finalSubmitChainAuthorization: { status: 'anchored' } }), false);
 
   console.log(JSON.stringify({
     backgroundMissionAnchor: 'passed',

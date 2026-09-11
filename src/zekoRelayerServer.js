@@ -350,6 +350,80 @@ async function readMissionAuthRegistryOnChain() {
   }
 }
 
+async function readMissionAuthRegistryEvents() {
+  if (!MISSION_AUTH_REGISTRY_PUBLIC_KEY) return [];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  timeout.unref?.();
+  try {
+    const response = await fetch(ZEKO_GRAPHQL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: `query MissionAuthRegistryEvents($address: PublicKey!) {
+          events(input: { address: $address }) {
+            eventData { transactionInfo { hash status } data }
+          }
+        }`,
+        variables: { address: MISSION_AUTH_REGISTRY_PUBLIC_KEY }
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok || payload?.errors?.length) return [];
+    const groups = Array.isArray(payload?.data?.events) ? payload.data.events : [];
+    return groups.flatMap((group) => Array.isArray(group?.eventData) ? group.eventData : []);
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function eventTransactionApplied(status) {
+  let parsedStatus = status;
+  if (typeof status === 'string' && status.trim().startsWith('[')) {
+    try {
+      parsedStatus = JSON.parse(status);
+    } catch {}
+  }
+  const values = Array.isArray(parsedStatus) ? parsedStatus : [parsedStatus];
+  return values.some((value) => String(value || '').toLowerCase() === 'applied');
+}
+
+async function reconcileMissionAuthSubmission(submission) {
+  if (submission?.anchorPayload?.schema !== 'magic-city-final-submit-chain-anchor-v1') return null;
+  const txHash = submission?.txHash || submission?.result?.txHash || null;
+  const statementHash = String(submission?.result?.statementHash || submission?.anchorPayload?.statementHash || '');
+  if (!txHash || !statementHash) return null;
+  const events = await readMissionAuthRegistryEvents();
+  const matched = events.find((event) => (
+    String(event?.transactionInfo?.hash || '') === String(txHash)
+    && eventTransactionApplied(event?.transactionInfo?.status)
+    && Array.isArray(event?.data)
+    && event.data.some((value) => String(value) === statementHash)
+  ));
+  if (!matched) return null;
+  const chain = await readMissionAuthRegistryOnChain();
+  if (!chain.reachable) return null;
+  return updateSubmission(submission.id, {
+    status: 'submitted',
+    txHash,
+    result: {
+      ...(submission.result || {}),
+      accepted: true,
+      mode: 'mission_auth_registry',
+      registryPublicKey: MISSION_AUTH_REGISTRY_PUBLIC_KEY,
+      statementHash,
+      payloadDigest: submission?.result?.payloadDigest || null,
+      anchoredCount: chain.anchoredCount,
+      verificationKeyHash: chain.verificationKeyHash,
+      confirmedAt: new Date().toISOString(),
+      reconciliation: 'zeko_applied_event'
+    }
+  });
+}
+
 async function missionAuthRelayerReadiness() {
   const chain = await readMissionAuthRegistryOnChain();
   return {
@@ -520,7 +594,7 @@ async function readRelayerNonce(publicKey, graphqlUrl, fetchAccount) {
   return Number(account.account.nonce.toString());
 }
 
-async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
+async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash, { submissionId = null } = {}) {
   let executionStage = 'initializing';
   if (!RELAYER_PRIVATE_KEY) {
     const err = new Error('ZEKO_RELAYER_PRIVATE_KEY_not_configured');
@@ -586,6 +660,18 @@ async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
 
   const statementHash = fieldFromHashLike(anchorPayload.statementHash, Field, Poseidon);
   const payloadDigest = fieldFromText(payloadHash, Field, Poseidon);
+  if (submissionId) {
+    await updateSubmission(submissionId, {
+      result: {
+        accepted: true,
+        mode: 'mission_auth_registry',
+        stage: 'transaction_build',
+        registryPublicKey: registryPublicKey.toBase58(),
+        statementHash: statementHash.toString(),
+        payloadDigest: payloadDigest.toString()
+      }
+    });
+  }
   executionStage = 'relayer_nonce_fetch';
   console.info('[zeko-relayer] relayer_nonce_fetch_started');
   const relayerNonce = await readRelayerNonce(relayerPublicKey, ZEKO_GRAPHQL, fetchAccount);
@@ -633,6 +719,21 @@ async function submitMissionAuthRegistryAnchor(anchorPayload, payloadHash) {
   let pending;
   const signedTx = tx.sign([relayer, registryKey]);
   const localTxHash = await computeSignedTransactionHash(signedTx, Transaction);
+  if (submissionId) {
+    await updateSubmission(submissionId, {
+      txHash: localTxHash,
+      result: {
+        accepted: true,
+        mode: 'mission_auth_registry',
+        stage: 'transaction_send',
+        registryPublicKey: registryPublicKey.toBase58(),
+        statementHash: statementHash.toString(),
+        payloadDigest: payloadDigest.toString(),
+        txHash: localTxHash,
+        broadcastState: 'prepared'
+      }
+    });
+  }
   for (let sendAttempt = 1; sendAttempt <= ZEKO_TX_SEND_RETRY_LIMIT; sendAttempt += 1) {
     try {
       const sendPromise = signedTx.send();
@@ -722,10 +823,10 @@ async function runSubmitOnce(submissionId) {
       : MBA_MISSION_REGISTRY_PUBLIC_KEY;
     const sent = await withMbaMissionRegistryMutationLock(registryLockKey, () => (
       authorizationOnly
-        ? submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash)
+        ? submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash, { submissionId: submission.id })
         : MODE === 'mba_mission_registry'
           ? submitMbaMissionRegistryAnchor(submission.anchorPayload, submission.payloadHash)
-          : submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash)
+          : submitMissionAuthRegistryAnchor(submission.anchorPayload, submission.payloadHash, { submissionId: submission.id })
     ));
     const updated = await updateSubmission(submission.id, {
       status: sent.txHash ? 'submitted' : 'pending',
@@ -748,11 +849,13 @@ async function runSubmitOnce(submissionId) {
     const stage = String(error?.executionStage || MODE);
     const submissionUncertain = Boolean(error?.submissionUncertain);
     const message = error instanceof Error ? error.message : String(error);
-    const preservedTxHash = error?.txHash || extractZekoTxHash(message) || submission.txHash || null;
+    const current = await getSubmission(submission.id).catch(() => null);
+    const preservedTxHash = error?.txHash || extractZekoTxHash(message) || current?.txHash || submission.txHash || null;
     await updateSubmission(submission.id, {
       status: submissionUncertain ? 'submission_unknown' : 'failed',
       txHash: preservedTxHash,
       result: {
+        ...(current?.result || submission.result || {}),
         accepted: false,
         errorCode: message || 'relayer_submission_failed',
         stage,
@@ -853,6 +956,19 @@ async function handleSubmit(req, res) {
     });
   }
   if (previous?.status === 'submission_unknown') {
+    const reconciled = await reconcileMissionAuthSubmission(previous);
+    if (reconciled?.status === 'submitted' && reconciled.txHash) {
+      return sendJson(res, 200, {
+        id: reconciled.id,
+        status: reconciled.status,
+        txHash: reconciled.txHash,
+        payloadHash: reconciled.payloadHash,
+        anchorKey,
+        result: reconciled.result,
+        deduplicated: true,
+        reconciled: true
+      });
+    }
     return sendJson(res, 202, {
       id: previous.id,
       status: previous.status,
@@ -876,7 +992,9 @@ async function handleSubmit(req, res) {
     });
   }
 
-  if (previous) {
+  const retryablePrevious = previous?.status === 'failed'
+    && previous?.result?.safeToRetrySamePayload === true;
+  if (previous && !retryablePrevious) {
     return sendJson(res, 409, {
       error: 'mission_auth_submission_not_retryable',
       id: previous.id,
@@ -885,7 +1003,7 @@ async function handleSubmit(req, res) {
       anchorKey
     });
   }
-  const submission = reservation.submission;
+  const submission = previous || reservation.submission;
 
   if (MODE === 'record') {
     const updated = await updateSubmission(submission.id, {
@@ -968,6 +1086,7 @@ async function handleSubmit(req, res) {
         status: submissionUncertain ? 'submission_unknown' : 'failed',
         txHash: preservedTxHash,
         result: {
+          ...(current?.result || submission.result || {}),
           accepted: false,
           errorCode: message || 'relayer_submission_failed',
           stage,

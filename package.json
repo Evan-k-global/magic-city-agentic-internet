@@ -49,6 +49,7 @@
     "test:agent-sdk-api": "node scripts/test-agent-sdk-api.mjs",
     "test:zeko-proof-worker": "node scripts/test-zeko-proof-worker.mjs",
     "test:mba-relayer-health": "node scripts/test-mba-relayer-health.mjs",
+    "test:mission-auth-relayer-reconciliation": "node scripts/test-mission-auth-relayer-reconciliation.mjs",
     "provision:mba-relayer-db-role": "node scripts/provision-mba-relayer-db-role.mjs",
     "test:mba-mission-registry-bootstrap": "node scripts/test-mba-mission-registry-bootstrap.mjs",
     "test:mission-auth-registry-signature": "node scripts/test-mission-auth-registry-signature.mjs",
