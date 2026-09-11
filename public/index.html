@@ -5208,8 +5208,15 @@
       }
 
       #sendBtn::after {
-        font-size: 26px;
-        transform: translate(-0.25px, 0.5px);
+        content: "";
+        inset: auto;
+        top: 50%;
+        left: 50%;
+        width: 15px;
+        height: 16px;
+        background: #06131b;
+        clip-path: polygon(50% 0, 100% 42%, 68% 42%, 68% 100%, 32% 100%, 32% 42%, 0 42%);
+        transform: translate(-50%, -47%);
       }
 
       .sidebar .row {
