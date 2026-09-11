@@ -31,6 +31,7 @@ const PAYMENT_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
 const CHECKOUT_PROFILE_RECONCILE_TIMEOUT_MS = 24_000;
 const TRANSIENT_CONTROL_PLANE_RETRY_DELAYS_MS = [200, 700];
 const TAB_COMMAND_TIMEOUT_MS = 15_000;
+const AMAZON_SEARCH_CARD_FAST_PATH_TIMEOUT_MS = 8_000;
 const BROWSER_ACTION_TIMEOUT_MS = 45_000;
 const EXECUTOR_REGISTRATION_REUSE_MS = 30_000;
 const LOCAL_CHECKOUT_PROFILE_STORAGE_KEY = 'magicCityLocalCheckoutProfiles';
@@ -959,8 +960,9 @@ function isTransientControlPlaneError(error) {
 }
 
 function isRetryableBrowserRuntimeError(error) {
+  if (error?.retryableBrowserRuntime === true) return true;
   const message = String(error?.message || error || '').trim().toLowerCase();
-  return /browser_(?:navigation|content_script|tab_read|tab_unavailable|url_change)_|execution context was destroyed|failed to fetch|message channel closed|receiving end does not exist/.test(message);
+  return /browser_(?:navigation|script_injection|content_script|tab_read|tab_unavailable|url_change)_|execution context was destroyed|failed to fetch|message channel closed|receiving end does not exist/.test(message);
 }
 
 async function retryTransientControlPlane(task) {
@@ -1326,7 +1328,11 @@ async function tabCommand(tabId, command, {
     ? injectionTimeoutMs
     : Math.max(1, Math.min(injectionTimeoutMs, Math.floor(remainingBeforeInjectionMs * 0.45)));
   await withTimeout(
-    () => chrome.scripting.executeScript({ target: { tabId }, files: [EXECUTOR_FILE] }),
+    () => chrome.scripting.executeScript({
+      target: { tabId },
+      files: [EXECUTOR_FILE],
+      injectImmediately: true
+    }),
     boundedInjectionTimeoutMs,
     'browser_script_injection_timeout'
   );
@@ -1359,7 +1365,8 @@ async function amazonSearchCardAddToCart(tabId, action = {}) {
   const result = await withTimeout(
     () => chrome.scripting.executeScript({
       target: { tabId },
-      func: (rawAction) => {
+      injectImmediately: true,
+      func: async (rawAction) => {
         const visible = (element) => {
           if (!element) return false;
           const style = window.getComputedStyle(element);
@@ -1516,13 +1523,15 @@ async function amazonSearchCardAddToCart(tabId, action = {}) {
       },
       args: [{ ...action, maxPrice: Number.isFinite(maxPrice) ? maxPrice : action.maxPrice }]
     }),
-    8_000,
+    AMAZON_SEARCH_CARD_FAST_PATH_TIMEOUT_MS,
     'amazon_search_card_fast_path_timeout'
   ).catch((error) => ({
     completed: false,
+    browserActionIndeterminate: true,
     reason: error?.message || String(error) || 'Amazon search-card fast path failed before returning a result.'
   }));
-  return result?.[0]?.result || null;
+  if (Array.isArray(result)) return result[0]?.result || null;
+  return result && typeof result === 'object' ? result : null;
 }
 
 async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null, cartUrl = '') {
@@ -3000,6 +3009,11 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
       : Boolean(currentPath);
     if (amazonFastPathAllowed && searchSurfaceAllowed) {
       const quickOutcome = await amazonSearchCardAddToCart(tabId, action);
+      if (quickOutcome?.browserActionIndeterminate === true) {
+        const error = new Error(quickOutcome.reason || 'amazon_search_card_fast_path_outcome_unknown');
+        error.browserActionIndeterminate = true;
+        throw error;
+      }
       if (quickOutcome?.completed) {
         const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
         if (cartAdvance.advanced) {
@@ -4210,6 +4224,32 @@ async function runSession(rawSession) {
       return { sessionId: session.id, status: 'cancelled' };
     }
     const actionDurationMs = currentActionStartedAt ? Date.now() - currentActionStartedAt : 0;
+    if (error?.browserActionIndeterminate === true && plan && currentAction) {
+      let waitingSession = session;
+      try {
+        waitingSession = await missionCheckpoint(session, {
+          label: 'Browser action needs confirmation',
+          detail: `The browser stopped returning a result during ${currentAction.id}. Magic City did not repeat the action.`,
+          state: 'browser_action_outcome_unknown',
+          missionAction: currentAction.missionAction,
+          targetUrl: plan.startUrl,
+          plan,
+          planAction: currentAction,
+          planActionStatus: 'waiting'
+        });
+      } catch {
+        // Terminal reporting below remains idempotent and does not replay the
+        // page action when the advisory waiting checkpoint is unavailable.
+      }
+      return reportAndStop(waitingSession, plan, {
+        url: plan.startUrl,
+        finalUrl: plan.startUrl,
+        stopState: 'browser_action_outcome_unknown',
+        stopEvidence: 'The product-selection command timed out after dispatch may have begun. Magic City stopped without repeating the cart action.',
+        fulfillmentStatus: 'failed',
+        fundingDisposition: 'release'
+      });
+    }
     if (isTransientControlPlaneError(error)) {
       retainActiveRun = true;
       scheduleRunnerResume();
@@ -4327,6 +4367,7 @@ async function resumeActiveRun() {
 async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = '') {
   const normalizedSessionId = String(requestedSessionId || '').trim();
   const normalizedDispatchNonce = String(requestedDispatchNonce || '').trim();
+  let directExecutionStarted = false;
   const wakeReceivedAt = new Date().toISOString();
   const recordWake = async (status, message = '') => {
     if (!normalizedSessionId) return;
@@ -4364,6 +4405,7 @@ async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = 
         runnerClientRunStartedAt: String(clientRunStartedAt || '').trim() || null,
         runnerWakeReceivedAt: wakeReceivedAt
       };
+      directExecutionStarted = true;
       const execution = await runSession(directSession);
       return {
         paired: true,
@@ -4379,16 +4421,18 @@ async function pollAndExecute(requestedSessionId = '', requestedDispatchNonce = 
     poll = await pollSessions();
   } catch (error) {
     const message = error?.message || String(error);
-    const status = /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
-      ? 'claim_failed'
-      : 'wake_failed';
+    const status = directExecutionStarted
+      ? 'step_needs_review'
+      : /extension_run_dispatch_required|extension_session_not_claimable|native_runner_required_for_extension_claim|preferred_execution_agent_mismatch/.test(message)
+        ? 'claim_failed'
+        : 'wake_failed';
     await recordWake(status, message);
     return {
       paired: true,
       sessions: [],
       actionableCount: 0,
       requestedSessionId: normalizedSessionId || null,
-      requestedSessionFound: false,
+      requestedSessionFound: directExecutionStarted,
       executed: normalizedSessionId ? [{ sessionId: normalizedSessionId, status, error: message }] : []
     };
   }

@@ -205,6 +205,64 @@ function copyTestExtension(directory, externalOrigin = '', options = {}) {
       ].join('\n')
     ));
   }
+  if (options.forceFastPathPostClickTimeout === true) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const functionMarker = 'async function amazonSearchCardAddToCart(tabId, action = {}) {\n';
+    if (!background.includes(functionMarker)) fail('test_extension_force_fast_path_timeout_marker_missing');
+    const injectedBranch = [
+      functionMarker.trimEnd(),
+      '  if (!globalThis.__magicCityTestFastPathTimedOutOnce) {',
+      '    globalThis.__magicCityTestFastPathTimedOutOnce = true;',
+      '    const testResult = await withTimeout(',
+      '      () => chrome.scripting.executeScript({',
+      '        target: { tabId },',
+      '        injectImmediately: true,',
+      '        func: async () => {',
+      "          document.querySelector('#timeout-search-add')?.click();",
+      '          await new Promise((resolve) => setTimeout(resolve, 300));',
+      '          return { completed: true };',
+      '        }',
+      '      }),',
+      '      80,',
+      "      'amazon_search_card_fast_path_timeout'",
+      '    ).catch((error) => ({',
+      '      completed: false,',
+      '      browserActionIndeterminate: true,',
+      "      reason: error?.message || String(error) || 'Amazon search-card fast path failed before returning a result.'",
+      '    }));',
+      '    if (Array.isArray(testResult)) return testResult[0]?.result || null;',
+      "    return testResult && typeof testResult === 'object' ? testResult : null;",
+      '  }'
+    ].join('\n');
+    fs.writeFileSync(backgroundPath, background.replace(functionMarker, `${injectedBranch}\n`));
+  }
+  if (options.failFirstPlanStepInjection === true) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const injectionMarker = '  await withTimeout(\n    () => chrome.scripting.executeScript({\n      target: { tabId },\n      files: [EXECUTOR_FILE],';
+    if (!background.includes(injectionMarker)) fail('test_extension_plan_step_injection_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      injectionMarker,
+      [
+        "  if (command?.type === 'MAGIC_CITY_EXECUTE_PLAN_STEP' && !globalThis.__magicCityTestPlanStepInjectionFailedOnce) {",
+        '    globalThis.__magicCityTestPlanStepInjectionFailedOnce = true;',
+        "    throw new Error('browser_script_injection_timeout');",
+        '  }',
+        injectionMarker
+      ].join('\n')
+    ));
+  }
+  if (options.disableSearchFastPath === true) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const fastPathMarker = '    if (amazonFastPathAllowed && searchSurfaceAllowed) {';
+    if (!background.includes(fastPathMarker)) fail('test_extension_disable_fast_path_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      fastPathMarker,
+      '    if (false && amazonFastPathAllowed && searchSurfaceAllowed) {'
+    ));
+  }
   return destination;
 }
 
@@ -240,6 +298,29 @@ function runtimeMessageWithTimeout(page, message, timeoutMs = 3_000) {
 }
 
 function storefront(pathname, searchParams = new URLSearchParams()) {
+  if (pathname === '/selection-timeout-search') {
+    return [
+      '<main><h1>Results for test gadget</h1>',
+      '<div data-component-type="s-search-result" data-asin="TIMEOUT-ASIN">',
+      '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+      '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span><span>FREE shipping</span>',
+      '<button id="timeout-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); document.querySelector(\'#nav-cart-count\').textContent=\'1\'">Add to cart</button>',
+      '</div>',
+      '<a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/selection-recovery-search') {
+    return [
+      '<main><h1>Results for test gadget</h1>',
+      '<div data-component-type="s-search-result" data-asin="RECOVERY-ASIN">',
+      '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+      '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span>',
+      '<button id="recovery-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); location.href=\'/post-add-confirmation\'">Add to cart</button>',
+      '</div><a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/signed-out-search') {
     return [
       '<main>',
@@ -891,6 +972,22 @@ async function main() {
       const origin = `https://${req.headers.host}`;
       const url = new URL(req.url || '/', origin);
       if (!url.pathname.startsWith('/connectors/') && !url.pathname.startsWith('/plugins/') && !url.pathname.startsWith('/native-runner/')) {
+        if (url.pathname === '/slow-loading-search') {
+          res.writeHead(200, { 'content-type': 'text/html' });
+          res.write([
+            '<!doctype html><title>Slow Test Store</title><main><h1>Results for test gadget</h1>',
+            '<div data-component-type="s-search-result" data-asin="SLOW-ASIN">',
+            '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+            '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span>',
+            '<button id="slow-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); location.href=\'/post-add-confirmation\'">Add to cart</button>',
+            '</div><a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a></main>'
+          ].join(''));
+          const finish = setTimeout(() => {
+            if (!res.writableEnded) res.end('<!-- delayed resources finished -->');
+          }, 12_000);
+          req.on('close', () => clearTimeout(finish));
+          return;
+        }
         if (url.pathname === '/search' && slowInitialSearchResponse) {
           slowInitialSearchResponse = false;
           await new Promise((resolve) => setTimeout(resolve, 3_300));
@@ -1118,7 +1215,10 @@ async function main() {
       // Test the actual MV3/browser boundary with a short copied lease rather
       // than exporting production internals or waiting forty-five seconds.
       finalSubmitLeaseMs: /^final-submit-lease-(?:renewal|expiry|lost-checkpoint)$/.test(smokeMode) ? 1_000 : null,
-      finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null
+      finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null,
+      forceFastPathPostClickTimeout: smokeMode === 'selection-fast-path-timeout',
+      failFirstPlanStepInjection: smokeMode === 'selection-injection-recovery',
+      disableSearchFastPath: smokeMode === 'selection-injection-recovery'
     });
     const profileDir = path.join(tmpDir, 'profile');
     const launchOptions = {
@@ -1172,6 +1272,186 @@ async function main() {
       throw error;
     });
     console.log(`native-runner browser smoke paired (${smokeMode})`);
+    const prepareSelectionOnlySession = async (pathname) => {
+      checkpoints.length = 0;
+      fulfillment = null;
+      transientRunnerStatusFailures = 0;
+      slowInitialSearchResponse = false;
+      const sessionId = `browser-smoke-${smokeMode}-session`;
+      const targetUrl = `${baseUrl}${pathname}`;
+      const generatedPlan = buildExtensionPlan({
+        id: sessionId,
+        handoffData: { kind: 'browser' },
+        selections: {
+          targetUrl,
+          goal: 'buy test gadget',
+          budget: '$4',
+          finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+        },
+        extensionCheckoutProfileEnabled: false,
+        extensionPrimeRequired: true
+      });
+      const selectAction = generatedPlan.actions.find((action) => action.type === 'select_candidate');
+      if (!selectAction) fail('browser_extension_selection_focus_action_missing');
+      const selectionPlan = rehashExtensionPlan({ ...generatedPlan, actions: [selectAction] });
+      session = {
+        ...session,
+        id: sessionId,
+        status: 'queued',
+        claimedByPluginId: null,
+        fulfillment: null,
+        extensionCheckoutProfileEnabled: false,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          capabilityId: `browser-smoke-${smokeMode}-capability`,
+          subject: { sessionId },
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+        },
+        extensionMissionPlan: selectionPlan,
+        extensionMissionPlanState: { planHash: selectionPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+        missionBoundaryLatestHash: null,
+        missionBoundaryEventCount: 0
+      };
+      const merchantPage = await context.newPage();
+      if (pathname === '/slow-loading-search') {
+        await merchantPage.goto(targetUrl, { waitUntil: 'commit' });
+        await merchantPage.locator('#slow-search-add').waitFor({ state: 'visible', timeout: 3_000 });
+      } else {
+        await merchantPage.goto(targetUrl);
+      }
+      const merchantTab = await worker.evaluate(async (url) => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.find((candidate) => candidate.url === url) || null;
+      }, merchantPage.url());
+      if (!merchantTab?.id) fail(`browser_extension_selection_focus_tab_missing:${merchantPage.url()}`);
+      await worker.evaluate(async ({ sessionId: focusedSessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [focusedSessionId]: tabId }
+        });
+      }, { sessionId, tabId: merchantTab.id });
+      return { merchantPage, merchantTab, selectionPlan };
+    };
+    const runSelectionFocus = async (dispatchNonce) => {
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const startedAt = Date.now();
+      const result = await withTimeout(wakePage.evaluate(({ extensionId: targetExtensionId, sessionId, nonce }) => new Promise((resolve) => {
+        const progress = [];
+        const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+        port.onMessage.addListener((payload) => {
+          if (payload?.type === 'RUNNER_PROGRESS') progress.push(payload);
+          if (payload?.type === 'RUNNER_RESULT') resolve({ payload, progress });
+        });
+        port.onDisconnect.addListener(() => resolve({ disconnected: true, progress }));
+        port.postMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: nonce
+        });
+      }), { extensionId, sessionId: session.id, nonce: dispatchNonce }), 12_000, 'browser_extension_selection_focus_wake_timeout');
+      await wakePage.close();
+      return { ...result, durationMs: Date.now() - startedAt };
+    };
+    if (smokeMode === 'selection-injection-recovery') {
+      const { merchantPage } = await prepareSelectionOnlySession('/selection-recovery-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-injection-recovery');
+      const selectionCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+        && checkpoint.planActionStatus !== 'waiting');
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-click-count') || '0'));
+      const sawReconnectingRunner = (wake.progress || []).some((entry) => entry?.activeRun?.progressState === 'reconnecting_control_plane');
+      const runnerState = await worker.evaluate(() => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun']));
+      if (!selectionCheckpoint
+        || !selectionCheckpoint.verifiedMilestones?.includes('candidate_selected')
+        || clickCount !== 1
+        || !sawReconnectingRunner
+        || wake.durationMs >= 8_000
+        || runnerState.lastExecution?.status === 'wake_failed') {
+        fail(`browser_extension_selection_injection_recovery_failed:${JSON.stringify({
+          selectionCheckpoint,
+          clickCount,
+          sawReconnectingRunner,
+          durationMs: wake.durationMs,
+          runnerState,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('A select-match executor injection timeout reconnects inline and clicks once', {
+        durationMs: wake.durationMs,
+        clickCount
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner selection injection recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'selection-delayed-page-load') {
+      const { merchantPage } = await prepareSelectionOnlySession('/slow-loading-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-delayed-page-load');
+      const selectionCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+        && checkpoint.planActionStatus !== 'waiting');
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-click-count') || '0'));
+      const runnerState = await worker.evaluate(() => chrome.storage.local.get(['lastError', 'lastExecution']));
+      if (!selectionCheckpoint
+        || clickCount !== 1
+        || wake.durationMs >= 8_000
+        || /browser_script_injection_timeout/.test(String(runnerState.lastError || ''))) {
+        fail(`browser_extension_selection_delayed_page_load_failed:${JSON.stringify({
+          selectionCheckpoint,
+          clickCount,
+          durationMs: wake.durationMs,
+          runnerState,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Selection installs before document_idle on a still-loading page', {
+        durationMs: wake.durationMs,
+        clickCount
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner delayed-page selection smoke passed');
+      return;
+    }
+    if (smokeMode === 'selection-fast-path-timeout') {
+      const { merchantPage } = await prepareSelectionOnlySession('/selection-timeout-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-fast-path-timeout');
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-click-count') || '0'));
+      const selectionCheckpoints = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'select-match');
+      const outcomeUnknownCheckpoints = selectionCheckpoints.filter((checkpoint) => (
+        checkpoint.state === 'browser_action_outcome_unknown'
+      ));
+      const runnerState = await worker.evaluate(() => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun']));
+      const stopState = fulfillment?.result?.browserExecution?.stopState || '';
+      if (clickCount !== 1
+        || stopState !== 'browser_action_outcome_unknown'
+        || outcomeUnknownCheckpoints.length !== 1
+        || outcomeUnknownCheckpoints[0]?.planActionStatus !== 'waiting'
+        || selectionCheckpoints.some((checkpoint) => checkpoint.planActionStatus !== 'waiting')
+        || selectionCheckpoints.some((checkpoint) => checkpoint.planActionStatus === 'skipped')
+        || runnerState.lastExecution?.status === 'wake_failed'
+        || runnerState.activeRun) {
+        fail(`browser_extension_selection_fast_path_timeout_handling_failed:${JSON.stringify({
+          clickCount,
+          stopState,
+          selectionCheckpoints,
+          outcomeUnknownCheckpoints,
+          runnerState,
+          fulfillment,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('A lost fast-path response stops without repeating an uncertain cart click', {
+        clickCount,
+        checkpointStatus: selectionCheckpoints[0].planActionStatus,
+        stopState
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner selection fast-path timeout smoke passed');
+      return;
+    }
     const verifyAmazonNavFlyout = async () => {
       const page = await context.newPage();
       await page.goto(`${baseUrl}/cart-preview-start`);

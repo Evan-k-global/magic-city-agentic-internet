@@ -11,7 +11,7 @@ const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
 const INLINE_CHECKPOINT_RECONCILIATION_DELAY_MS = 200;
 const MAX_INLINE_CHECKPOINT_RECONCILIATIONS = 8;
-const LEAN_RUNTIME_MODE = 'v0.5.6-checkpoint-and-pending-order-recovery';
+const LEAN_RUNTIME_MODE = 'v0.5.7-selection-injection-recovery';
 const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
@@ -45,10 +45,10 @@ async function dispatch(message, sender = null) {
   return result;
 }
 
-function retryingControlPlaneExecution(result) {
-  if (result?.status === 'retrying_control_plane') return result;
+function retryingRecoverableExecution(result) {
+  if (['retrying_control_plane', 'retrying_browser_step'].includes(result?.status)) return result;
   return Array.isArray(result?.executed)
-    ? result.executed.find((entry) => entry?.status === 'retrying_control_plane') || null
+    ? result.executed.find((entry) => ['retrying_control_plane', 'retrying_browser_step'].includes(entry?.status)) || null
     : null;
 }
 
@@ -65,12 +65,16 @@ function replaceExecutionResult(result, recovered) {
 async function reconcileCommittedCheckpoint(result) {
   let reconciledResult = result;
   for (let attempt = 0; attempt < MAX_INLINE_CHECKPOINT_RECONCILIATIONS; attempt += 1) {
-    const interrupted = retryingControlPlaneExecution(reconciledResult);
+    const interrupted = retryingRecoverableExecution(reconciledResult);
     if (!interrupted?.sessionId) return reconciledResult;
     const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
     const actionId = String(stored.lastExecution?.actionId || '');
     const sessionId = String(interrupted.sessionId || '');
-    if (!/^(?:open-site|(?:prepare|open|inspect)-cart|continue-checkout|reconcile-payment-profile|inspect-review|submit-final-order|confirm-pending-order|confirm-merchant-order)(?:-\d+)?$/.test(actionId)
+    const recoveryStatus = String(interrupted.status || stored.lastExecution?.status || '');
+    const recoverableAction = recoveryStatus === 'retrying_browser_step'
+      ? /^select-match(?:-\d+)?$/.test(actionId)
+      : /^(?:open-site|(?:prepare|open|inspect)-cart|continue-checkout|reconcile-payment-profile|inspect-review|submit-final-order|confirm-pending-order|confirm-merchant-order)(?:-\d+)?$/.test(actionId);
+    if (!recoverableAction
       || String(stored.lastExecution?.sessionId || '') !== sessionId
       || String(stored.activeRun?.sessionId || '') !== sessionId) {
       return reconciledResult;
