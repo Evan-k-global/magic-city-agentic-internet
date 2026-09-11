@@ -635,6 +635,12 @@ function verifiedCartEvidenceFor(report = {}, candidate = null, session = {}, pl
   });
 }
 
+function normalizeActiveRunEvidenceLabels(values = []) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 96))
+    .filter(Boolean))].slice(0, 32);
+}
+
 function normalizeActiveRun(entry = null) {
   const sessionId = String(entry?.sessionId || '').trim();
   if (!sessionId) return null;
@@ -658,6 +664,8 @@ function normalizeActiveRun(entry = null) {
     nextActionIndex: Number.isInteger(Number(entry?.nextActionIndex)) ? Number(entry.nextActionIndex) : null,
     selectedCandidate: normalizeActiveRunCandidate(entry?.selectedCandidate),
     cartEvidence: normalizeActiveRunCartEvidence(entry?.cartEvidence),
+    safeFieldsFilled: normalizeActiveRunEvidenceLabels(entry?.safeFieldsFilled),
+    checkoutSelections: normalizeActiveRunEvidenceLabels(entry?.checkoutSelections),
     waitExpiresAt: String(entry?.waitExpiresAt || '').trim() || null,
     merchantConfirmationStartedAt: String(entry?.merchantConfirmationStartedAt || '').trim() || null,
     merchantConfirmationDeadlineAt: String(entry?.merchantConfirmationDeadlineAt || '').trim() || null,
@@ -3464,8 +3472,8 @@ async function runSession(rawSession) {
       addToCartClicked: persistedMilestones.includes('cart_confirmed'),
       checkoutOpened: persistedMilestones.includes('checkout_open'),
       verifiedMilestones: [...new Set(persistedMilestones)],
-      safeFieldsFilled: [],
-      checkoutSelections: [],
+      safeFieldsFilled: normalizeActiveRunEvidenceLabels(interruptedRun?.safeFieldsFilled),
+      checkoutSelections: normalizeActiveRunEvidenceLabels(interruptedRun?.checkoutSelections),
       selectedCandidate: null,
       cartEvidence: normalizeActiveRunCartEvidence(interruptedRun?.cartEvidence),
       initialCartItemCount: null,
@@ -3986,6 +3994,14 @@ async function runSession(rawSession) {
         }
       });
       authorityVerifiedAt = Date.now();
+      if (hasConfirmedMerchantOrder(report)) {
+        return reportAndStop(
+          session,
+          plan,
+          report,
+          'Merchant confirmation was durably recorded. Later tab state is not required to complete this mission.'
+        );
+      }
       // The authenticated checkpoint immediately before the signed
       // final-submit action renews a short, one-action local lease. This
       // avoids a slow but healthy checkout expiring an authority timestamp
@@ -4013,6 +4029,8 @@ async function runSession(rawSession) {
         nextActionIndex: finalSubmitReceiptRecorded ? index + 1 : index,
         selectedCandidate: progress.selectedCandidate,
         cartEvidence: progress.cartEvidence,
+        safeFieldsFilled: progress.safeFieldsFilled,
+        checkoutSelections: progress.checkoutSelections,
         finalSubmitAuthorityLease: actionStatus === 'completed' && nextAction?.type === 'final_submit'
           ? finalSubmitAuthorityLease
           : finalSubmitReceiptRecorded ? null : finalSubmitAuthorityLease

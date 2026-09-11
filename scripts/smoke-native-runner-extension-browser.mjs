@@ -834,6 +834,12 @@ async function main() {
     let prepareCartConnectionDroppedAtMs = 0;
     let dropContinueCheckoutCheckpointResponse = false;
     let continueCheckoutCheckpointCommittedAtMs = 0;
+    let dropCommittedCheckpointResponses = new Set();
+    let committedCheckpointDroppedAtMs = new Map();
+    let committedCheckpointRecoveryPolledAtMs = new Map();
+    let closeMerchantTabAfterConfirmationCheckpoint = false;
+    let dropFulfillmentResponseAfterCommit = false;
+    let fulfillmentResponseDroppedAtMs = 0;
     let deferPrimaryClaimResponse = false;
     let releasePrimaryClaimResponse = null;
     let rejectPrimaryClaimError = '';
@@ -873,6 +879,11 @@ async function main() {
       }
       if (req.method === 'GET' && url.pathname === '/connectors/sessions') {
         sessionListRequestCount += 1;
+        for (const [actionId, droppedAtMs] of committedCheckpointDroppedAtMs) {
+          if (!committedCheckpointRecoveryPolledAtMs.has(actionId) && Date.now() >= droppedAtMs) {
+            committedCheckpointRecoveryPolledAtMs.set(actionId, Date.now());
+          }
+        }
         session = renewTestCapability(session);
         distractorSession = renewTestCapability(distractorSession);
         const active = [distractorSession, session]
@@ -964,6 +975,12 @@ async function main() {
               }
             : state
         };
+        if (closeMerchantTabAfterConfirmationCheckpoint
+          && body.browser?.orderSubmitted === true) {
+          closeMerchantTabAfterConfirmationCheckpoint = false;
+          const merchantPage = context.pages().find((page) => /\/checkout(?:\/order-confirmation|\?confirmed=1)/.test(page.url()));
+          await merchantPage?.close();
+        }
         if (dropInspectReviewCheckpointResponse && expected.id === 'inspect-before-final-submit') {
           inspectReviewCheckpointCommitted = true;
           await new Promise((resolve) => { releaseDroppedInspectReviewResponse = resolve; });
@@ -995,11 +1012,22 @@ async function main() {
           continueCheckoutCheckpointCommittedAtMs = Date.now();
           return json(res, 503, { error: 'test_committed_checkout_checkpoint_response_lost' });
         }
+        if (body.planActionStatus !== 'waiting' && dropCommittedCheckpointResponses.has(expected.id)) {
+          dropCommittedCheckpointResponses.delete(expected.id);
+          committedCheckpointDroppedAtMs.set(expected.id, Date.now());
+          return json(res, 503, { error: `test_committed_${expected.id}_checkpoint_response_lost` });
+        }
         return json(res, 200, { updated: true, session });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/fulfill')) {
         fulfillment = body;
         session = { ...session, status: body.status || 'fulfilled', fulfilledByPluginId: body.pluginId };
+        if (dropFulfillmentResponseAfterCommit) {
+          dropFulfillmentResponseAfterCommit = false;
+          fulfillmentResponseDroppedAtMs = Date.now();
+          req.socket.destroy();
+          return;
+        }
         return json(res, 200, { session });
       }
       return json(res, 404, { error: 'test_route_not_found' });
@@ -1568,6 +1596,138 @@ async function main() {
       });
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner completed plan recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'confirmed-order-terminal') {
+      const runConfirmedOrderCase = async ({ id, closeTab = false, dropFulfillResponse = false }) => {
+        checkpoints.length = 0;
+        fulfillment = null;
+        fulfillmentResponseDroppedAtMs = 0;
+        const confirmationPlan = rehashExtensionPlan({
+          ...plan,
+          planId: `mplan_${id}`,
+          startUrl: `${baseUrl}/checkout/order-confirmation`,
+          limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+          actions: [
+            {
+              id: 'submit-final-order',
+              type: 'final_submit',
+              missionAction: 'final_submit',
+              autoSubmitAfterVerifiedCheckout: true,
+              expectedMilestone: 'final_submit_requested',
+              maxPrice: 4
+            },
+            {
+              id: 'confirm-merchant-order',
+              type: 'inspect',
+              missionAction: 'read_public_page',
+              awaitMerchantOrderConfirmation: true,
+              merchantConfirmationTimeoutMs: 90_000,
+              expectedMilestone: 'order_submitted'
+            },
+            { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'order_confirmed' }
+          ]
+        });
+        const merchantPage = await context.newPage();
+        await merchantPage.goto(confirmationPlan.startUrl);
+        const merchantTab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) => (
+          tabs.find((candidate) => candidate.url === url) || null
+        )), merchantPage.url());
+        if (!merchantTab?.id) fail(`browser_extension_${id}_merchant_tab_missing`);
+        session = {
+          ...session,
+          id,
+          status: 'queued',
+          claimedByPluginId: null,
+          fulfillment: null,
+          missionBoundAuth: {
+            ...session.missionBoundAuth,
+            capabilityId: `browser-smoke-${id}-capability`,
+            subject: { sessionId: id }
+          },
+          extensionMissionPlan: confirmationPlan,
+          extensionMissionPlanState: {
+            planHash: confirmationPlan.planHash,
+            nextActionIndex: 1,
+            completedActionIds: ['submit-final-order'],
+            verifiedMilestones: ['final_submit_requested']
+          }
+        };
+        await seedSessionCheckoutProfile(id, defaultCheckoutProfile, confirmationPlan.planHash);
+        await popup.evaluate(async ({ sessionId, tabId }) => {
+          const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+          await chrome.storage.local.set({
+            activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+          });
+        }, { sessionId: id, tabId: merchantTab.id });
+        closeMerchantTabAfterConfirmationCheckpoint = closeTab;
+        dropFulfillmentResponseAfterCommit = dropFulfillResponse;
+        const wakePage = await context.newPage();
+        await wakePage.goto(`${baseUrl}/external-wake`);
+        const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+          const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+          const timer = setTimeout(() => resolve({ timedOut: true }), 12_000);
+          port.onMessage.addListener((payload) => {
+            if (payload?.type !== 'RUNNER_RESULT') return;
+            clearTimeout(timer);
+            resolve(payload);
+          });
+          port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
+          port.postMessage({
+            type: 'RUN_PENDING_SESSIONS',
+            sessionId,
+            extensionDispatchNonce: `browser-smoke-${sessionId}`
+          });
+        }), { extensionId, sessionId: id });
+        await waitFor(() => Boolean(fulfillment), 10_000);
+        await waitFor(async () => {
+          const state = await popup.evaluate(() => chrome.storage.local.get(['activeSessionId', 'activeRun']));
+          return !state.activeSessionId && !state.activeRun;
+        }, 10_000);
+        const wake = await wakePromise;
+        const confirmationCheckpoints = checkpoints.filter((checkpoint) => (
+          checkpoint.planActionId === 'confirm-merchant-order' && checkpoint.planActionStatus === 'completed'
+        ));
+        const pauseCheckpoints = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'pause-for-user');
+        if (wake?.timedOut
+          || fulfillment?.status !== 'fulfilled'
+          || fulfillment?.result?.browserExecution?.orderSubmitted !== true
+          || fulfillment?.result?.browserExecution?.stopState !== 'order_submitted'
+          || confirmationCheckpoints.length !== 1
+          || pauseCheckpoints.length !== 0
+          || (closeTab && !merchantPage.isClosed())
+          || (dropFulfillResponse && fulfillmentResponseDroppedAtMs <= 0)) {
+          fail(`browser_extension_${id}_confirmation_not_terminal:${JSON.stringify({
+            wake,
+            fulfillment,
+            confirmationCheckpointCount: confirmationCheckpoints.length,
+            pauseCheckpointCount: pauseCheckpoints.length,
+            merchantPageClosed: merchantPage.isClosed(),
+            fulfillmentResponseDroppedAtMs
+          })}`);
+        }
+        await wakePage.close();
+        if (!merchantPage.isClosed()) await merchantPage.close();
+        return {
+          confirmationCheckpointCount: confirmationCheckpoints.length,
+          pauseCheckpointCount: pauseCheckpoints.length,
+          tabClosed: closeTab,
+          fulfillmentResponseDropped: dropFulfillResponse
+        };
+      };
+
+      const closedTabResult = await runConfirmedOrderCase({
+        id: 'browser-smoke-confirmation-tab-closed',
+        closeTab: true
+      });
+      recordPurchaseScenario('Durable merchant confirmation remains terminal after its tab closes', closedTabResult);
+      const droppedResponseResult = await runConfirmedOrderCase({
+        id: 'browser-smoke-confirmation-response-lost',
+        dropFulfillResponse: true
+      });
+      recordPurchaseScenario('Lost fulfillment response reconciles the original confirmed order without replay', droppedResponseResult);
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner confirmed order terminal smoke passed');
       return;
     }
     if (smokeMode === 'recovery') {
@@ -2226,6 +2386,9 @@ async function main() {
       pendingOrderConfirmationDelayMs: 65_000
     };
     dropPrepareCartCheckpointResponse = true;
+    dropCommittedCheckpointResponses = new Set(['open-site', 'inspect-review', 'confirm-pending-order']);
+    committedCheckpointDroppedAtMs = new Map();
+    committedCheckpointRecoveryPolledAtMs = new Map();
     await popup.close();
     const externalWakePage = await context.newPage();
     await externalWakePage.goto(`${baseUrl}/external-wake`);
@@ -2356,6 +2519,24 @@ async function main() {
         sawReconnectingRunner
       })}`);
     }
+    const expandedRecoveryActions = ['open-site', 'inspect-review', 'confirm-pending-order'];
+    const expandedRecoveryTimings = Object.fromEntries(expandedRecoveryActions.map((actionId) => {
+      const droppedAtMs = Number(committedCheckpointDroppedAtMs.get(actionId) || 0);
+      const recoveryPolledAtMs = Number(committedCheckpointRecoveryPolledAtMs.get(actionId) || 0);
+      return [actionId, {
+        recoveryMs: recoveryPolledAtMs - droppedAtMs,
+        checkpointCount: checkpoints.filter((checkpoint) => (
+          checkpoint.planActionId === actionId && checkpoint.planActionStatus !== 'waiting'
+        )).length
+      }];
+    }));
+    if (expandedRecoveryActions.some((actionId) => (
+      Number(expandedRecoveryTimings[actionId].recoveryMs) <= 0
+      || Number(expandedRecoveryTimings[actionId].recoveryMs) >= 8_000
+      || expandedRecoveryTimings[actionId].checkpointCount !== 1
+    ))) {
+      fail(`browser_extension_expanded_checkpoint_recovery_failed:${JSON.stringify(expandedRecoveryTimings)}`);
+    }
     recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
       sessionId: session.id,
       queuedSessions: 2,
@@ -2370,6 +2551,7 @@ async function main() {
       prepareCartCheckpointCount,
       progressLabel: 'Reconnecting Runner'
     });
+    recordPurchaseScenario('Lost committed non-cart checkpoints resume inline without replay', expandedRecoveryTimings);
     const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
     const pendingFinalClicks = primaryStorePage
       ? await primaryStorePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0))

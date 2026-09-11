@@ -9,8 +9,9 @@ const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
 const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
 const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
-const INLINE_CART_RECONCILIATION_DELAY_MS = 200;
-const LEAN_RUNTIME_MODE = 'v0.5.3-pending-order-price-scope';
+const INLINE_CHECKPOINT_RECONCILIATION_DELAY_MS = 200;
+const MAX_INLINE_CHECKPOINT_RECONCILIATIONS = 4;
+const LEAN_RUNTIME_MODE = 'v0.5.4-committed-checkpoint-recovery';
 const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
@@ -61,38 +62,41 @@ function replaceExecutionResult(result, recovered) {
   };
 }
 
-async function reconcileCheckoutCheckpoint(result) {
-  const interrupted = retryingControlPlaneExecution(result);
-  if (!interrupted?.sessionId) return result;
-  const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
-  const actionId = String(stored.lastExecution?.actionId || '');
-  const sessionId = String(interrupted.sessionId || '');
-  if (!/^(?:(?:prepare|open)-cart|continue-checkout)(?:-\d+)?$/.test(actionId)
-    || String(stored.lastExecution?.sessionId || '') !== sessionId
-    || String(stored.activeRun?.sessionId || '') !== sessionId) {
-    return result;
-  }
-  const now = new Date().toISOString();
-  await chrome.storage.local.set({
-    activeRun: {
-      ...stored.activeRun,
-      progressLabel: 'Reconnecting Runner',
-      progressState: 'reconnecting_control_plane',
-      progressSequence: Number(stored.activeRun?.progressSequence || 0) + 1,
-      progressUpdatedAt: now,
-      updatedAt: now
+async function reconcileCommittedCheckpoint(result) {
+  let reconciledResult = result;
+  for (let attempt = 0; attempt < MAX_INLINE_CHECKPOINT_RECONCILIATIONS; attempt += 1) {
+    const interrupted = retryingControlPlaneExecution(reconciledResult);
+    if (!interrupted?.sessionId) return reconciledResult;
+    const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
+    const actionId = String(stored.lastExecution?.actionId || '');
+    const sessionId = String(interrupted.sessionId || '');
+    if (!/^(?:open-site|(?:prepare|open)-cart|continue-checkout|inspect-review|confirm-pending-order|confirm-merchant-order)(?:-\d+)?$/.test(actionId)
+      || String(stored.lastExecution?.sessionId || '') !== sessionId
+      || String(stored.activeRun?.sessionId || '') !== sessionId) {
+      return reconciledResult;
     }
-  });
-  await new Promise((resolve) => setTimeout(resolve, INLINE_CART_RECONCILIATION_DELAY_MS));
-  try {
-    const recovered = await legacyController.resumeActiveRun();
-    return recovered?.sessionId === sessionId
-      ? replaceExecutionResult(result, recovered)
-      : result;
-  } catch {
-    // The controller already armed the normal recovery alarm before yielding.
-    return result;
+    const now = new Date().toISOString();
+    await chrome.storage.local.set({
+      activeRun: {
+        ...stored.activeRun,
+        progressLabel: 'Reconnecting Runner',
+        progressState: 'reconnecting_control_plane',
+        progressSequence: Number(stored.activeRun?.progressSequence || 0) + 1,
+        progressUpdatedAt: now,
+        updatedAt: now
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, INLINE_CHECKPOINT_RECONCILIATION_DELAY_MS));
+    try {
+      const recovered = await legacyController.resumeActiveRun();
+      if (recovered?.sessionId !== sessionId) return reconciledResult;
+      reconciledResult = replaceExecutionResult(reconciledResult, recovered);
+    } catch {
+      // The controller already armed the normal recovery alarm before yielding.
+      return reconciledResult;
+    }
   }
+  return reconciledResult;
 }
 
 async function dispatchAlarm(alarm = null) {
@@ -256,7 +260,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
     void postProgress();
     progressTimer = setInterval(() => { void postProgress(); }, ACTIVE_MISSION_PROGRESS_INTERVAL_MS);
     dispatch(message, { origin })
-      .then(reconcileCheckoutCheckpoint)
+      .then(reconcileCommittedCheckpoint)
       .then((result) => port.postMessage({ type: 'RUNNER_RESULT', ok: true, result }))
       .catch((error) => port.postMessage({ type: 'RUNNER_RESULT', ok: false, error: error?.message || String(error) }))
       .finally(() => {

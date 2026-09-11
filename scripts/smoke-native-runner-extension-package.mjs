@@ -78,6 +78,10 @@ if (!/function normalizeActiveRunCartEvidence/.test(packagedLegacyBackground)
   || !/boundCartEvidence:\s*normalizeActiveRunCartEvidence/.test(packagedLegacyBackground)) {
   fail('pending-order continuation must use session-bound evidence from the verified one-item cart');
 }
+if (!/safeFieldsFilled:\s*normalizeActiveRunEvidenceLabels\(entry\?\.safeFieldsFilled\)/.test(packagedLegacyBackground)
+  || !/checkoutSelections:\s*normalizeActiveRunEvidenceLabels\(entry\?\.checkoutSelections\)/.test(packagedLegacyBackground)) {
+  fail('inline checkpoint recovery must retain accumulated checkout evidence');
+}
 if (!/Array\.isArray\(dispatches\[tabKey\]\)/.test(packagedLegacyBackground)
   || !/receipts\.find\(\(receipt\) => receipt\?\.receiptScope/.test(packagedLegacyBackground)
   || !/priorPendingOrderDispatchReceipt = await finalOrderDispatchReceiptFor/.test(packagedLegacyBackground)) {
@@ -161,6 +165,13 @@ if (!/ACTIVE_MISSION_RECOVERY_DELAY_MS\s*=\s*30_000/.test(packagedBackground)
   || !/result\?\.status === 'already_running'/.test(packagedBackground)) {
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
 }
+if (!/async function reconcileCommittedCheckpoint\(result\)/.test(packagedBackground)
+  || !/open-site\|\(\?:prepare\|open\)-cart\|continue-checkout\|inspect-review\|confirm-pending-order\|confirm-merchant-order/.test(packagedBackground)) {
+  fail('committed checkout checkpoints must reconcile inline only for the reviewed action allowlist');
+}
+if (!/if \(hasConfirmedMerchantOrder\(report\)\) \{[\s\S]{0,240}return reportAndStop\(/.test(packagedLegacyBackground)) {
+  fail('durably checkpointed merchant confirmation must terminate before later tab-dependent actions');
+}
 if (!/onConnectExternal/.test(packagedBackground)
   || !/magic-city-active-run-v1/.test(packagedBackground)
   || !/RUNNER_PROGRESS/.test(packagedBackground)
@@ -229,6 +240,18 @@ if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackgr
   });
   if (checkoutResponseLossSmoke.error) fail(checkoutResponseLossSmoke.error.message);
   if (checkoutResponseLossSmoke.status !== 0) fail(`checkout checkpoint response-loss smoke exited with ${checkoutResponseLossSmoke.status}`);
+
+  const confirmedOrderTerminalSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+      MAGIC_CITY_BROWSER_SMOKE_FOCUS: 'confirmed-order-terminal'
+    },
+    stdio: 'inherit'
+  });
+  if (confirmedOrderTerminalSmoke.error) fail(confirmedOrderTerminalSmoke.error.message);
+  if (confirmedOrderTerminalSmoke.status !== 0) fail(`confirmed order terminal smoke exited with ${confirmedOrderTerminalSmoke.status}`);
 
   console.log(`native-runner extension release package smoke passed: ${zipPath}`);
 } finally {
