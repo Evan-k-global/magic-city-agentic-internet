@@ -323,13 +323,21 @@ function validateSantaClawzAuthenticatedLifecycleProjection(payload = {}, {
   const proofStatus = String(lifecycle.proofStatus || '').toLowerCase();
   const paymentFinality = String(protocolLifecycle.paymentFinality || executionState.paymentFinality || '').toLowerCase();
   const sellerOutcome = String(protocolLifecycle.sellerOutcome || executionState.sellerOutcome || '').toLowerCase();
-  if (
-    protocolState !== 'DELIVERED_SETTLED'
-    || paymentFinality !== 'settled'
-    || sellerOutcome !== 'completed'
-    || !['return_validated', 'anchored_or_attested'].includes(proofStatus)
-    || (protocolLifecycle.terminal !== true && lifecycleChecks.terminal !== true && lifecycleChecks.protocolTerminal !== true)
-  ) {
+  const proofValidated = ['return_validated', 'anchored_or_attested'].includes(proofStatus);
+  const terminal = protocolLifecycle.terminal === true
+    || lifecycleChecks.terminal === true
+    || lifecycleChecks.protocolTerminal === true;
+  const settlementCompleted = protocolState === 'DELIVERED_SETTLED'
+    && paymentFinality === 'settled'
+    && sellerOutcome === 'completed'
+    && proofValidated
+    && terminal;
+  const settlementPending = protocolState === 'DELIVERED_AWAITING_SETTLEMENT'
+    && paymentFinality !== 'settled'
+    && sellerOutcome === 'completed'
+    && proofValidated
+    && !terminal;
+  if (!settlementCompleted && !settlementPending) {
     return { ok: false, reason: 'santaclawz_return_not_completed' };
   }
 
@@ -371,8 +379,17 @@ function validateSantaClawzAuthenticatedLifecycleProjection(payload = {}, {
   }
 
   return {
-    ok: true,
-    mode: 'authenticated_terminal_lifecycle',
+    ok: settlementCompleted,
+    ...(settlementPending
+      ? {
+          pending: true,
+          retryable: true,
+          reason: 'santaclawz_settlement_pending'
+        }
+      : {}),
+    mode: settlementCompleted
+      ? 'authenticated_terminal_lifecycle'
+      : 'authenticated_pending_lifecycle',
     requestId,
     accessMode,
     upstreamLifecycleVerified: true,
@@ -412,7 +429,7 @@ export async function verifySantaClawzCompletedReturn(payload = {}, {
       expectedRequestId,
       expectedInputDigestSha256
     });
-    if (lifecycleValidation.ok) validation = lifecycleValidation;
+    if (lifecycleValidation.ok || lifecycleValidation.pending === true) validation = lifecycleValidation;
   }
   if (!validation.ok) return validation;
   if (validation.mode === 'authenticated_direct_output' || validation.mode === 'authenticated_terminal_lifecycle') {

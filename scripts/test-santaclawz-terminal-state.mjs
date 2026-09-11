@@ -7,6 +7,12 @@ import {
 } from '../src/santaclawzReturnPolicy.js';
 
 const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+const restrictStart = server.indexOf('function restrictSantaClawzDeliveryToVerifiedOutputs(');
+const restrictEnd = server.indexOf('\nfunction santaClawzSourceDeliveryDigest', restrictStart);
+assert.ok(restrictStart >= 0 && restrictEnd > restrictStart, 'delivery restriction function not found');
+const restrictDelivery = new Function(
+  `${server.slice(restrictStart, restrictEnd)}\nreturn restrictSantaClawzDeliveryToVerifiedOutputs;`
+)();
 const start = server.indexOf('function summarizeSantaClawzPaidExecution(');
 const end = server.indexOf('\nfunction returnSantaClawzCreditsForTerminalFailure', start);
 assert.ok(start >= 0 && end > start, 'summary function not found');
@@ -237,6 +243,72 @@ const settledTruncatedSummary = summarize(true, {
 });
 assert.equal(settledTruncatedSummary.completed, true);
 assert.equal(settledTruncatedSummary.returnValidation.verificationSource, 'santaclawz_authenticated_lifecycle');
+
+const awaitingSettlementPayload = structuredClone(truncatedDirectPayload);
+awaitingSettlementPayload.executionState.protocolLifecycle = {
+  protocolState: 'DELIVERED_AWAITING_SETTLEMENT',
+  paymentFinality: 'pending',
+  terminal: false,
+  sellerOutcome: 'completed'
+};
+awaitingSettlementPayload.executionState.lifecycleChecks = { terminal: false };
+const awaitingSettlement = await verifySantaClawzCompletedReturn(awaitingSettlementPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(awaitingSettlement.ok, false);
+assert.equal(awaitingSettlement.pending, true);
+assert.equal(awaitingSettlement.retryable, true);
+assert.equal(awaitingSettlement.reason, 'santaclawz_settlement_pending');
+assert.equal(awaitingSettlement.mode, 'authenticated_pending_lifecycle');
+assert.deepEqual(awaitingSettlement.verifiedBuyerOutputs.map((entry) => entry.name), ['code-audit-summary.md']);
+assert.deepEqual(awaitingSettlement.suppressedBuyerOutputs, [{
+  name: 'code-audit-result.json',
+  reason: 'received_bytes_hash_mismatch'
+}]);
+
+const awaitingSettlementSummary = summarize(true, {
+  ...awaitingSettlementPayload,
+  paymentStatus: 'unknown',
+  settlementStatus: 'pending',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: awaitingSettlementPayload.executionState.protocolLifecycle
+}, {
+  expectedRequestId: 'hire_direct_complete',
+  verifiedReturn: awaitingSettlement
+});
+assert.equal(awaitingSettlementSummary.completed, false);
+assert.equal(awaitingSettlementSummary.paymentAccepted, true);
+assert.equal(awaitingSettlementSummary.terminalFailure, false);
+assert.equal(awaitingSettlementSummary.returnRejected, false);
+assert.equal(awaitingSettlementSummary.returnVerificationPending, true);
+assert.equal(awaitingSettlementSummary.safeToCreateFreshPayment, false);
+assert.equal(awaitingSettlementSummary.nextAction, 'retry_return_verification');
+const awaitingSettlementDelivery = restrictDelivery({
+  summary: null,
+  inlineOutputs: directOutputs.flatMap((output) => [output.name, output.text]),
+  artifacts: []
+}, awaitingSettlement);
+assert.equal(awaitingSettlementDelivery.summary, directMarkdown);
+assert.deepEqual(awaitingSettlementDelivery.inlineOutputs, [
+  'code-audit-summary.md',
+  directMarkdown
+]);
+assert.equal(awaitingSettlementDelivery.verification.partialDelivery, true);
+assert.deepEqual(awaitingSettlementDelivery.verification.suppressedOutputs, [{
+  name: 'code-audit-result.json',
+  reason: 'received_bytes_hash_mismatch'
+}]);
+
+const invalidAwaitingSettlementPayload = structuredClone(awaitingSettlementPayload);
+invalidAwaitingSettlementPayload.executionState.protocolLifecycle.terminal = true;
+const invalidAwaitingSettlement = await verifySantaClawzCompletedReturn(invalidAwaitingSettlementPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(invalidAwaitingSettlement.ok, false);
+assert.equal(invalidAwaitingSettlement.pending, undefined);
 
 const wrongSettledRequest = await verifySantaClawzCompletedReturn(settledTruncatedPayload, {
   expectedRequestId: 'hire_different',

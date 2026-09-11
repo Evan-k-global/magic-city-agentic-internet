@@ -15010,7 +15010,9 @@ function materializeSantaClawzInlineArtifacts(sessionId, delivery = {}) {
 }
 
 function restrictSantaClawzDeliveryToVerifiedOutputs(delivery = {}, verifiedReturn = null) {
-  if (verifiedReturn?.mode !== 'authenticated_terminal_lifecycle') return delivery;
+  if (!['authenticated_terminal_lifecycle', 'authenticated_pending_lifecycle'].includes(verifiedReturn?.mode)) {
+    return delivery;
+  }
   const verifiedOutputs = Array.isArray(verifiedReturn.verifiedBuyerOutputs)
     ? verifiedReturn.verifiedBuyerOutputs
     : [];
@@ -15391,7 +15393,9 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
     'protocol_fee_settled',
     'partially_settled'
   ].includes(String(paymentStatus));
-  const paymentAccepted = paymentAuthorized && !terminalFailure;
+  const authenticatedSettlementPending = returnValidation.mode === 'authenticated_pending_lifecycle'
+    && returnValidation.upstreamLifecycleVerified === true;
+  const paymentAccepted = (paymentAuthorized || authenticatedSettlementPending) && !terminalFailure;
   const protocolState = String(protocolLifecycle.protocolState || payload.protocolState || payload.executionState?.protocolState || '').toUpperCase();
   const paymentFinality = String(protocolLifecycle.paymentFinality || payload.paymentFinality || payload.executionState?.paymentFinality || '').toLowerCase();
   const settlementSettled = [
@@ -15824,6 +15828,7 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
       });
       Object.assign(sessionPatch, {
         status: 'fulfilled',
+        failedAt: null,
         fulfilledAt: new Date().toISOString(),
         fulfillment: {
           status: 'fulfilled',
