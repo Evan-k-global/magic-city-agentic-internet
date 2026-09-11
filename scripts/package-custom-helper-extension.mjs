@@ -12,7 +12,8 @@ const requiredFiles = [
   'background.js',
   'popup.html',
   'popup.js',
-  'README.md'
+  'README.md',
+  'LICENSE'
 ];
 
 const sourceFilesToScan = [

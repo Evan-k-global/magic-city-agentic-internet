@@ -1,0 +1,30 @@
+app = "magic-city-mba-relayer"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile.mba-relayer"
+
+[env]
+  HOST = "::"
+  ZEKO_RELAYER_HOST = "::"
+  PORT = "4412"
+  NODE_ENV = "production"
+  MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE = "true"
+  MAGIC_CITY_RELAYER_SCHEMA_MANAGED = "true"
+  DATABASE_SSL = "disable"
+  ZEKO_SUBMIT_MODE = "relay"
+  ZEKO_RELAYER_MODE = "mba_mission_registry"
+  MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:sepolia"
+  ZEKO_NETWORK_ID = "zeko:sepolia"
+  ZEKO_O1JS_NETWORK_ID = "testnet"
+  ZEKO_GRAPHQL = "https://sepolia.zeko.io/graphql"
+  ZEKO_ARCHIVE = "https://sepolia.zeko.io/graphql"
+  ZEKO_MBA_MISSION_REGISTRY_PUBLIC_KEY = "B62qikuceF52NVPb8VAVSaRoCRMusFz38pLLENjvLaUuLiDnULAVohe"
+  ZEKO_RELAYER_JOB_PRIORITY = "19"
+  ZEKO_PROOF_CACHE_DIR = "/app/data/zeko-proof-cache"
+  ZEKO_RELAYER_JOB_TIMEOUT_MS = "900000"
+
+[[vm]]
+  memory = "4gb"
+  cpu_kind = "shared"
+  cpus = 2

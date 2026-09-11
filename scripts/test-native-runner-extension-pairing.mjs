@@ -7,6 +7,10 @@ import { spawn } from 'node:child_process';
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const apiKey = 'native-runner-extension-pairing-test-key';
+const extensionVersion = JSON.parse(fs.readFileSync(
+  path.join(rootDir, 'public/native-runner/extension/manifest.json'),
+  'utf8'
+)).version;
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -57,7 +61,16 @@ async function getAvailablePort() {
   });
 }
 
-async function request(baseUrl, pathName, { method = 'GET', body = null, cookie = '', bearer = '', runnerSurface = '', runnerProtocol = '' } = {}) {
+async function request(baseUrl, pathName, {
+  method = 'GET',
+  body = null,
+  cookie = '',
+  bearer = '',
+  runnerSurface = '',
+  runnerProtocol = '',
+  runnerExtensionVersion = '',
+  runnerExtensionId = ''
+} = {}) {
   const response = await fetch(`${baseUrl}${pathName}`, {
     method,
     headers: {
@@ -65,7 +78,9 @@ async function request(baseUrl, pathName, { method = 'GET', body = null, cookie 
       ...(cookie ? { cookie } : {}),
       ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
       ...(runnerSurface ? { 'x-magic-city-runner-surface': runnerSurface } : {}),
-      ...(runnerProtocol ? { 'x-magic-city-runner-protocol': runnerProtocol } : {})
+      ...(runnerProtocol ? { 'x-magic-city-runner-protocol': runnerProtocol } : {}),
+      ...(runnerExtensionVersion ? { 'x-magic-city-runner-extension-version': runnerExtensionVersion } : {}),
+      ...(runnerExtensionId ? { 'x-magic-city-runner-extension-id': runnerExtensionId } : {})
     },
     body: body ? JSON.stringify(body) : undefined
   });
@@ -115,6 +130,12 @@ async function main() {
     EXECUTION_WATCHDOG_ENABLED: 'true',
     ETHEREUM_CONFIRMATION_INDEXER_ENABLED: 'false',
     ETHEREUM_SHADOW_RELAYER_ENABLED: 'false',
+    // Exercise the production-risk configuration without ever allowing the
+    // test server to start an in-process MBA compile/prove task.
+    ZEKO_SUBMIT_MODE: 'relay',
+    ZEKO_RELAYER_MODE: 'mba_mission_registry',
+    ZEKO_GRAPHQL: 'http://127.0.0.1:9/graphql',
+    MAGIC_CITY_FINAL_SUBMIT_CHAIN_GATE_ENABLED: 'false',
     MISSION_BOUND_AUTH_SECRET: 'native-runner-extension-test-secret'
   };
   let stderr = '';
@@ -174,7 +195,7 @@ async function main() {
       method: 'POST',
       body: {
         code: pairing.code,
-        extensionVersion: '0.4.5-test',
+        extensionVersion,
         extensionId: 'test-extension-id'
       }
     });
@@ -184,27 +205,91 @@ async function main() {
     if (claim.data.device?.trustMode !== 'trusted_under_cap') throw new Error('pairing_claim_lost_trust_mode');
     if (!claim.data.device?.useExistingBrowser) throw new Error('pairing_claim_lost_browser_profile_choice');
 
+    const extensionRegistration = {
+      pluginId: 'magic-city-runner-extension',
+      ownerAgentId: 'magic-city-runner-extension',
+      kind: 'browser',
+      endpoint: 'chrome-extension://magic-city-runner-test',
+      executionAgent: true,
+      capabilities: ['browser-worker-agent', 'browser.extension_dom_executor', 'browser.prepare_cart'],
+      tools: ['browser.open_local_profile', 'browser.inspect', 'browser.prepare_cart'],
+      metadata: {
+        extensionOnly: true,
+        extensionExecutor: true,
+        executionBackend: 'extension_dom_executor',
+        browserPermissionReady: true
+      }
+    };
     const extensionRegister = await request(baseUrl, '/plugins/register', {
       method: 'POST',
       bearer: token,
-      body: {
-        pluginId: 'magic-city-runner-extension',
-        ownerAgentId: 'magic-city-runner-extension',
-        kind: 'browser',
-        endpoint: 'chrome-extension://magic-city-runner-test',
-        executionAgent: true,
-        capabilities: ['browser-worker-agent', 'browser.extension_dom_executor', 'browser.prepare_cart'],
-        tools: ['browser.open_local_profile', 'browser.inspect', 'browser.prepare_cart'],
-        metadata: {
-          extensionOnly: true,
-          extensionExecutor: true,
-          executionBackend: 'extension_dom_executor',
-          browserPermissionReady: true
-        }
-      }
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: extensionVersion,
+      runnerExtensionId: 'test-extension-id',
+      body: extensionRegistration
     });
     if (extensionRegister.response.status !== 201) {
       throw new Error(`extension_plugin_register_failed:${extensionRegister.response.status}:${JSON.stringify(extensionRegister.data)}`);
+    }
+    if (extensionRegister.response.headers.get('x-magic-city-durability') === 'advisory') {
+      throw new Error('initial_extension_registration_was_not_durable');
+    }
+    const repeatedRegistrationStartedAt = Date.now();
+    const repeatedExtensionRegister = await request(baseUrl, '/plugins/register', {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: extensionVersion,
+      runnerExtensionId: 'test-extension-id',
+      body: extensionRegistration
+    });
+    const repeatedRegistrationDurationMs = Date.now() - repeatedRegistrationStartedAt;
+    if (repeatedExtensionRegister.response.status !== 200
+      || repeatedExtensionRegister.data.registrationReused !== true
+      || repeatedExtensionRegister.response.headers.get('x-magic-city-durability') !== 'advisory') {
+      throw new Error(`extension_plugin_register_not_reused:${repeatedExtensionRegister.response.status}:${JSON.stringify(repeatedExtensionRegister.data)}`);
+    }
+    if (repeatedRegistrationDurationMs >= 1000) {
+      throw new Error(`extension_plugin_register_reuse_slow:${repeatedRegistrationDurationMs}`);
+    }
+    const statusAfterExtensionRegister = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
+      cookie: auth.cookie
+    });
+    if (!statusAfterExtensionRegister.response.ok
+      || !statusAfterExtensionRegister.data.device?.lastSeenAt
+      || !statusAfterExtensionRegister.data.ready) {
+      throw new Error(`extension_register_did_not_mark_runner_seen:${statusAfterExtensionRegister.response.status}:${JSON.stringify(statusAfterExtensionRegister.data)}`);
+    }
+    const staleDeviceStatus = await request(baseUrl, '/native-runner/status?deviceId=nrd-stale-local-cache', {
+      cookie: auth.cookie
+    });
+    if (!staleDeviceStatus.response.ok
+      || !staleDeviceStatus.data.requestedDeviceMissing
+      || staleDeviceStatus.data.device?.id !== claim.data.device.id) {
+      throw new Error(`stale_device_id_did_not_fall_back_to_owned_runner:${staleDeviceStatus.response.status}:${JSON.stringify(staleDeviceStatus.data)}`);
+    }
+    const versionedPollVersion = '0.4.99';
+    const versionedPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: versionedPollVersion,
+      runnerExtensionId: 'test-extension-id'
+    });
+    if (!versionedPoll.response.ok) {
+      throw new Error(`versioned_extension_poll_failed:${versionedPoll.response.status}:${JSON.stringify(versionedPoll.data)}`);
+    }
+    if (versionedPoll.response.headers.get('x-magic-city-durability') !== 'advisory') {
+      throw new Error('versioned_extension_poll_waited_for_global_persistence');
+    }
+    const statusAfterVersionedPoll = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
+      cookie: auth.cookie
+    });
+    if (!statusAfterVersionedPoll.response.ok
+      || statusAfterVersionedPoll.data.device?.extensionVersion !== versionedPollVersion) {
+      throw new Error(`versioned_extension_poll_did_not_update_device:${statusAfterVersionedPoll.response.status}:${JSON.stringify(statusAfterVersionedPoll.data)}`);
     }
 
     const customStart = await request(baseUrl, '/native-runner/helper/pairing/start', {
@@ -444,6 +529,7 @@ async function main() {
     }
 
     const holderKey = crypto.generateKeyPairSync('ed25519');
+    const claimStartedAt = Date.now();
     const claimedSession = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/claim`, {
       method: 'POST',
       bearer: token,
@@ -455,6 +541,7 @@ async function main() {
         extensionDispatchNonce: extensionSession.extensionRunDispatch.nonce
       }
     });
+    const claimDurationMs = Date.now() - claimStartedAt;
     if (!claimedSession.response.ok) {
       throw new Error(`extension_claim_failed:${claimedSession.response.status}:${JSON.stringify(claimedSession.data)}`);
     }
@@ -465,6 +552,7 @@ async function main() {
     if (!extensionPlan?.planHash || extensionPlan.actions?.[0]?.id !== 'open-site') {
       throw new Error(`extension_claim_missing_plan:${JSON.stringify(extensionPlan || {})}`);
     }
+    const firstCheckpointStartedAt = Date.now();
     const permissionCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
       method: 'POST',
       bearer: token,
@@ -488,6 +576,7 @@ async function main() {
         })
       }
     });
+    const firstCheckpointDurationMs = Date.now() - firstCheckpointStartedAt;
     if (!permissionCheckpoint.response.ok) {
       throw new Error(`extension_permission_checkpoint_failed:${permissionCheckpoint.response.status}:${JSON.stringify(permissionCheckpoint.data)}`);
     }
@@ -523,30 +612,57 @@ async function main() {
     if (badPlanStep.response.status !== 409) {
       throw new Error(`extension_out_of_order_plan_step_not_rejected:${badPlanStep.response.status}:${JSON.stringify(badPlanStep.data)}`);
     }
+    const openedCheckpointBody = {
+      pluginId: 'magic-city-runner-extension',
+      label: 'Opened Amazon',
+      missionAction: 'browser_open',
+      targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars',
+      planHash: extensionPlan.planHash,
+      planActionId: 'open-site',
+      planActionStatus: 'completed',
+      browser: { url: 'https://www.amazon.com/s?k=nature+valley+granola+bars', title: 'Amazon search' },
+      runnerTiming: {
+        workerStartedAt: '2026-09-10T17:00:00.000Z',
+        checkpointRequestedAt: '2026-09-10T17:00:01.000Z'
+      },
+      proofOfPossession: buildPopProof({
+        keyPair: holderKey,
+        session: permissionCheckpoint.data.session,
+        action: 'browser_open',
+        targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars'
+      })
+    };
     const openedCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
       method: 'POST',
       bearer: token,
       runnerSurface: 'chrome-extension',
       runnerProtocol: 'declarative-v1',
-      body: {
-        pluginId: 'magic-city-runner-extension',
-        label: 'Opened Amazon',
-        missionAction: 'browser_open',
-        targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars',
-        planHash: extensionPlan.planHash,
-        planActionId: 'open-site',
-        planActionStatus: 'completed',
-        browser: { url: 'https://www.amazon.com/s?k=nature+valley+granola+bars', title: 'Amazon search' },
-        proofOfPossession: buildPopProof({
-          keyPair: holderKey,
-          session: permissionCheckpoint.data.session,
-          action: 'browser_open',
-          targetUrl: 'https://www.amazon.com/s?k=nature+valley+granola+bars'
-        })
-      }
+      body: openedCheckpointBody
     });
     if (!openedCheckpoint.response.ok || openedCheckpoint.data.session?.extensionMissionPlanState?.nextActionIndex !== 1) {
       throw new Error(`extension_open_plan_step_failed:${openedCheckpoint.response.status}:${JSON.stringify(openedCheckpoint.data)}`);
+    }
+    const replayedOpenedCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: openedCheckpointBody
+    });
+    if (!replayedOpenedCheckpoint.response.ok
+      || replayedOpenedCheckpoint.data.replayed !== true
+      || replayedOpenedCheckpoint.data.session?.extensionMissionPlanState?.nextActionIndex !== 1) {
+      throw new Error(`extension_exact_checkpoint_replay_not_recovered:${replayedOpenedCheckpoint.response.status}:${JSON.stringify(replayedOpenedCheckpoint.data)}`);
+    }
+    const alteredCheckpointReplay = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: { ...openedCheckpointBody, label: 'Altered replay must fail' }
+    });
+    if (alteredCheckpointReplay.response.status !== 409) {
+      throw new Error(`extension_altered_checkpoint_replay_not_rejected:${alteredCheckpointReplay.response.status}:${JSON.stringify(alteredCheckpointReplay.data)}`);
     }
     const nextPlanAction = extensionPlan.actions?.[1];
     if (!nextPlanAction?.id || !nextPlanAction?.missionAction) {
@@ -859,15 +975,54 @@ async function main() {
     if (!status.data.checkoutReady || !status.data.executableReady) {
       throw new Error(`runner_status_missing_checkout_ready:${JSON.stringify(status.data)}`);
     }
+
+    // The Magic City packaged executor has a release floor. A pairing created
+    // by an older client can lack a version entirely, which must block only the
+    // built-in runner rather than silently dispatching an unverified executor.
+    await stopServer();
+    const versionGateStatePath = path.join(tmpDir, 'data', 'state.json');
+    const versionGateState = JSON.parse(fs.readFileSync(versionGateStatePath, 'utf8'));
+    const versionGateDevice = versionGateState.nativeRunnerDevices.find((device) => device.id === claim.data.device?.id);
+    if (!versionGateDevice) throw new Error('version_gate_fixture_device_missing');
+    const expectedExtensionVersion = versionGateDevice.metadata?.extensionVersion;
+    delete versionGateDevice.metadata.extensionVersion;
+    fs.writeFileSync(versionGateStatePath, JSON.stringify(versionGateState));
+    child = startServer();
+    await waitForServer(baseUrl);
+    const unversionedRunnerStatus = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(versionGateDevice.id)}`, {
+      cookie: auth.cookie
+    });
+    if (!unversionedRunnerStatus.response.ok
+      || unversionedRunnerStatus.data.readiness?.extensionUpdateRequired !== true
+      || unversionedRunnerStatus.data.readiness?.reason !== 'runner_extension_outdated'
+      || unversionedRunnerStatus.data.ready !== false
+      || unversionedRunnerStatus.data.checkoutReady !== false) {
+      throw new Error(`unversioned_builtin_runner_not_blocked:${JSON.stringify(unversionedRunnerStatus.data)}`);
+    }
+    await stopServer();
+    const restoredVersionGateState = JSON.parse(fs.readFileSync(versionGateStatePath, 'utf8'));
+    const restoredVersionGateDevice = restoredVersionGateState.nativeRunnerDevices.find((device) => device.id === versionGateDevice.id);
+    if (!restoredVersionGateDevice) throw new Error('version_gate_restore_device_missing');
+    restoredVersionGateDevice.metadata = {
+      ...(restoredVersionGateDevice.metadata || {}),
+      extensionVersion: expectedExtensionVersion
+    };
+    fs.writeFileSync(versionGateStatePath, JSON.stringify(restoredVersionGateState));
+    child = startServer();
+    await waitForServer(baseUrl);
+
     // A watchdog failure can leave a persisted browser session with an expired capability.
-    // An owner retry must create a fresh same-scope bearer capability and reset the stale
-    // declarative plan before the extension binds its holder key again.
+    // An owner retry must create a fresh same-scope bearer capability and reset stale
+    // declarative plan state without rebuilding the signed plan before the extension
+    // binds its holder key again.
     const staleCapabilityToken = legacyClaim.data.session.missionBoundAuth.token;
     await stopServer();
     const statePath = path.join(tmpDir, 'data', 'state.json');
     const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
     const staleSession = state.connectorSessions.find((entry) => entry.id === legacySessionId);
     if (!staleSession?.missionBoundAuth?.token) throw new Error('expired_retry_fixture_session_missing');
+    const stalePlanHash = staleSession.extensionMissionPlan?.planHash;
+    if (!stalePlanHash) throw new Error('expired_retry_fixture_plan_missing');
     staleSession.status = 'failed';
     staleSession.fulfillment = { status: 'failed', result: { latestFailureReason: 'test fixture' } };
     staleSession.missionBoundAuth.expiresAt = new Date(0).toISOString();
@@ -893,8 +1048,9 @@ async function main() {
       || retriedSession.missionBoundAuth.token === staleCapabilityToken
       || retriedSession.missionBoundAuth.confirmation?.method !== 'bearer'
       || retriedSession.missionRuntimeHolder !== null
-      || retriedSession.extensionMissionPlan !== null
-      || retriedSession.extensionMissionPlanState !== null
+      || retriedSession.extensionMissionPlan?.planHash !== stalePlanHash
+      || retriedSession.extensionMissionPlanState?.planHash !== stalePlanHash
+      || Number(retriedSession.extensionMissionPlanState?.nextActionIndex) !== 0
       || retriedSession.fulfillment !== null
       || retriedSession.failedAt !== null
       || retriedSession.claimedByPluginId !== null) {
@@ -1134,7 +1290,317 @@ async function main() {
       throw new Error(`watchdog_claimed_device_heartbeat_not_enforced:${watchdogOutcome.response.status}:${JSON.stringify(watchdogOutcome.data)}`);
     }
 
-    console.log('native-runner extension pairing regression passed');
+    // A false checkout-profile mismatch used to release the initial credit hold,
+    // clear the runner context, then make the user-facing repair button attempt
+    // a second full credit reservation. Reconciliation must instead issue a
+    // fresh, checkout-only capability against the preserved Amazon tab with no
+    // additional debit or hold.
+    await stopServer();
+    const reconciliationState = JSON.parse(fs.readFileSync(watchdogStatePath, 'utf8'));
+    const reconciliationSession = reconciliationState.connectorSessions.find((entry) => entry.id === watchdogSessionId);
+    const reconciliationLock = reconciliationState.escrowLocks?.[watchdogSessionId] || null;
+    const reconciliationDevice = reconciliationState.nativeRunnerDevices.find((device) => device.id === watchdogClaimedDeviceId);
+    if (!reconciliationSession || !reconciliationDevice || reconciliationLock?.status !== 'released') {
+      throw new Error(`checkout_reconcile_fixture_missing_released_hold:${JSON.stringify({
+        session: reconciliationSession?.id || null,
+        device: reconciliationDevice?.id || null,
+        lock: reconciliationLock?.status || null
+      })}`);
+    }
+    const reconciliationUserHash = reconciliationLock.userHash;
+    const availableBeforeReconcile = Number(reconciliationState.userAccounts?.[reconciliationUserHash]?.available || 0);
+    const recoveryNow = new Date().toISOString();
+    Object.assign(reconciliationDevice, {
+      lastPollAt: recoveryNow,
+      lastSeenAt: recoveryNow,
+      updatedAt: recoveryNow
+    });
+    reconciliationState.nativeRunnerDevices = reconciliationState.nativeRunnerDevices
+      .filter((device) => device.id !== `${watchdogClaimedDeviceId}-fresh-other`);
+    Object.assign(reconciliationSession, {
+      status: 'failed',
+      failedAt: recoveryNow,
+      claimedAt: null,
+      claimedByPluginId: null,
+      claimedByRegistrationId: null,
+      claimedByNativeRunnerDeviceId: null,
+      pluginEndpoint: null,
+      missionRuntimeHolder: null,
+      extensionMissionPlan: null,
+      extensionMissionPlanState: null,
+      extensionRunDispatch: null,
+      executionLive: null,
+      preferredExecutionAgentId: 'magic-city-runner-extension',
+      selections: {
+        ...(reconciliationSession.selections || {}),
+        finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+      },
+      finalSelections: {
+        ...(reconciliationSession.finalSelections || reconciliationSession.selections || {}),
+        finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+      },
+      fulfillment: {
+        status: 'failed',
+        result: {
+          browserExecution: {
+            stopState: 'address_verification_required',
+            finalUrl: 'https://www.amazon.com/checkout/p/p-reconcile/address?pipelineType=Chewbacca',
+            checkoutSummary: {
+              stage: 'checkout',
+              addressVerification: 'unverified'
+            }
+          }
+        }
+      }
+    });
+    fs.writeFileSync(watchdogStatePath, JSON.stringify(reconciliationState));
+    child = startServer();
+    await waitForServer(baseUrl);
+
+    const checkoutReconcileResume = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/start-execution`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        mode: 'agent_checkout',
+        requesterId: email,
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        localCheckoutProfileReady: true,
+        extensionCheckoutProfileEnabled: true,
+        extensionFinalSubmitEnabled: true,
+        resumeCheckoutReconcile: true
+      }
+    });
+    const resumedCheckoutSession = checkoutReconcileResume.data.session || {};
+    if (!checkoutReconcileResume.response.ok
+      || resumedCheckoutSession.status !== 'queued'
+      || resumedCheckoutSession.creditReservation?.status !== 'continuation_no_additional_hold'
+      || resumedCheckoutSession.creditReservation?.amountUnits !== 0
+      || resumedCheckoutSession.extensionCheckoutReconcileResume !== true
+      || resumedCheckoutSession.extensionFinalSubmitEnabled !== true
+      || !resumedCheckoutSession.extensionRunDispatch?.nonce
+      || !resumedCheckoutSession.missionBoundAuth?.token) {
+      throw new Error(`checkout_reconcile_resume_not_credit_idempotent:${checkoutReconcileResume.response.status}:${JSON.stringify(checkoutReconcileResume.data)}`);
+    }
+    const reconciliationStateAfterStart = JSON.parse(fs.readFileSync(watchdogStatePath, 'utf8'));
+    const availableAfterReconcile = Number(reconciliationStateAfterStart.userAccounts?.[reconciliationUserHash]?.available || 0);
+    if (availableAfterReconcile !== availableBeforeReconcile
+      || reconciliationStateAfterStart.escrowLocks?.[watchdogSessionId]?.status === 'locked') {
+      throw new Error(`checkout_reconcile_changed_credit_balance:${JSON.stringify({
+        availableBeforeReconcile,
+        availableAfterReconcile,
+        lock: reconciliationStateAfterStart.escrowLocks?.[watchdogSessionId]?.status || null
+      })}`);
+    }
+    const reconcilePoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension'
+    });
+    const reconcileMission = (reconcilePoll.data.sessions || []).find((entry) => entry.id === watchdogSessionId);
+    if (!reconcilePoll.response.ok || !reconcileMission?.extensionRunDispatch?.nonce) {
+      throw new Error(`checkout_reconcile_not_visible_to_runner:${JSON.stringify(reconcilePoll.data)}`);
+    }
+    const reconcileHolderKey = crypto.generateKeyPairSync('ed25519');
+    const reconcileClaim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(watchdogSessionId)}/claim`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        holderPublicKeyJwk: reconcileHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: reconcileMission.extensionRunDispatch.nonce
+      }
+    });
+    const reconcilePlan = reconcileClaim.data.session?.extensionMissionPlan || {};
+    if (!reconcileClaim.response.ok
+      || reconcilePlan.resumeCheckoutReconcile !== true
+      || reconcilePlan.resumeCheckoutAutoSubmit !== true
+      || reconcilePlan.startUrl !== 'https://www.amazon.com/checkout/p/p-reconcile/address?pipelineType=Chewbacca'
+      || reconcilePlan.actions?.map((action) => action.type).join(',') !== 'navigate,fill_checkout_profile,click_intent,fill_checkout_profile,inspect,final_submit,final_submit,inspect,pause'
+      || reconcilePlan.actions?.[0]?.preserveExistingCheckout !== true
+      || reconcilePlan.actions?.[6]?.pendingOrderContinuation !== true
+      || reconcilePlan.actions?.[6]?.priorFinalSubmitActionId !== 'submit-final-order'
+      || reconcilePlan.actions?.[6]?.chainAuthorizationActionId !== 'submit-final-order'
+      || reconcilePlan.limits?.stopBeforeFinalSubmit !== false
+      || reconcilePlan.actions?.some((action) => action.type === 'prepare_cart')) {
+      throw new Error(`checkout_reconcile_auto_submit_plan_invalid:${reconcileClaim.response.status}:${JSON.stringify(reconcilePlan)}`);
+    }
+
+    // A fresh auto-submit mission must carry its one-order authority all the
+    // way through a claimed plan. This guards the server/runner contract that
+    // previously allowed the browser to reach final review, then rejected the
+    // final_submit checkpoint because the approval was never persisted.
+    const autoSubmitStart = await request(baseUrl, '/connectors/sessions/start', {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        connectorId: 'browser-worker-demo-v1',
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        prompt: 'buy nature valley granola bars from amazon under $4',
+        profileSummary: {}
+      }
+    });
+    const autoSubmitSessionId = autoSubmitStart.data.session?.id;
+    if (!autoSubmitStart.response.ok || !autoSubmitSessionId) {
+      throw new Error(`auto_submit_fixture_start_failed:${autoSubmitStart.response.status}:${JSON.stringify(autoSubmitStart.data)}`);
+    }
+    const autoSubmitMode = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/completion-mode`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: { mode: 'agent_checkout' }
+    });
+    if (!autoSubmitMode.response.ok) {
+      throw new Error(`auto_submit_fixture_mode_failed:${autoSubmitMode.response.status}:${JSON.stringify(autoSubmitMode.data)}`);
+    }
+    const autoSubmitExecution = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/start-execution`, {
+      method: 'POST',
+      cookie: auth.cookie,
+      body: {
+        mode: 'agent_checkout',
+        preferredExecutionAgentId: 'magic-city-runner-extension',
+        extensionCheckoutProfileEnabled: true,
+        extensionFinalSubmitEnabled: true
+      }
+    });
+    const autoSubmitSession = autoSubmitExecution.data.session || {};
+    const autoApproval = autoSubmitSession.finalSubmitApproval || {};
+    if (!autoSubmitExecution.response.ok
+      || autoSubmitSession.extensionMissionPlan?.limits?.stopBeforeFinalSubmit !== false
+      || autoSubmitSession.extensionFinalSubmitEnabled !== true
+      || autoApproval.authorizationMode !== 'mission_auto_submit'
+      || autoApproval.maxOrders !== 1
+      || autoApproval.planHash !== autoSubmitSession.extensionMissionPlan?.planHash
+      || !(autoSubmitSession.executionTrace || []).some((event) => (
+        event?.state === 'final_submit_authorized'
+        && event?.approval?.approvalHash === autoApproval.approvalHash
+      ))) {
+      throw new Error(`fresh_auto_submit_authority_not_persisted:${autoSubmitExecution.response.status}:${JSON.stringify(autoSubmitExecution.data)}`);
+    }
+    const autoSubmitPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1'
+    });
+    const autoSubmitMission = (autoSubmitPoll.data.sessions || []).find((entry) => entry.id === autoSubmitSessionId);
+    if (!autoSubmitPoll.response.ok || !autoSubmitMission?.extensionRunDispatch?.nonce) {
+      throw new Error(`fresh_auto_submit_not_visible_to_runner:${JSON.stringify(autoSubmitPoll.data)}`);
+    }
+    const autoSubmitHolderKey = crypto.generateKeyPairSync('ed25519');
+    const autoSubmitClaim = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/claim`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        holderPublicKeyJwk: autoSubmitHolderKey.publicKey.export({ format: 'jwk' }),
+        extensionDispatchNonce: autoSubmitMission.extensionRunDispatch.nonce
+      }
+    });
+    let autoSubmitClaimedSession = autoSubmitClaim.data.session || {};
+    const autoSubmitPlan = autoSubmitClaimedSession.extensionMissionPlan || {};
+    if (!autoSubmitClaim.response.ok
+      || autoSubmitPlan.planHash !== autoApproval.planHash
+      || autoSubmitPlan.limits?.stopBeforeFinalSubmit !== false) {
+      throw new Error(`fresh_auto_submit_claim_missing_authority:${autoSubmitClaim.response.status}:${JSON.stringify(autoSubmitClaim.data)}`);
+    }
+    if (autoSubmitSession.finalSubmitChainAuthorization) {
+      throw new Error(`disabled_chain_gate_started_background_work:${JSON.stringify(autoSubmitSession.finalSubmitChainAuthorization)}`);
+    }
+    const autoSubmitFinalAction = autoSubmitPlan.actions?.find((action) => action.type === 'final_submit');
+    const disabledChainGate = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/final-submit-chain-authorization`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        pluginId: 'magic-city-runner-extension',
+        planHash: autoSubmitPlan.planHash,
+        actionId: autoSubmitFinalAction?.id
+      }
+    });
+    if (!disabledChainGate.response.ok
+      || disabledChainGate.data?.ready !== true
+      || disabledChainGate.data?.bypassed !== true
+      || disabledChainGate.data?.authorization?.bypassReason !== 'chain_gate_disabled') {
+      throw new Error(`disabled_chain_gate_did_not_fail_open:${disabledChainGate.response.status}:${JSON.stringify(disabledChainGate.data)}`);
+    }
+    const verifiedMilestones = new Set();
+    for (const action of autoSubmitPlan.actions || []) {
+      if (action.expectedMilestone) verifiedMilestones.add(action.expectedMilestone);
+      if (action.id === 'fill-checkout-profile' || action.id === 'reconcile-payment-profile') {
+        ['address_confirmed', 'card_confirmed', 'delivery_confirmed'].forEach((milestone) => verifiedMilestones.add(milestone));
+      }
+      const targetUrl = String(action.url || (
+        action.type === 'final_submit' || action.id === 'inspect-review' || action.id === 'reconcile-payment-profile'
+          ? 'https://www.amazon.com/checkout/p/p-auto-submit/spc?pipelineType=Chewbacca'
+          : autoSubmitPlan.startUrl
+      ));
+      const checkpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(autoSubmitSessionId)}/checkpoint`, {
+        method: 'POST',
+        bearer: token,
+        runnerSurface: 'chrome-extension',
+        runnerProtocol: 'declarative-v1',
+        body: {
+          pluginId: 'magic-city-runner-extension',
+          label: `Auto-submit fixture completed ${action.id}`,
+          missionAction: action.missionAction,
+          targetUrl,
+          planHash: autoSubmitPlan.planHash,
+          planActionId: action.id,
+          planActionStatus: 'completed',
+          milestoneProtocol: 'verified-v1',
+          verifiedMilestones: [...verifiedMilestones],
+          userApproved: action.type === 'final_submit',
+          browser: {
+            url: targetUrl,
+            currentUrl: targetUrl,
+            finalUrl: targetUrl,
+            title: action.type === 'final_submit' ? 'Amazon final review' : 'Amazon checkout',
+            checkoutSummary: {
+              stage: action.type === 'final_submit' || action.id === 'inspect-review' ? 'final_review' : 'checkout',
+              addressMatches: true,
+              cardMatches: true,
+              deliveryConfirmed: true,
+              expectedCardLast4: '6383',
+              selectedCardLast4: '6383',
+              merchandiseSubtotal: '$2.97',
+              shippingTotal: '$0.00',
+              taxTotal: '$0.00',
+              likelyTotal: '$2.97',
+              cartItemCount: 1
+            }
+          },
+          proofOfPossession: buildPopProof({
+            keyPair: autoSubmitHolderKey,
+            session: autoSubmitClaimedSession,
+            action: action.missionAction,
+            targetUrl
+          })
+        }
+      });
+      if (!checkpoint.response.ok) {
+        throw new Error(`fresh_auto_submit_checkpoint_rejected:${action.id}:${checkpoint.response.status}:${JSON.stringify(checkpoint.data)}`);
+      }
+      autoSubmitClaimedSession = checkpoint.data.session || autoSubmitClaimedSession;
+      if (action.type === 'final_submit') {
+        const trace = await request(baseUrl, `/mission-auth/sessions/${encodeURIComponent(autoSubmitSessionId)}/trace`, {
+          cookie: auth.cookie
+        });
+        if (!trace.response.ok || !trace.data?.trace?.events?.some((event) => event?.action === 'final_submit')) {
+          throw new Error(`fresh_auto_submit_boundary_missing:${trace.response.status}:${JSON.stringify(trace.data)}`);
+        }
+      }
+    }
+
+    console.log(JSON.stringify({
+      nativeRunnerExtensionPairing: 'passed',
+      repeatedRegistrationDurationMs,
+      claimDurationMs,
+      firstCheckpointDurationMs,
+      claimToFirstCheckpointMs: claimDurationMs + firstCheckpointDurationMs,
+      startupBoundary: 'claim_and_first_checkpoint'
+    }));
   } finally {
     await stopServer();
     fs.rmSync(tmpDir, { recursive: true, force: true });

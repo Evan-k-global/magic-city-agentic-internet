@@ -7,8 +7,12 @@ import * as legacyController from './background-v0.2.js';
 const POLL_ALARM = 'magic-city-runner-poll';
 const RESUME_ALARM = 'magic-city-runner-resume';
 const POLL_PERIOD_MINUTES = 1;
-const ACTIVE_MISSION_CONTINUATION_DELAY_MS = 30_000;
-const LEAN_RUNTIME_MODE = 'v0.4.5-bounded-confirmed-checkout';
+const ACTIVE_MISSION_RECOVERY_DELAY_MS = 30_000;
+const ACTIVE_MISSION_PROGRESS_INTERVAL_MS = 15_000;
+const INLINE_CHECKPOINT_RECONCILIATION_DELAY_MS = 200;
+const MAX_INLINE_CHECKPOINT_RECONCILIATIONS = 4;
+const LEAN_RUNTIME_MODE = 'v0.5.5-canonical-pending-order-identity';
+const PROGRESS_STREAM_ID = globalThis.crypto?.randomUUID?.() || `progress-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const ALLOWED_EXTERNAL_ORIGINS = new Set([
   'https://magic-city.ai',
   'https://magic-city-staging.fly.dev'
@@ -41,6 +45,60 @@ async function dispatch(message, sender = null) {
   return result;
 }
 
+function retryingControlPlaneExecution(result) {
+  if (result?.status === 'retrying_control_plane') return result;
+  return Array.isArray(result?.executed)
+    ? result.executed.find((entry) => entry?.status === 'retrying_control_plane') || null
+    : null;
+}
+
+function replaceExecutionResult(result, recovered) {
+  if (!Array.isArray(result?.executed)) return recovered;
+  return {
+    ...result,
+    executed: result.executed.map((entry) => (
+      String(entry?.sessionId || '') === String(recovered?.sessionId || '') ? recovered : entry
+    ))
+  };
+}
+
+async function reconcileCommittedCheckpoint(result) {
+  let reconciledResult = result;
+  for (let attempt = 0; attempt < MAX_INLINE_CHECKPOINT_RECONCILIATIONS; attempt += 1) {
+    const interrupted = retryingControlPlaneExecution(reconciledResult);
+    if (!interrupted?.sessionId) return reconciledResult;
+    const stored = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
+    const actionId = String(stored.lastExecution?.actionId || '');
+    const sessionId = String(interrupted.sessionId || '');
+    if (!/^(?:open-site|(?:prepare|open)-cart|continue-checkout|inspect-review|confirm-pending-order|confirm-merchant-order)(?:-\d+)?$/.test(actionId)
+      || String(stored.lastExecution?.sessionId || '') !== sessionId
+      || String(stored.activeRun?.sessionId || '') !== sessionId) {
+      return reconciledResult;
+    }
+    const now = new Date().toISOString();
+    await chrome.storage.local.set({
+      activeRun: {
+        ...stored.activeRun,
+        progressLabel: 'Reconnecting Runner',
+        progressState: 'reconnecting_control_plane',
+        progressSequence: Number(stored.activeRun?.progressSequence || 0) + 1,
+        progressUpdatedAt: now,
+        updatedAt: now
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, INLINE_CHECKPOINT_RECONCILIATION_DELAY_MS));
+    try {
+      const recovered = await legacyController.resumeActiveRun();
+      if (recovered?.sessionId !== sessionId) return reconciledResult;
+      reconciledResult = replaceExecutionResult(reconciledResult, recovered);
+    } catch {
+      // The controller already armed the normal recovery alarm before yielding.
+      return reconciledResult;
+    }
+  }
+  return reconciledResult;
+}
+
 async function dispatchAlarm(alarm = null) {
   if (!await hasPairedDevice()) return;
   if (alarm?.name === RESUME_ALARM) {
@@ -52,7 +110,7 @@ async function dispatchAlarm(alarm = null) {
     // resumes the already-signed next plan step instead of losing the run.
     if (result?.status === 'already_running') {
       await chrome.alarms.create(RESUME_ALARM, {
-        when: Date.now() + ACTIVE_MISSION_CONTINUATION_DELAY_MS
+        when: Date.now() + ACTIVE_MISSION_RECOVERY_DELAY_MS
       });
     }
     return result;
@@ -74,7 +132,7 @@ async function bootLeanRuntime() {
   const { activeSessionId = '', activeRun = null } = await chrome.storage.local.get({ activeSessionId: '', activeRun: null });
   if (String(activeRun?.sessionId || activeSessionId || '').trim()) {
     // Preserve recovery across a service-worker restart. The marker is set
-    // only after the user-approved mission has been claimed.
+    // before the user-approved mission claim and retained through startup.
     await chrome.alarms.create(RESUME_ALARM, { when: Date.now() + 1_000 });
   } else {
     await clearLegacyResumeAlarm();
@@ -123,4 +181,92 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
   return true;
+});
+
+chrome.runtime.onConnectExternal.addListener((port) => {
+  let origin = '';
+  try {
+    origin = new URL(port.sender?.url || port.sender?.origin || '').origin;
+  } catch {
+    origin = '';
+  }
+  if (!ALLOWED_EXTERNAL_ORIGINS.has(origin) || port.name !== 'magic-city-active-run-v1') {
+    port.disconnect();
+    return;
+  }
+
+  let started = false;
+  let progressTimer = null;
+  let progressSequence = 0;
+  let progressQueued = false;
+  const postProgress = async () => {
+    try {
+      const { activeRun = null, lastExecution = null } = await chrome.storage.local.get({ activeRun: null, lastExecution: null });
+      progressSequence += 1;
+      port.postMessage({
+        type: 'RUNNER_PROGRESS',
+        streamId: PROGRESS_STREAM_ID,
+        sequence: progressSequence,
+        activeRun: activeRun ? {
+          sessionId: activeRun.sessionId || '',
+          phase: activeRun.phase || '',
+          progressLabel: activeRun.progressLabel || '',
+          progressState: activeRun.progressState || '',
+          progressSequence: Number(activeRun.progressSequence || 0) || 0,
+          progressUpdatedAt: activeRun.progressUpdatedAt || activeRun.updatedAt || '',
+          actionId: activeRun.actionId || '',
+          workerId: activeRun.workerId || '',
+          lastAwaitedOperation: activeRun.lastAwaitedOperation || null,
+          startupTiming: activeRun.startupTiming || null
+        } : null,
+        lastExecution: lastExecution || null,
+        at: new Date().toISOString()
+      });
+    } catch {
+      // A progress pulse is advisory; the durable checkpoints remain primary.
+    }
+  };
+  const queueProgress = () => {
+    if (progressQueued) return;
+    progressQueued = true;
+    queueMicrotask(() => {
+      progressQueued = false;
+      void postProgress();
+    });
+  };
+  const onStorageChanged = (changes, areaName) => {
+    if (areaName !== 'local') return;
+    const activeRunChanged = Boolean(changes.activeRun && (
+      Number(changes.activeRun.newValue?.progressSequence || 0) !== Number(changes.activeRun.oldValue?.progressSequence || 0)
+      || String(changes.activeRun.newValue?.actionId || '') !== String(changes.activeRun.oldValue?.actionId || '')
+      || String(changes.activeRun.newValue?.workerId || '') !== String(changes.activeRun.oldValue?.workerId || '')
+    ));
+    const lastExecutionChanged = Boolean(changes.lastExecution && (
+      String(changes.lastExecution.newValue?.status || '') !== String(changes.lastExecution.oldValue?.status || '')
+      || String(changes.lastExecution.newValue?.sessionId || '') !== String(changes.lastExecution.oldValue?.sessionId || '')
+    ));
+    if (!activeRunChanged && !lastExecutionChanged) return;
+    queueProgress();
+  };
+
+  port.onDisconnect.addListener(() => {
+    if (progressTimer) clearInterval(progressTimer);
+    chrome.storage.onChanged?.removeListener?.(onStorageChanged);
+  });
+  port.onMessage.addListener((message) => {
+    if (started) return;
+    started = true;
+    chrome.storage.onChanged?.addListener?.(onStorageChanged);
+    void postProgress();
+    progressTimer = setInterval(() => { void postProgress(); }, ACTIVE_MISSION_PROGRESS_INTERVAL_MS);
+    dispatch(message, { origin })
+      .then(reconcileCommittedCheckpoint)
+      .then((result) => port.postMessage({ type: 'RUNNER_RESULT', ok: true, result }))
+      .catch((error) => port.postMessage({ type: 'RUNNER_RESULT', ok: false, error: error?.message || String(error) }))
+      .finally(() => {
+        if (progressTimer) clearInterval(progressTimer);
+        progressTimer = null;
+        try { port.disconnect(); } catch {}
+      });
+  });
 });

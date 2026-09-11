@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Custom Magic City Helper Starter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Starter helper for mission-scoped Magic City browser execution.",
   "permissions": ["alarms", "storage", "tabs", "scripting"],
   "optional_host_permissions": ["https://*/*"],

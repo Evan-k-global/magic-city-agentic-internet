@@ -63,6 +63,7 @@ assert.equal(prematurePaymentClaim.proofEligible, false);
 const plan = buildBrowserExtensionMissionPlan({
   id: 'cs-terminal-contract',
   handoffData: { kind: 'browser' },
+  extensionCheckoutProfileEnabled: true,
   selections: {
     targetUrl: 'https://www.amazon.com/',
     goal: 'Buy Nature Valley granola bars for $4 max',
@@ -92,7 +93,50 @@ assert.equal(plan.actions.find((entry) => entry.id === 'inspect-cart')?.expected
 assert.equal(plan.actions.find((entry) => entry.id === 'select-match')?.expectedMilestone, 'candidate_selected');
 assert.equal(plan.actions.find((entry) => entry.id === 'inspect-cart')?.expectedMilestone, 'cart_confirmed');
 assert.equal(plan.actions.find((entry) => entry.id === 'open-checkout')?.expectedMilestone, 'checkout_open');
+const planContinueCheckoutIndex = plan.actions.findIndex((entry) => entry.id === 'continue-checkout');
+const planPaymentReconcileIndex = plan.actions.findIndex((entry) => entry.id === 'reconcile-payment-profile');
+const planInspectReviewIndex = plan.actions.findIndex((entry) => entry.id === 'inspect-review');
+assert.ok(planPaymentReconcileIndex > planContinueCheckoutIndex, 'single-item Amazon missions must reconcile after payment-page navigation');
+assert.ok(planInspectReviewIndex > planPaymentReconcileIndex, 'final review must follow payment reconciliation');
 assert.equal(plan.actions.find((entry) => entry.id === 'inspect-review')?.expectedMilestone, 'final_review_ready');
+
+const autoSubmitPlan = buildBrowserExtensionMissionPlan({
+  id: 'cs-terminal-auto-submit',
+  handoffData: { kind: 'browser' },
+  extensionCheckoutProfileEnabled: true,
+  extensionFinalSubmitEnabled: true,
+  selections: {
+    targetUrl: 'https://www.amazon.com/',
+    goal: 'Buy Nature Valley granola bars for $4 max',
+    budget: '$4',
+    finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+  }
+});
+assert.equal(autoSubmitPlan.limits.stopBeforeFinalSubmit, false, 'unchecked final review must authorize one verified final submit');
+assert.equal(
+  autoSubmitPlan.actions.some((action) => action.type === 'final_submit' && action.autoSubmitAfterVerifiedCheckout === true),
+  true,
+  'unchecked final review must include a signed auto-submit action'
+);
+
+const reviewPlan = buildBrowserExtensionMissionPlan({
+  id: 'cs-terminal-manual-review',
+  handoffData: { kind: 'browser' },
+  extensionCheckoutProfileEnabled: true,
+  extensionFinalSubmitEnabled: true,
+  selections: {
+    targetUrl: 'https://www.amazon.com/',
+    goal: 'Buy Nature Valley granola bars for $4 max',
+    budget: '$4',
+    finalApprovalPolicy: 'pause_before_final_approval'
+  }
+});
+assert.equal(reviewPlan.limits.stopBeforeFinalSubmit, true, 'explicit final review must retain the boundary');
+assert.equal(
+  reviewPlan.actions.some((action) => action.type === 'final_submit'),
+  false,
+  'manual-review plans must not carry a final-submit action'
+);
 
 let milestoneState = initialBrowserExtensionPlanState(plan);
 for (const action of plan.actions) {
@@ -141,9 +185,66 @@ const unverifiedReview = evaluateBrowserExtensionFulfillment({
 assert.equal(unverifiedReview.status, 'failed');
 assert.equal(unverifiedReview.proofEligible, false);
 
+const failedFinalDispatch = evaluateBrowserExtensionFulfillment({
+  status: 'failed',
+  result: {
+    browserExecution: {
+      finalUrl: 'https://www.amazon.com/gp/buy/spc/handlers/display.html',
+      stopState: 'final_submit_dispatch_failed',
+      checkoutProgress: { checkoutOpened: true },
+      checkoutSummary: { stage: 'final_review' }
+    }
+  }
+});
+assert.equal(failedFinalDispatch.accepted, false, 'a final click that did not dispatch must never be accepted as an order');
+assert.equal(failedFinalDispatch.proofEligible, false);
+
+const pendingOrderManualVerification = evaluateBrowserExtensionFulfillment({
+  status: 'fulfilled',
+  result: {
+    browserExecution: {
+      milestoneProtocol: 'verified-v1',
+      verifiedMilestones: ['checkout_open', 'final_review_ready', 'final_submit_requested'],
+      finalUrl: 'https://www.amazon.com/checkout/p/example/duplicateOrder',
+      stopState: 'pending_order_verification_required',
+      finalSubmitRequested: false,
+      checkoutProgress: { checkoutOpened: true },
+      checkoutSummary: { stage: 'checkout', addressVerification: 'unverified' }
+    }
+  }
+});
+assert.equal(pendingOrderManualVerification.status, 'fulfilled');
+assert.equal(pendingOrderManualVerification.accepted, true);
+assert.equal(pendingOrderManualVerification.reason, 'pending_order_verification_required');
+
+const confirmedOrderWithStaleCheckoutSummary = evaluateBrowserExtensionFulfillment({
+  status: 'fulfilled',
+  result: {
+    browserExecution: {
+      milestoneProtocol: 'verified-v1',
+      verifiedMilestones: ['checkout_open', 'final_review_ready', 'final_submit_requested', 'order_submitted'],
+      finalUrl: 'https://www.amazon.com/gp/buy/thankyou/handlers/display.html',
+      stopState: 'order_submitted',
+      orderSubmitted: true,
+      checkoutProgress: { checkoutOpened: true },
+      // A navigation can leave the last checkout observation stale. The
+      // confirmation milestone is terminal and must win over these fields.
+      checkoutSummary: {
+        stage: 'final_review',
+        addressVerification: 'unverified',
+        cardMatches: false
+      }
+    }
+  }
+});
+assert.equal(confirmedOrderWithStaleCheckoutSummary.status, 'fulfilled');
+assert.equal(confirmedOrderWithStaleCheckoutSummary.accepted, true);
+assert.equal(confirmedOrderWithStaleCheckoutSummary.reason, 'order_submitted');
+
 console.log(JSON.stringify({
   ok: true,
   rejectedSearchPage,
   checkoutReview,
+  autoSubmitAuthorized: autoSubmitPlan.limits.stopBeforeFinalSubmit === false,
   requiredMilestones: ['select-match', 'prepare-cart', 'inspect-cart']
 }, null, 2));

@@ -502,7 +502,7 @@ function buildBrowserWorkerClarification(prompt = '') {
         '',
         missing.length
           ? `To run it, I need ${missing.join(missing.length === 2 ? ' and ' : ', ')}. The Magic Internet Agent contract is: item or task + website + budget.`
-          : 'I have the three-part contract. I will search the best match for each item under the shared site and budget constraints, then pause before payment or final purchase.'
+          : `I have the three-part contract. I will search the best match for each item under the shared site and budget constraints, then ${inferBrowserMerchantLabel(prompt) === 'amazon.com' ? 'pause only for login, payment, captcha, or a checkout mismatch.' : 'pause before payment or final purchase.'}`
       ].join('\n')
     };
   }
@@ -524,7 +524,9 @@ function buildBrowserWorkerClarification(prompt = '') {
         ? `Before I open Magic Internet Agent, I need ${missing.join(missing.length === 2 ? ' and ' : ', ')}.`
         : 'I have enough to open Magic Internet Agent.',
       '',
-      missing.map((entry) => `- ${entry}`).join('\n') || 'I’ll prefill the execution sheet and pause before payment or final purchase.',
+      missing.map((entry) => `- ${entry}`).join('\n') || (inferBrowserMerchantLabel(prompt) === 'amazon.com'
+        ? 'I’ll prefill the execution sheet and pause only for login, payment, captcha, or a checkout mismatch.'
+        : 'I’ll prefill the execution sheet and pause before payment or final purchase.'),
       missing.length ? 'Reliable execution path: item or task + website + budget.' : '',
       missing.length ? 'Once you answer, I’ll prefill one helper session for your review.' : ''
     ].join('\n')

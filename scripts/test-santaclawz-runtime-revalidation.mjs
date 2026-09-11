@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID } from '../src/santaclawzIntegrationPolicy.js';
 
 const {
   evaluateSantaClawzRuntimeRevalidation,
@@ -7,6 +8,7 @@ const {
 
 const now = Date.parse('2026-08-07T16:45:00.000Z');
 const healthyRuntime = {
+  agentId: SANTACLAWZ_CODE_AUDIT_EXTERNAL_AGENT_ID,
   online: true,
   hireable: true,
   paidExecutionReady: true,

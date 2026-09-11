@@ -21,6 +21,7 @@ licensed so builders can make and connect their own local helper agents.
 - [NOTICE](/Users/evankereiakes/Documents/Codex/agent-verification/NOTICE)
 - [IP-NOTICE.md](/Users/evankereiakes/Documents/Codex/agent-verification/IP-NOTICE.md)
 - [docs/MAGIC_CITY_PUBLIC_IP_THESIS.md](/Users/evankereiakes/Documents/Codex/agent-verification/docs/MAGIC_CITY_PUBLIC_IP_THESIS.md)
+- [Partner and white-label quickstart](docs/partner-white-label-quickstart.md)
 
 Execution architecture specs:
 - [SCHEDULED_WORKFLOWS_SPEC.md](/Users/evankereiakes/Documents/Codex/agent-verification/SCHEDULED_WORKFLOWS_SPEC.md)

@@ -145,6 +145,14 @@ const MBA_RETAIL_CHECKOUT_PROFILE_STATUSES = new Set([
   'order_submitted'
 ]);
 
+function resolveDefaultZekoNetwork() {
+  return String(
+    process.env.MAGIC_CITY_MISSION_PROOF_NETWORK_ID ||
+    process.env.ZEKO_NETWORK_ID ||
+    'zeko:testnet'
+  ).trim() || 'zeko:testnet';
+}
+
 const MAGIC_CITY_TO_MBA_ACTION = Object.freeze({
   inspect: 'page.read',
   crawl: 'page.read',
@@ -546,7 +554,7 @@ export function buildMbaRedactedTraceExport(input = {}) {
 export function buildMbaDiscoveryDocument({
   baseUrl,
   legacyDiscovery = null,
-  zekoNetwork = 'zeko:testnet'
+  zekoNetwork = resolveDefaultZekoNetwork()
 } = {}) {
   const normalizedBase = String(baseUrl || '').replace(/\/+$/, '');
   return {
@@ -968,7 +976,7 @@ export function buildMbaRegistryAnchor(input = {}) {
     receiptIdHash: input.receiptIdHash,
     nullifier: input.nullifier,
     previousRoot: input.previousRoot ?? '0',
-    networkId: input.networkId ?? 'zeko:testnet',
+    networkId: input.networkId ?? resolveDefaultZekoNetwork(),
     registryAddress: input.registryAddress ?? null,
     txHash: input.txHash ?? null
   };

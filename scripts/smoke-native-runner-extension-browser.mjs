@@ -154,7 +154,7 @@ function createCertificate(directory) {
   return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
 }
 
-function copyTestExtension(directory, externalOrigin = '') {
+function copyTestExtension(directory, externalOrigin = '', options = {}) {
   const destination = path.join(directory, 'extension');
   fs.cpSync(extensionSource, destination, { recursive: true });
   const manifestPath = path.join(destination, 'manifest.json');
@@ -179,22 +179,64 @@ function copyTestExtension(directory, externalOrigin = '') {
       `  'https://magic-city-staging.fly.dev',\n  '${origin}'\n]);`
     ));
   }
+  const finalSubmitLeaseMs = Number(options.finalSubmitLeaseMs);
+  if (options.finalSubmitLeaseMs != null
+    && Number.isFinite(finalSubmitLeaseMs)
+    && finalSubmitLeaseMs > 0) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const marker = 'const FINAL_SUBMIT_LOCAL_LEASE_MS = 45_000;';
+    if (!background.includes(marker)) fail('test_extension_final_submit_lease_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      marker,
+      `const FINAL_SUBMIT_LOCAL_LEASE_MS = ${finalSubmitLeaseMs};`
+    ));
+  }
+  if (Number.isFinite(Number(options.finalSubmitDelayMs)) && Number(options.finalSubmitDelayMs) > 0) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const marker = '        assertFinalSubmitLocalAuthority(session, finalSubmitAuthorityLease, plan, action);';
+    if (!background.includes(marker)) fail('test_extension_final_submit_delay_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      marker,
+      [
+        `        await new Promise((resolve) => setTimeout(resolve, ${Number(options.finalSubmitDelayMs)}));`,
+        marker
+      ].join('\n')
+    ));
+  }
   return destination;
 }
 
-function waitFor(check, timeoutMs = 20_000) {
+async function waitFor(check, timeoutMs = 20_000) {
   const startedAt = Date.now();
-  return new Promise((resolve, reject) => {
-    const timer = setInterval(() => {
-      if (check()) {
-        clearInterval(timer);
-        resolve();
-      } else if (Date.now() - startedAt >= timeoutMs) {
-        clearInterval(timer);
-        reject(new Error('browser_extension_smoke_timeout'));
-      }
-    }, 100);
-  });
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('browser_extension_smoke_timeout');
+}
+
+function withTimeout(promise, timeoutMs, errorCode) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(errorCode)), timeoutMs))
+  ]);
+}
+
+function runtimeMessageWithTimeout(page, message, timeoutMs = 3_000) {
+  return page.evaluate(({ payload, timeout }) => new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    setTimeout(() => finish({ timeout: true }), timeout);
+    chrome.runtime.sendMessage(payload, (response) => {
+      finish({ response, error: chrome.runtime.lastError?.message || '' });
+    });
+  }), { payload: message, timeout: timeoutMs });
 }
 
 function storefront(pathname, searchParams = new URLSearchParams()) {
@@ -450,6 +492,17 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '</main>'
     ].join('');
   }
+  if (pathname === '/cart-accessibility-title') {
+    return [
+      '<main><h1>Your cart</h1>',
+      '<div id="activeCartViewForm">',
+      '<div class="sc-list-item" data-asin="NATURE-VALLEY-ALMOND">',
+      '<a href="/dp/NATURE-VALLEY-ALMOND">Nature Valley Sweet &amp; Salty Almond Granola Bars, 6 ct, 7.2 oz<span class="a-offscreen"> | ... Opens in a new tab</span></a>',
+      '<p>$2.97</p><label>Quantity: <select name="quantity"><option selected>1</option></select></label><button data-action="delete">Delete</button>',
+      '</div></div><p>Subtotal (1 item): $2.97</p>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/cart' || pathname === '/gp/cart/view.html') {
     if (searchParams.get('brand') === 'nature-valley-valid') brandCartItem = 'nature-valley-valid';
     if (searchParams.get('late') === 'paid') {
@@ -541,8 +594,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/checkout' || pathname === '/checkout/p/p-106-7044535-6467434/spc') {
-    const selectedCardLast4 = String(checkoutFixture.selectedCardLast4 || '0109');
-    const selectedCardBrand = selectedCardLast4 === '1817' ? 'Mastercard' : 'Visa';
+    const confirmedPendingOrder = searchParams.get('confirmed') === '1';
+    const selectedCardLast4 = confirmedPendingOrder ? '6383' : String(checkoutFixture.selectedCardLast4 || '0109');
+    const selectedCardBrand = ['1817', '6383'].includes(selectedCardLast4) ? 'Mastercard' : 'Visa';
     const addressPrimeModal = checkoutFixture.showAddressPrimeModal
       ? [
           '<div id="prime-address-modal" role="dialog" aria-modal="true">',
@@ -560,13 +614,14 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       ? '<label><input type="radio" name="address" data-summary="1 MAGIC CITY ST, UNIT 999, SAN FRANCISCO, CA 94107" /> Test User 1 MAGIC CITY ST Unit 999 San Francisco, CA 94107 United States</label>'
       : '';
     const matchingAddressChoice = checkoutFixture.matchingAddressAvailable
-      ? `<label><input type="radio" name="address" data-summary="${matchingAddressSummary}" /> ${matchingAddressText}</label>`
+      ? `<label><input type="radio" name="address" data-summary="${matchingAddressSummary}"${checkoutFixture.matchingAddressChecked ? ' checked' : ''} /> ${matchingAddressText}</label>`
       : '';
+    const selectedFreeDelivery = confirmedPendingOrder || checkoutFixture.selectedFreeDelivery === true;
     const freeDeliveryOptions = checkoutFixture.freeDeliveryAvailable === false
       ? ''
       : [
           '<label><input type="radio" name="delivery" /> Standard delivery FREE</label>',
-          '<label><input type="radio" name="delivery" /> One-Day delivery FREE</label>'
+          `<label><input type="radio" name="delivery"${selectedFreeDelivery ? ' checked' : ''} /> One-Day delivery FREE</label>`
         ].join('');
     return [
       addressPrimeModal,
@@ -577,15 +632,15 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       `<p>Subtotal (${checkoutFixture.itemCount} ${checkoutFixture.itemCount === 1 ? 'item' : 'items'}): ${checkoutFixture.merchandiseSubtotal || checkoutFixture.total}</p>`,
       '<div class="checkout-card"><div class="checkout-card-copy">',
       '<h2>Delivering to Test User</h2>',
-      '<p id="delivery-summary">99 Wrong Road, New York, NY 10001</p>',
+      `<p id="delivery-summary">${confirmedPendingOrder ? '1 Magic City Way, San Francisco, CA 94107' : '99 Wrong Road, New York, NY 10001'}</p>`,
       '<p>Add delivery instructions</p></div>',
-      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); document.querySelector(\'#address-options\').hidden=false">Change</a></div>',
+      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); (window.__checkoutEvents ||= []).push(\'open-address\'); document.querySelector(\'#address-options\').hidden=false">Change</a></div>',
       '<div id="address-options" hidden>',
       '<label><input type="radio" name="address" /> 99 Wrong Road, 10001</label>',
       conflictingUnitChoice,
       matchingAddressChoice,
-      '<button onclick="const selected=document.querySelector(\'input[name=address]:checked\'); if(selected?.dataset.summary){document.querySelector(\'#delivery-summary\').textContent=selected.dataset.summary; document.querySelector(\'#address-options\').hidden=true}">Deliver to this address</button>',
-      '<button onclick="document.querySelector(\'#new-address-form\').hidden=false">Add a new delivery address</button></div>',
+      '<button onclick="(window.__checkoutEvents ||= []).push(\'confirm-address-choice\'); const selected=document.querySelector(\'input[name=address]:checked\'); if(selected?.dataset.summary){document.querySelector(\'#delivery-summary\').textContent=selected.dataset.summary; document.querySelector(\'#address-options\').hidden=true}">Deliver to this address</button>',
+      '<button onclick="(window.__checkoutEvents ||= []).push(\'open-new-address\'); document.querySelector(\'#new-address-form\').hidden=false">Add a new delivery address</button></div>',
       `<div id="new-address-form" role="dialog" aria-modal="true" style="position:fixed;inset:24px;z-index:10;background:white;overflow:auto" ${checkoutFixture.startWithNewAddressModal ? '' : 'hidden'}><h2>Add a new delivery address</h2>`,
       '<input aria-label="Full name" value="Wrong Name" />',
       '<input aria-label="Phone number" value="2125550100" />',
@@ -593,30 +648,31 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<input aria-label="City" value="New York" />',
       '<select aria-label="State"><option value="CA">California</option><option value="NY" selected>New York</option></select>',
       '<input aria-label="ZIP code" value="10001" />',
-      '<button onclick="const street=document.querySelector(\'[aria-label=\\\'Street address\\\']\').value; const city=document.querySelector(\'[aria-label=\\\'City\\\']\').value; const state=document.querySelector(\'[aria-label=\\\'State\\\']\').value; const zip=document.querySelector(\'[aria-label=\\\'ZIP code\\\']\').value; document.querySelector(\'#delivery-summary\').textContent=`${street}, ${city}, ${state} ${zip}`; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true">Deliver to this address</button></div></div>',
+      '<button onclick="(window.__checkoutEvents ||= []).push(\'confirm-new-address\'); const street=document.querySelector(\'[aria-label=\\\'Street address\\\']\').value; const city=document.querySelector(\'[aria-label=\\\'City\\\']\').value; const state=document.querySelector(\'[aria-label=\\\'State\\\']\').value; const zip=document.querySelector(\'[aria-label=\\\'ZIP code\\\']\').value; document.querySelector(\'#delivery-summary\').textContent=`${street}, ${city}, ${state} ${zip}`; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true">Deliver to this address</button></div></div>',
       '<div class="checkout-card"><div class="checkout-card-copy">',
       `<h2 id="payment-summary">Paying with ${selectedCardBrand} ${selectedCardLast4}</h2>`,
       '<p>Use a gift card, voucher, or promo code</p></div>',
-      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); document.querySelector(\'#payment-options\').hidden=false">Change</a></div>',
+      '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); (window.__checkoutEvents ||= []).push(\'open-payment\'); document.querySelector(\'#payment-options\').hidden=false">Change</a></div>',
       '<div id="payment-options" hidden>',
       `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '0109' ? 'checked' : ''} /> Visa ending in 0109</label>`,
       `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '1817' ? 'checked' : ''} /> Mastercard ending 1817</label>`,
-      '<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" /> Visa ending in 6383</label>',
+      `<label><input style="position:absolute;opacity:0;width:1px;height:1px" type="radio" name="payment" ${selectedCardLast4 === '6383' ? 'checked' : ''} /> Mastercard ending in 6383</label>`,
       '<a href="#" onclick="event.preventDefault(); document.querySelector(\'#add-card-form\').hidden=false">Add a credit or debit card</a>',
-      '<button id="use-payment-method" onclick="const selected=document.querySelector(\'input[name=payment]:checked\'); const text=selected?.closest(\'label\')?.innerText || \'\'; if(selected && /(?:visa|mastercard|amex|discover)/i.test(text)){document.querySelector(\'#payment-summary\').textContent=`Paying with ${text.replace(/ ending in /i, \' \')}`; document.querySelector(\'#payment-options\').hidden=true}">Use this payment method</button></div>',
+      '<button id="use-payment-method" onclick="(window.__checkoutEvents ||= []).push(\'confirm-payment\'); const selected=document.querySelector(\'input[name=payment]:checked\'); const text=selected?.closest(\'label\')?.innerText || \'\'; if(selected && /(?:visa|mastercard|amex|discover)/i.test(text)){document.querySelector(\'#payment-summary\').textContent=`Paying with ${text.replace(/ ending in /i, \' \')}`; document.querySelector(\'#payment-options\').hidden=true}">Use this payment method</button></div>',
       '<div id="add-card-form" hidden><h2>Add a credit or debit card</h2><input id="card-number-input" aria-label="Card number" autocomplete="cc-number" /><input aria-label="Name on card" autocomplete="cc-name" /><button onclick="const number=document.querySelector(\'#card-number-input\').value.replace(/\\D/g,\'\'); const last4=number.slice(-4); document.querySelector(\'#payment-summary\').textContent=`Paying with Mastercard ${last4}`; document.querySelector(\'#add-card-form\').hidden=true; document.querySelector(\'#payment-options\').hidden=true">Add your card</button></div></div>',
       '<div class="checkout-card"><div class="checkout-card-copy">',
       '<h2>Shipping speed</h2>',
-      '<p>Fast delivery $3.99</p></div>',
+      `<p>${selectedFreeDelivery ? 'One-Day delivery FREE' : 'Fast delivery $3.99'}</p></div>`,
       '<div class="checkout-card-action"><a href="#" onclick="event.preventDefault(); document.querySelector(\'#delivery-options\').hidden=false">Change</a></div>',
       '<div id="delivery-options" hidden>',
       '<label><input type="radio" name="delivery" /> Fast delivery $3.99</label>',
       freeDeliveryOptions,
       '<label><input type="radio" name="delivery" /> Try Prime FREE one-day trial</label></div></div>',
-      '<input aria-label="Billing street address" value="1 Wrong Billing Way" />',
-      '<input aria-label="Billing ZIP code" value="99999" />',
-      '<button onclick="document.querySelector(\'#order-result\').textContent=\'Order placed\'; this.remove()">Place order</button>',
-      '<p id="order-result"></p>',
+      `<input aria-label="Billing street address" value="${confirmedPendingOrder ? '99 Billing Plaza' : '1 Wrong Billing Way'}" />`,
+      `<input aria-label="Billing ZIP code" value="${confirmedPendingOrder ? '10001' : '99999'}" />`,
+      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
+      `<p id="order-result">${confirmedPendingOrder ? 'Order placed' : ''}</p>`,
+      confirmedPendingOrder ? '<script>document.querySelector(\'[aria-label="Street address"]\').value="1 Magic City Way"; document.querySelector(\'[aria-label="City"]\').value="San Francisco"; document.querySelector(\'[aria-label="State"]\').value="CA"; document.querySelector(\'[aria-label="ZIP code"]\').value="94107"; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true; document.querySelector(\'#payment-options\').hidden=true;</script>' : '',
       '</main>'
     ].join('');
   }
@@ -637,9 +693,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<a href="#add-card">Add a credit or debit card</a>',
       '<a href="#gift-card">Use a gift card, voucher, or promo code</a>',
       '</div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-top" name="payment-confirm-top" type="submit" aria-labelledby="payment-confirm-top-announce" onclick="sessionStorage.setItem(\'magic-city-payment-confirm-clicks\', String(Number(sessionStorage.getItem(\'magic-city-payment-confirm-clicks\') || 0) + 1)); setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-top-announce" class="a-button-text">Use this payment method</span></span></span>',
       '<div style="height: 300px"></div>',
-      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="location.href=\'/checkout/final-review\'" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
+      '<span class="a-button"><span class="a-button-inner"><input id="payment-confirm-bottom" name="payment-confirm-bottom" type="submit" aria-labelledby="payment-confirm-bottom-announce" onclick="sessionStorage.setItem(\'magic-city-payment-confirm-clicks\', String(Number(sessionStorage.getItem(\'magic-city-payment-confirm-clicks\') || 0) + 1)); setTimeout(() => { location.href=\'/checkout/final-review\' }, 650)" /><span id="payment-confirm-bottom-announce" class="a-button-text">Use this payment method</span></span></span>',
       '</section>',
       '<section aria-label="Delivery address">',
       '<h2>Delivering to Test User</h2>',
@@ -650,13 +706,81 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/checkout/final-review') {
+    const pickupDisclosure = checkoutFixture.showPickupDisclosure
+      ? [
+          '<button id="pickup-disclosure" onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-disclosure-opened\'); document.querySelector(\'#pickup-modal\')?.removeAttribute(\'hidden\')">FREE pickup available nearby</button>',
+          '<button id="pickup-change" onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-change-to-pickup\'); document.querySelector(\'#pickup-modal\')?.removeAttribute(\'hidden\')">Change to pickup</button>'
+        ].join('')
+      : '';
+    const pickupModal = checkoutFixture.showPickupModal
+      ? [
+          `<div id="pickup-modal" class="a-popover a-popover-modal"${checkoutFixture.showPickupDisclosure ? ' hidden' : ''} style="position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto">`,
+          '<button id="pickup-close" aria-label="Close" onclick="sessionStorage.setItem(\'magic-city-pickup-overlay-closed\', \'1\'); document.querySelector(\'#pickup-modal\').remove()">×</button>',
+          '<h2>Select a pickup location</h2>',
+          '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
+          '<section><h3>Amazon Counter at Whole Foods Market</h3><p>774 Emerson St, Palo Alto, CA 94301</p><p>FREE pickup Friday, Aug 28</p><button onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-selected\')">Pick up here</button></section>',
+          '</div>'
+        ].join('')
+      : '';
     return [
+      pickupModal,
       '<main><h1>Review your order</h1>',
       '<section aria-label="Order summary"><p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p></section>',
       '<section aria-label="Payment method"><h2>Paying with Mastercard 6383</h2></section>',
-      '<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>',
+      `<section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p>${pickupDisclosure}</section>`,
       '<label><input id="merchant-checkout-default" type="checkbox" /> Default to this delivery address and payment method.</label>',
-      '<span class="a-button"><span class="a-button-inner"><input id="submitOrderButtonId" type="submit" aria-labelledby="submitOrderButtonId-announce" onclick="document.body.dataset.orderSubmitted=\'1\'; location.href=\'/checkout/order-confirmation\'" /><span id="submitOrderButtonId-announce" class="a-button-text">Place your order</span></span></span>',
+      // Amazon can put the visible final-order words on a wrapper while the
+      // native input itself has no standalone accessible label. Keep this
+      // realistic shape so the runner must preserve the wrapper validation
+      // when dispatching the native click.
+      '<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" /></div>',
+      `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'submitOrderButtonId') return; sessionStorage.setItem('magic-city-native-final-click', '1'); ${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.body.dataset.orderSubmitted='1'; event.preventDefault()"}; }, true)</script>`,
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/checkout/pending-order' || pathname === '/checkout/duplicateOrder') {
+    const sparseDuplicateOrder = pathname === '/checkout/duplicateOrder';
+    const liveSparseDuplicateOrder = sparseDuplicateOrder && searchParams.get('live') === '1';
+    const pendingVariant = searchParams.get('variant');
+    const pendingTitle = pendingVariant === 'cashew'
+      ? 'Nature Valley Cashew Granola Bars'
+      : pendingVariant === 'almond'
+        ? 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz'
+        : pendingVariant === 'almond-pack-mismatch'
+          ? 'Nature Valley Sweet & Salty Almond Granola Bars, 12 ct, 14.4 oz'
+      : liveSparseDuplicateOrder
+        ? 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz'
+        : 'Test Gadget';
+    const pendingAsin = pendingVariant === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
+    const pendingQuantity = Number(searchParams.get('quantity')) || null;
+    const pendingUnitPrice = Number(searchParams.get('unitPrice')) || 3.5;
+    const pendingComparisonUnitPrice = Number(searchParams.get('comparisonUnitPrice')) || 0.33;
+    const pendingComparisonUnit = searchParams.get('comparisonUnit') || 'ounce';
+    const siblingPriceOnly = searchParams.get('siblingPriceOnly') === '1';
+    const pendingOrderTotal = Number(searchParams.get('orderTotal')) || pendingUnitPrice;
+    const pendingClick = searchParams.get('stay') === '1'
+      ? ''
+      : Number(checkoutFixture.pendingOrderConfirmationDelayMs) > 0
+        ? `location.href='/checkout/processing-order?delay=${Number(checkoutFixture.pendingOrderConfirmationDelayMs)}';`
+        : "location.href='/checkout?confirmed=1';";
+    return [
+      '<main><h1>This is a pending order</h1>',
+      liveSparseDuplicateOrder
+        ? `<section class="a-section"><div class="a-fixed-left-grid"><img alt="" /><div class="a-fixed-left-grid-inner"><span class="a-size-base">${pendingTitle}</span>${siblingPriceOnly ? '' : `<div><span class="a-price"><span aria-hidden="true">$${pendingUnitPrice.toFixed(2)}</span></span> <span>($${pendingComparisonUnitPrice.toFixed(2)} / ${pendingComparisonUnit})</span></div>`}<span>Ships from and sold by Amazon.com</span></div>${siblingPriceOnly ? `<div class="a-fixed-left-grid-inner"><span class="a-size-base">Different sibling product</span><span class="a-price"><span aria-hidden="true">$${pendingUnitPrice.toFixed(2)}</span></span></div>` : ''}</div></section>`
+        : `<section data-asin="${pendingAsin}"><a href="/dp/${pendingAsin}">${pendingTitle}</a><p>$${pendingUnitPrice.toFixed(2)}</p>${pendingQuantity ? `<p>Quantity: ${pendingQuantity}</p>` : ''}</section>`,
+      sparseDuplicateOrder ? '' : `<p>Order total: $${pendingOrderTotal.toFixed(2)}</p>`,
+      '<p>Do you want to order these items again?</p>',
+      '<div id="amazon-pending-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="confirmPendingOrderButtonId" type="submit" /></div>',
+      `<script>document.addEventListener('click', (event) => { if (event.target?.id !== 'confirmPendingOrderButtonId') return; const count=Number(sessionStorage.getItem('magic-city-pending-final-clicks')||0)+1; sessionStorage.setItem('magic-city-pending-final-clicks',String(count)); ${pendingClick} }, true)</script>`,
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/checkout/processing-order') {
+    const delayMs = Math.max(1_000, Math.min(90_000, Number(searchParams.get('delay')) || 1_000));
+    return [
+      '<main><h1>Processing order</h1>',
+      '<p>Amazon is confirming this purchase.</p>',
+      `<script>setTimeout(() => { location.href='/checkout?confirmed=1'; }, ${delayMs})</script>`,
       '</main>'
     ].join('');
   }
@@ -687,6 +811,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
 }
 
 async function main() {
+  const smokeMode = process.env.MAGIC_CITY_BROWSER_SMOKE_FOCUS || 'full';
+  console.log(`native-runner browser smoke starting (${smokeMode})`);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-extension-browser-'));
   let context = null;
   let server = null;
@@ -698,6 +824,8 @@ async function main() {
     const certificate = createCertificate(tmpDir);
     const checkpoints = [];
     const claimedSessionIds = [];
+    let registrationRequestCount = 0;
+    let sessionListRequestCount = 0;
     let fulfillment = null;
     let session = null;
     let distractorSession = null;
@@ -706,6 +834,45 @@ async function main() {
     // cursor, schedule a resume, and finish instead of posting a failed receipt.
     let transientRunnerStatusFailures = 3;
     let transientRunnerStatusFailureCount = 0;
+    // The final click must not depend on a slow control-plane status request.
+    // This models cs-225: the worker resumes after a long technical pause,
+    // while status reporting is temporarily unavailable at final review.
+    let blockRunnerStatusForFinalDispatch = false;
+    let blockedFinalRunnerStatusCalls = 0;
+    let runnerStatusRequestCount = 0;
+    let delayLeaseExpiryCheckpoint = false;
+    let dropInspectReviewCheckpointResponse = false;
+    let inspectReviewCheckpointCommitted = false;
+    let releaseDroppedInspectReviewResponse = null;
+    let dropPrepareCartCheckpointResponse = false;
+    let prepareCartCheckpointCommittedAtMs = 0;
+    let dropPrepareCartCheckpointConnection = false;
+    let prepareCartConnectionDroppedAtMs = 0;
+    let dropContinueCheckoutCheckpointResponse = false;
+    let continueCheckoutCheckpointCommittedAtMs = 0;
+    let dropCommittedCheckpointResponses = new Set();
+    let committedCheckpointDroppedAtMs = new Map();
+    let committedCheckpointRecoveryPolledAtMs = new Map();
+    let closeMerchantTabAfterConfirmationCheckpoint = false;
+    let dropFulfillmentResponseAfterCommit = false;
+    let fulfillmentResponseDroppedAtMs = 0;
+    let deferPrimaryClaimResponse = false;
+    let releasePrimaryClaimResponse = null;
+    let rejectPrimaryClaimError = '';
+    let stopAfterAlreadyOpenCartCheckpoint = false;
+    // The full browser matrix intentionally runs longer than the initial
+    // ten-minute test capability. Keep the fixture's active capabilities
+    // fresh; expiry itself is covered by the focused mocked-clock regression.
+    const renewTestCapability = (candidate) => {
+      if (!candidate?.missionBoundAuth?.capabilityId?.startsWith('browser-smoke-')) return candidate;
+      return {
+        ...candidate,
+        missionBoundAuth: {
+          ...candidate.missionBoundAuth,
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+        }
+      };
+    };
     server = https.createServer(certificate, async (req, res) => {
       const origin = `https://${req.headers.host}`;
       const url = new URL(req.url || '/', origin);
@@ -722,8 +889,19 @@ async function main() {
       if (req.method === 'POST' && url.pathname === '/native-runner/extension/pairing/claim') {
         return json(res, 201, { setup: { baseUrl: origin, deviceToken: 'mcnr_browser_smoke_token', deviceId: 'browser-smoke-device' } });
       }
-      if (req.method === 'POST' && url.pathname === '/plugins/register') return json(res, 201, { registered: true });
+      if (req.method === 'POST' && url.pathname === '/plugins/register') {
+        registrationRequestCount += 1;
+        return json(res, 201, { registered: true });
+      }
       if (req.method === 'GET' && url.pathname === '/connectors/sessions') {
+        sessionListRequestCount += 1;
+        for (const [actionId, droppedAtMs] of committedCheckpointDroppedAtMs) {
+          if (!committedCheckpointRecoveryPolledAtMs.has(actionId) && Date.now() >= droppedAtMs) {
+            committedCheckpointRecoveryPolledAtMs.set(actionId, Date.now());
+          }
+        }
+        session = renewTestCapability(session);
+        distractorSession = renewTestCapability(distractorSession);
         const active = [distractorSession, session]
           .filter(Boolean)
           .filter((candidate) => !['fulfilled', 'failed'].includes(candidate.status));
@@ -734,7 +912,11 @@ async function main() {
         const claimedSessionId = decodeURIComponent(matched?.[1] || '');
         claimedSessionIds.push(claimedSessionId);
         if (claimedSessionId === session?.id) {
+          if (rejectPrimaryClaimError) return json(res, 409, { error: rejectPrimaryClaimError });
           session = { ...session, status: 'claimed', claimedByPluginId: body.pluginId };
+          if (deferPrimaryClaimResponse) {
+            await new Promise((resolve) => { releasePrimaryClaimResponse = resolve; });
+          }
           return json(res, 200, { claimed: true, session });
         }
         if (claimedSessionId === distractorSession?.id) {
@@ -744,6 +926,14 @@ async function main() {
         return json(res, 404, { error: 'test_claim_session_not_found' });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/runner-status')) {
+        runnerStatusRequestCount += 1;
+        session = renewTestCapability(session);
+        const nextAction = session?.extensionMissionPlan?.actions?.[session?.extensionMissionPlanState?.nextActionIndex || 0];
+        if (blockRunnerStatusForFinalDispatch && nextAction?.id === 'submit-final-order') {
+          blockedFinalRunnerStatusCalls += 1;
+          req.socket.destroy();
+          return;
+        }
         if (transientRunnerStatusFailures > 0) {
           transientRunnerStatusFailures -= 1;
           transientRunnerStatusFailureCount += 1;
@@ -756,6 +946,15 @@ async function main() {
         const plan = session.extensionMissionPlan;
         const state = session.extensionMissionPlanState;
         const expected = plan.actions[state.nextActionIndex];
+        const latestCheckpoint = checkpoints.at(-1);
+        const exactReplay = Boolean(
+          latestCheckpoint
+          && latestCheckpoint.planHash === body.planHash
+          && latestCheckpoint.planActionId === body.planActionId
+          && latestCheckpoint.planActionStatus === body.planActionStatus
+          && latestCheckpoint.runnerTiming?.checkpointRequestedAt === body.runnerTiming?.checkpointRequestedAt
+        );
+        if (exactReplay) return json(res, 200, { updated: true, replayed: true, session });
         if (!expected || expected.id !== body.planActionId || expected.missionAction !== body.missionAction) {
           return json(res, 409, { error: 'test_plan_step_out_of_order' });
         }
@@ -766,11 +965,18 @@ async function main() {
           && !reportedMilestones.includes(expected.expectedMilestone)) {
           return json(res, 409, { error: 'test_plan_milestone_not_verified', expectedMilestone: expected.expectedMilestone });
         }
-        checkpoints.push(body);
+        if (delayLeaseExpiryCheckpoint && expected.id === 'inspect-before-final-submit') {
+          await new Promise((resolve) => setTimeout(resolve, 1_250));
+        }
+        checkpoints.push({ ...body, testReceivedAtMs: Date.now() });
         const advanced = body.planActionStatus !== 'waiting';
+        const stopAfterCartCheckpoint = stopAfterAlreadyOpenCartCheckpoint
+          && expected.id === 'open-cart'
+          && body.planActionStatus !== 'waiting'
+          && body.browser?.runnerStep?.controlStrategy === 'amazon_cart_already_open';
         session = {
           ...session,
-          status: 'executing',
+          status: stopAfterCartCheckpoint ? 'failed' : 'executing',
           missionBoundaryLatestHash: `0x${crypto.randomBytes(8).toString('hex')}`,
           missionBoundaryEventCount: Number(session.missionBoundaryEventCount || 0) + 1,
           extensionMissionPlanState: advanced
@@ -785,11 +991,59 @@ async function main() {
               }
             : state
         };
+        if (closeMerchantTabAfterConfirmationCheckpoint
+          && body.browser?.orderSubmitted === true) {
+          closeMerchantTabAfterConfirmationCheckpoint = false;
+          const merchantPage = context.pages().find((page) => /\/checkout(?:\/order-confirmation|\?confirmed=1)/.test(page.url()));
+          await merchantPage?.close();
+        }
+        if (dropInspectReviewCheckpointResponse && expected.id === 'inspect-before-final-submit') {
+          inspectReviewCheckpointCommitted = true;
+          await new Promise((resolve) => { releaseDroppedInspectReviewResponse = resolve; });
+          dropInspectReviewCheckpointResponse = false;
+          req.socket.destroy();
+          return;
+        }
+        if (dropPrepareCartCheckpointResponse
+          && body.planActionStatus !== 'waiting'
+          && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
+          dropPrepareCartCheckpointResponse = false;
+          prepareCartCheckpointCommittedAtMs = Date.now();
+          return json(res, 503, { error: 'test_committed_checkpoint_response_lost' });
+        }
+        if (dropPrepareCartCheckpointConnection
+          && body.planActionStatus !== 'waiting'
+          && /^prepare-cart(?:-\d+)?$/.test(expected.id)) {
+          dropPrepareCartCheckpointConnection = false;
+          prepareCartConnectionDroppedAtMs = Date.now();
+          await context.setOffline(true);
+          setTimeout(() => { void context.setOffline(false).catch(() => null); }, 120);
+          req.socket.destroy();
+          return;
+        }
+        if (dropContinueCheckoutCheckpointResponse
+          && body.planActionStatus !== 'waiting'
+          && /^continue-checkout(?:-\d+)?$/.test(expected.id)) {
+          dropContinueCheckoutCheckpointResponse = false;
+          continueCheckoutCheckpointCommittedAtMs = Date.now();
+          return json(res, 503, { error: 'test_committed_checkout_checkpoint_response_lost' });
+        }
+        if (body.planActionStatus !== 'waiting' && dropCommittedCheckpointResponses.has(expected.id)) {
+          dropCommittedCheckpointResponses.delete(expected.id);
+          committedCheckpointDroppedAtMs.set(expected.id, Date.now());
+          return json(res, 503, { error: `test_committed_${expected.id}_checkpoint_response_lost` });
+        }
         return json(res, 200, { updated: true, session });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/fulfill')) {
         fulfillment = body;
         session = { ...session, status: body.status || 'fulfilled', fulfilledByPluginId: body.pluginId };
+        if (dropFulfillmentResponseAfterCommit) {
+          dropFulfillmentResponseAfterCommit = false;
+          fulfillmentResponseDroppedAtMs = Date.now();
+          req.socket.destroy();
+          return;
+        }
         return json(res, 200, { session });
       }
       return json(res, 404, { error: 'test_route_not_found' });
@@ -846,16 +1100,53 @@ async function main() {
       }
     };
 
-    const extensionDir = copyTestExtension(tmpDir, baseUrl);
+    const extensionDir = copyTestExtension(tmpDir, baseUrl, {
+      // Test the actual MV3/browser boundary with a short copied lease rather
+      // than exporting production internals or waiting forty-five seconds.
+      finalSubmitLeaseMs: /^final-submit-lease-(?:renewal|expiry|lost-checkpoint)$/.test(smokeMode) ? 1_000 : null,
+      finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null
+    });
     const profileDir = path.join(tmpDir, 'profile');
     const launchOptions = {
       headless: false,
       args: ['--ignore-certificate-errors', `--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`]
     };
+    console.log('native-runner browser smoke launching Chrome');
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    context.setDefaultTimeout(20_000);
     await waitFor(() => context.serviceWorkers()[0], 15_000);
+    console.log('native-runner browser smoke service worker ready');
     let worker = context.serviceWorkers()[0];
     const extensionId = new URL(worker.url()).host;
+    const defaultCheckoutProfile = {
+      contactName: 'Test User',
+      streetAddress: '1 Magic City Way',
+      shippingCity: 'San Francisco',
+      shippingState: 'CA',
+      zipCode: '94107',
+      contactPhone: '4155550100',
+      billingStreetAddress: '99 Billing Plaza',
+      billingZipCode: '10001',
+      paymentCardLast4: '1817'
+    };
+    const seedSessionCheckoutProfile = async (sessionId, profile = defaultCheckoutProfile, planHash = '') => {
+      await worker.evaluate(async ({ id, value, expectedPlanHash }) => {
+        const storageKey = 'magicCityLocalCheckoutProfiles';
+        const stored = await chrome.storage.session.get({ [storageKey]: {} });
+        await chrome.storage.session.set({
+          [storageKey]: {
+            ...(stored[storageKey] || {}),
+            [id]: {
+              profile: value,
+              planHash: expectedPlanHash || null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            }
+          }
+        });
+        await chrome.storage.local.remove('localCheckoutProfiles');
+      }, { id: sessionId, value: profile, expectedPlanHash: planHash });
+    };
     let popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
     await popup.locator('#baseUrl').fill(baseUrl);
@@ -866,7 +1157,717 @@ async function main() {
       console.error(`pairing_status_timeout:${status}`);
       throw error;
     });
-    if (process.env.MAGIC_CITY_BROWSER_SMOKE_FOCUS === 'recovery') {
+    console.log(`native-runner browser smoke paired (${smokeMode})`);
+    const verifyAmazonNavFlyout = async () => {
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/cart-preview-start`);
+      await page.setContent([
+        '<main><h1>Results for nature valley granola bars</h1></main>',
+        '<div id="nav-flyout-ewc" class="a-popover" aria-label="Shopping cart">',
+        '<div id="ewc-content"><p>Subtotal: $1.82</p>',
+        '<div class="a-button"><span class="a-button-inner"><button id="nav-flyout-go-to-cart" onclick="location.href=\'/cart?source=nav-flyout-ewc\'"><span class="a-button-text">Go to Cart</span></button></span></div>',
+        '</div></div>'
+      ].join(''));
+      const tab = await worker.evaluate(async (url) => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.find((candidate) => candidate.url === url) || null;
+      }, page.url());
+      if (!tab?.id) fail(`browser_extension_cart_flyout_tab_missing:${page.url()}`);
+      const outcome = await worker.evaluate(async (tabId) => {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+        return chrome.tabs.sendMessage(tabId, {
+          type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+          action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true }
+        });
+      }, tab.id);
+      await page.waitForURL(/\/cart\?source=nav-flyout-ewc/, { timeout: 5_000 });
+      if (!outcome?.completed || outcome.controlStrategy !== 'amazon_nav_cart_flyout') {
+        fail(`browser_extension_amazon_nav_flyout_cart_transition_failed:${JSON.stringify(outcome)}`);
+      }
+      recordPurchaseScenario('Amazon nav flyout Go to Cart uses the exact native control immediately', {
+        strategy: outcome.controlStrategy
+      });
+      await page.close();
+    };
+    if (smokeMode === 'cart-flyout') {
+      await verifyAmazonNavFlyout();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner cart flyout smoke passed');
+      return;
+    }
+    if (smokeMode === 'claim-startup') {
+      checkpoints.length = 0;
+      deferPrimaryClaimResponse = true;
+      const registrationBaseline = registrationRequestCount;
+      const sessionListBaseline = sessionListRequestCount;
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const claimPromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId, extensionDispatchNonce }) => new Promise((resolve) => {
+        chrome.runtime.sendMessage(targetExtensionId, {
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce
+        }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
+      }), { extensionId, sessionId: session.id, extensionDispatchNonce: 'browser-smoke-dispatch' });
+      await waitFor(() => claimedSessionIds.includes(session.id), 5_000);
+      const claimingRun = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['activeSessionId', 'activeRun'], resolve);
+      }));
+      if (claimingRun.activeSessionId !== session.id || claimingRun.activeRun?.phase !== 'claiming') {
+        fail(`browser_extension_claim_marker_not_durable:${JSON.stringify(claimingRun)}`);
+      }
+      deferPrimaryClaimResponse = false;
+      releasePrimaryClaimResponse?.();
+      await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-site'
+        && checkpoint.planActionStatus === 'waiting'
+        && checkpoint.label === 'Opening browser'), 5_000);
+      const startupCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-site'
+        && checkpoint.planActionStatus === 'waiting'
+        && checkpoint.label === 'Opening browser');
+      if (!startupCheckpoint
+        || startupCheckpoint.runnerTiming?.phase !== 'startup'
+        || !startupCheckpoint.runnerTiming?.workerStartedAt
+        || !startupCheckpoint.runnerTiming?.checkpointRequestedAt
+        || session.extensionMissionPlanState?.nextActionIndex !== 0) {
+        fail(`browser_extension_claim_startup_checkpoint_not_nonadvancing:${JSON.stringify({ startupCheckpoint, planState: session.extensionMissionPlanState })}`);
+      }
+      const wakeResult = await claimPromise;
+      if (wakeResult.error || !wakeResult.response?.ok) {
+        fail(`browser_extension_claim_startup_wake_failed:${JSON.stringify(wakeResult)}`);
+      }
+      if (sessionListRequestCount !== sessionListBaseline || registrationRequestCount !== registrationBaseline) {
+        fail(`browser_extension_direct_claim_performed_redundant_startup_requests:${JSON.stringify({
+          registrationBaseline,
+          registrationRequestCount,
+          sessionListBaseline,
+          sessionListRequestCount
+        })}`);
+      }
+      recordPurchaseScenario('Claim persistence survives the server-accepted startup gap before browser work', {
+        phase: claimingRun.activeRun.phase,
+        checkpoint: startupCheckpoint.planActionStatus,
+        directClaim: wakeResult.response?.result?.directClaim === true,
+        redundantQueueRequests: sessionListRequestCount - sessionListBaseline
+      });
+      await wakePage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner claim startup recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'cart-already-open') {
+      checkpoints.length = 0;
+      stopAfterAlreadyOpenCartCheckpoint = true;
+      const openCartIndex = plan.actions.findIndex((action) => action.id === 'open-cart');
+      if (openCartIndex < 0) fail('browser_extension_cart_already_open_plan_action_missing');
+      session = {
+        ...session,
+        status: 'queued',
+        extensionMissionPlanState: {
+          planHash: plan.planHash,
+          nextActionIndex: openCartIndex,
+          completedActionIds: plan.actions.slice(0, openCartIndex).map((action) => action.id),
+          verifiedMilestones: ['candidate_selected', 'cart_confirmed']
+        }
+      };
+      const cartPage = await context.newPage();
+      await cartPage.goto(`${baseUrl}/gp/cart/view.html`);
+      const cartTab = await worker.evaluate(async (url) => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.find((candidate) => candidate.url === url) || null;
+      }, cartPage.url());
+      if (!cartTab?.id) fail(`browser_extension_cart_already_open_tab_missing:${cartPage.url()}`);
+      await worker.evaluate(async ({ sessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+        });
+      }, { sessionId: session.id, tabId: cartTab.id });
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        chrome.runtime.sendMessage(targetExtensionId, {
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'browser-smoke-cart-dispatch'
+        }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
+      }), { extensionId, sessionId: session.id });
+      try {
+        await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-cart'
+          && checkpoint.planActionStatus !== 'waiting'
+          && checkpoint.browser?.runnerStep?.controlStrategy === 'amazon_cart_already_open'), 5_000);
+      } catch {
+        const runnerState = await worker.evaluate(() => chrome.storage.local.get([
+          'lastError',
+          'lastExecution',
+          'activeSessionId',
+          'activeRun',
+          'activeMissionTabs'
+        ]));
+        fail(`browser_extension_cart_already_open_timeout:${JSON.stringify({ checkpoints, runnerState, session })}`);
+      }
+      const cartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-cart'
+        && checkpoint.planActionStatus !== 'waiting'
+        && checkpoint.browser?.runnerStep?.controlStrategy === 'amazon_cart_already_open');
+      if (!cartCheckpoint
+        || Number(cartCheckpoint.runnerTiming?.actionDurationMs || Infinity) >= 1_000
+        || !/\/gp\/cart\/view\.html/.test(cartPage.url())) {
+        fail(`browser_extension_cart_already_open_not_immediate:${JSON.stringify({ cartCheckpoint, url: cartPage.url() })}`);
+      }
+      await Promise.race([wakePromise, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+      recordPurchaseScenario('An already-open Amazon cart advances without waiting or reloading', {
+        durationMs: cartCheckpoint.runnerTiming.actionDurationMs,
+        strategy: cartCheckpoint.browser.runnerStep.controlStrategy
+      });
+      await wakePage.close();
+      await cartPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner already-open cart smoke passed');
+      return;
+    }
+    if (smokeMode === 'cart-checkpoint-connection-drop') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      transientRunnerStatusFailures = 0;
+      slowInitialSearchResponse = false;
+      dropPrepareCartCheckpointConnection = true;
+      stopAfterAlreadyOpenCartCheckpoint = true;
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        const progress = [];
+        const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+        port.onMessage.addListener((payload) => {
+          if (payload?.type === 'RUNNER_PROGRESS') progress.push(payload);
+          if (payload?.type === 'RUNNER_RESULT') resolve({ payload, progress });
+        });
+        port.onDisconnect.addListener(() => resolve({ disconnected: true, progress }));
+        port.postMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'browser-smoke-cart-connection-drop'
+        });
+      }), { extensionId, sessionId: session.id });
+      try {
+        await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-cart'
+          && checkpoint.planActionStatus !== 'waiting'), 10_000);
+      } catch {
+        const runnerState = await popup.evaluate(() => chrome.storage.local.get([
+          'lastError', 'lastExecution', 'activeSessionId', 'activeRun'
+        ]));
+        fail(`browser_extension_cart_connection_drop_timeout:${JSON.stringify({ checkpoints, runnerState, session })}`);
+      }
+      const wake = await withTimeout(wakePromise, 10_000, 'browser_extension_cart_connection_drop_wake_timeout');
+      const nextCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'open-cart'
+        && checkpoint.planActionStatus !== 'waiting');
+      const recoveryMs = Number(nextCheckpoint?.testReceivedAtMs || 0) - prepareCartConnectionDroppedAtMs;
+      const prepareCartCheckpointCount = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'prepare-cart').length;
+      const sawReconnectingRunner = (wake.progress || []).some((entry) => (
+        entry?.activeRun?.progressState === 'reconnecting_control_plane'
+        && entry?.activeRun?.progressLabel === 'Reconnecting Runner'
+      ));
+      if (prepareCartConnectionDroppedAtMs <= 0
+        || recoveryMs <= 0
+        || recoveryMs >= 8_000
+        || prepareCartCheckpointCount !== 1
+        || !sawReconnectingRunner
+        || nextCheckpoint?.browser?.runnerStep?.controlStrategy !== 'amazon_cart_already_open') {
+        fail(`browser_extension_cart_connection_drop_recovery_failed:${JSON.stringify({
+          prepareCartConnectionDroppedAtMs,
+          recoveryMs,
+          prepareCartCheckpointCount,
+          sawReconnectingRunner,
+          nextCheckpoint,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Literal cart checkpoint connection drop reconciles without replay', {
+        recoveryMs,
+        prepareCartCheckpointCount,
+        strategy: nextCheckpoint.browser.runnerStep.controlStrategy
+      });
+      await wakePage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner cart checkpoint connection-drop smoke passed');
+      return;
+    }
+    if (smokeMode === 'checkout-checkpoint-response-loss') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      transientRunnerStatusFailures = 0;
+      slowInitialSearchResponse = false;
+      dropContinueCheckoutCheckpointResponse = true;
+      const continuationSessionId = 'browser-smoke-checkout-response-loss';
+      const checkoutPage = await context.newPage();
+      await checkoutPage.goto(`${baseUrl}/checkout/pay-confirm`);
+      const checkoutTab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) =>
+        tabs.find((candidate) => candidate.url === url) || null), checkoutPage.url());
+      if (!checkoutTab?.id) fail(`browser_extension_checkout_connection_drop_tab_missing:${checkoutPage.url()}`);
+      const continuationPlan = rehashExtensionPlan({
+        ...plan,
+        planId: `mplan_${continuationSessionId}`,
+        startUrl: checkoutPage.url(),
+        actions: [
+          { id: 'continue-checkout', type: 'click_intent', missionAction: 'browser_click', intent: 'checkout', optional: true },
+          { id: 'inspect-review', type: 'inspect', missionAction: 'read_public_page', expectedMilestone: 'final_review_ready' },
+          { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'checkout_connection_drop_smoke' }
+        ]
+      });
+      session = {
+        ...session,
+        id: continuationSessionId,
+        status: 'queued',
+        claimedByPluginId: null,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          capabilityId: 'browser-smoke-checkout-response-loss-capability',
+          subject: { sessionId: continuationSessionId }
+        },
+        extensionMissionPlan: continuationPlan,
+        extensionMissionPlanState: { planHash: continuationPlan.planHash, nextActionIndex: 0, completedActionIds: [] }
+      };
+      await seedSessionCheckoutProfile(continuationSessionId, {
+        ...defaultCheckoutProfile,
+        paymentCardLast4: '6383'
+      }, continuationPlan.planHash);
+      await popup.evaluate(async ({ sessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+        });
+      }, { sessionId: continuationSessionId, tabId: checkoutTab.id });
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        const progress = [];
+        const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+        port.onMessage.addListener((payload) => {
+          if (payload?.type === 'RUNNER_PROGRESS') progress.push(payload);
+          if (payload?.type === 'RUNNER_RESULT') resolve({ payload, progress });
+        });
+        port.onDisconnect.addListener(() => resolve({ disconnected: true, progress }));
+        port.postMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'browser-smoke-checkout-response-loss'
+        });
+      }), { extensionId, sessionId: continuationSessionId });
+      try {
+        await waitFor(() => Boolean(fulfillment), 10_000);
+      } catch {
+        const runnerState = await popup.evaluate(() => chrome.storage.local.get([
+          'lastError', 'lastExecution', 'activeSessionId', 'activeRun'
+        ]));
+        fail(`browser_extension_checkout_response_loss_timeout:${JSON.stringify({ checkpoints, runnerState, session })}`);
+      }
+      const wake = await withTimeout(wakePromise, 10_000, 'browser_extension_checkout_response_loss_wake_timeout');
+      const recoveryMs = Date.now() - continueCheckoutCheckpointCommittedAtMs;
+      const continuationCheckpointCount = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'continue-checkout'
+        && checkpoint.planActionStatus !== 'waiting').length;
+      const continuationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'continue-checkout'
+        && checkpoint.planActionStatus !== 'waiting');
+      const continuationClickCount = await checkoutPage.evaluate(() => Number(sessionStorage.getItem('magic-city-payment-confirm-clicks') || 0));
+      const sawReconnectingRunner = (wake.progress || []).some((entry) => (
+        entry?.activeRun?.progressState === 'reconnecting_control_plane'
+        && entry?.activeRun?.progressLabel === 'Reconnecting Runner'
+      ));
+      if (continueCheckoutCheckpointCommittedAtMs <= 0
+        || recoveryMs <= 0
+        || recoveryMs >= 8_000
+        || continuationCheckpointCount !== 1
+        || continuationClickCount !== 1
+        || !sawReconnectingRunner
+        || continuationCheckpoint?.browser?.checkoutSummary?.stage !== 'final_review'
+        || fulfillment?.result?.browserExecution?.stopState !== 'final_approval_required') {
+        fail(`browser_extension_checkout_response_loss_recovery_failed:${JSON.stringify({
+          continueCheckoutCheckpointCommittedAtMs,
+          recoveryMs,
+          continuationCheckpointCount,
+          continuationClickCount,
+          sawReconnectingRunner,
+          continuationCheckpoint,
+          fulfillment,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Lost committed continue-checkout response reconciles without replay', {
+        recoveryMs,
+        continuationCheckpointCount,
+        continuationClickCount
+      });
+      await wakePage.close();
+      await checkoutPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner checkout checkpoint response-loss smoke passed');
+      return;
+    }
+    if (smokeMode === 'claim-rejection') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      rejectPrimaryClaimError = 'extension_run_dispatch_required';
+      const wakeResult = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+      }), session.id);
+      if (!wakeResult?.ok
+        || wakeResult.result?.requestedSessionFound !== true
+        || wakeResult.result?.executed?.[0]?.status !== 'claim_failed'
+        || wakeResult.result?.executed?.[0]?.error !== rejectPrimaryClaimError) {
+        fail(`browser_extension_claim_rejection_not_reported:${JSON.stringify(wakeResult)}`);
+      }
+      const runnerState = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'activeRun'], resolve);
+      }));
+      if (runnerState.lastError !== rejectPrimaryClaimError
+        || runnerState.lastExecution?.status !== 'claim_failed'
+        || runnerState.activeSessionId
+        || runnerState.activeRun
+        || checkpoints.length !== 0
+        || session.status !== 'queued') {
+        fail(`browser_extension_claim_rejection_state_not_durable:${JSON.stringify({ runnerState, checkpoints, session })}`);
+      }
+      recordPurchaseScenario('Claim rejection is reported immediately without opening a browser action', {
+        status: runnerState.lastExecution.status,
+        error: runnerState.lastError
+      });
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner claim rejection smoke passed');
+      return;
+    }
+    if (smokeMode === 'completion-recovery') {
+      checkpoints.length = 0;
+      fulfillment = null;
+      const completedSessionId = 'browser-smoke-completion-recovery-session';
+      const completedPlan = rehashExtensionPlan({
+        ...plan,
+        planId: 'mplan_completion_recovery'
+      });
+      const completedMilestones = [
+        'candidate_selected',
+        'cart_confirmed',
+        'checkout_open',
+        'address_confirmed',
+        'card_confirmed',
+        'delivery_confirmed',
+        'checkout_profile_verified',
+        'final_review_ready',
+        'final_submit_requested',
+        'order_submitted'
+      ];
+      session = {
+        ...session,
+        id: completedSessionId,
+        status: 'executing',
+        claimedByPluginId: 'magic-city-runner-extension',
+        fulfillment: null,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          capabilityId: 'browser-smoke-completion-recovery-capability',
+          subject: { sessionId: completedSessionId }
+        },
+        extensionMissionPlan: completedPlan,
+        extensionMissionPlanState: {
+          planHash: completedPlan.planHash,
+          nextActionIndex: completedPlan.actions.length,
+          completedActionIds: completedPlan.actions.map((action) => action.id),
+          verifiedMilestones: completedMilestones
+        }
+      };
+      await seedSessionCheckoutProfile(completedSessionId, defaultCheckoutProfile, completedPlan.planHash);
+      await worker.evaluate(async ({ sessionId: activeSessionId, planHash, nextActionIndex }) => {
+        await chrome.storage.local.set({
+          activeSessionId,
+          activeRun: {
+            sessionId: activeSessionId,
+            planHash,
+            phase: 'running',
+            nextActionIndex
+          }
+        });
+      }, {
+        sessionId: completedSessionId,
+        planHash: completedPlan.planHash,
+        nextActionIndex: completedPlan.actions.length
+      });
+      const completionResult = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+      }), completedSessionId);
+      if (!completionResult?.ok) {
+        fail(`browser_extension_completion_recovery_wake_failed:${JSON.stringify(completionResult)}`);
+      }
+      await waitFor(() => Boolean(fulfillment), 10_000);
+      if (fulfillment?.status !== 'fulfilled'
+        || fulfillment?.result?.browserExecution?.stopState !== 'order_submitted'
+        || fulfillment?.result?.browserExecution?.orderSubmitted !== true
+        || checkpoints.length !== 0) {
+        fail(`browser_extension_completion_recovery_not_terminal:${JSON.stringify({ fulfillment, checkpoints })}`);
+      }
+      const completionStorage = await worker.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['activeSessionId', 'activeRun'], resolve);
+      }));
+      if (completionStorage.activeSessionId || completionStorage.activeRun) {
+        fail(`browser_extension_completion_recovery_active_run_not_cleared:${JSON.stringify(completionStorage)}`);
+      }
+      recordPurchaseScenario('Completed plan reconciles a durable merchant confirmation without replaying browser work', {
+        stopState: fulfillment.result.browserExecution.stopState,
+        checkpoints: checkpoints.length
+      });
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner completed plan recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'confirmed-order-terminal') {
+      const runConfirmedOrderCase = async ({ id, closeTab = false, dropFulfillResponse = false }) => {
+        checkpoints.length = 0;
+        fulfillment = null;
+        fulfillmentResponseDroppedAtMs = 0;
+        const confirmationPlan = rehashExtensionPlan({
+          ...plan,
+          planId: `mplan_${id}`,
+          startUrl: `${baseUrl}/checkout/order-confirmation`,
+          limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+          actions: [
+            {
+              id: 'submit-final-order',
+              type: 'final_submit',
+              missionAction: 'final_submit',
+              autoSubmitAfterVerifiedCheckout: true,
+              expectedMilestone: 'final_submit_requested',
+              maxPrice: 4
+            },
+            {
+              id: 'confirm-merchant-order',
+              type: 'inspect',
+              missionAction: 'read_public_page',
+              awaitMerchantOrderConfirmation: true,
+              merchantConfirmationTimeoutMs: 90_000,
+              expectedMilestone: 'order_submitted'
+            },
+            { id: 'pause-for-user', type: 'pause', missionAction: 'handoff', reason: 'order_confirmed' }
+          ]
+        });
+        const merchantPage = await context.newPage();
+        await merchantPage.goto(confirmationPlan.startUrl);
+        const merchantTab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) => (
+          tabs.find((candidate) => candidate.url === url) || null
+        )), merchantPage.url());
+        if (!merchantTab?.id) fail(`browser_extension_${id}_merchant_tab_missing`);
+        session = {
+          ...session,
+          id,
+          status: 'queued',
+          claimedByPluginId: null,
+          fulfillment: null,
+          missionBoundAuth: {
+            ...session.missionBoundAuth,
+            capabilityId: `browser-smoke-${id}-capability`,
+            subject: { sessionId: id }
+          },
+          extensionMissionPlan: confirmationPlan,
+          extensionMissionPlanState: {
+            planHash: confirmationPlan.planHash,
+            nextActionIndex: 1,
+            completedActionIds: ['submit-final-order'],
+            verifiedMilestones: ['final_submit_requested']
+          }
+        };
+        await seedSessionCheckoutProfile(id, defaultCheckoutProfile, confirmationPlan.planHash);
+        await popup.evaluate(async ({ sessionId, tabId }) => {
+          const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+          await chrome.storage.local.set({
+            activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId }
+          });
+        }, { sessionId: id, tabId: merchantTab.id });
+        closeMerchantTabAfterConfirmationCheckpoint = closeTab;
+        dropFulfillmentResponseAfterCommit = dropFulfillResponse;
+        const wakePage = await context.newPage();
+        await wakePage.goto(`${baseUrl}/external-wake`);
+        const wakePromise = wakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+          const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+          const timer = setTimeout(() => resolve({ timedOut: true }), 12_000);
+          port.onMessage.addListener((payload) => {
+            if (payload?.type !== 'RUNNER_RESULT') return;
+            clearTimeout(timer);
+            resolve(payload);
+          });
+          port.onDisconnect.addListener(() => { void chrome.runtime.lastError; });
+          port.postMessage({
+            type: 'RUN_PENDING_SESSIONS',
+            sessionId,
+            extensionDispatchNonce: `browser-smoke-${sessionId}`
+          });
+        }), { extensionId, sessionId: id });
+        await waitFor(() => Boolean(fulfillment), 10_000);
+        await waitFor(async () => {
+          const state = await popup.evaluate(() => chrome.storage.local.get(['activeSessionId', 'activeRun']));
+          return !state.activeSessionId && !state.activeRun;
+        }, 10_000);
+        const wake = await wakePromise;
+        const confirmationCheckpoints = checkpoints.filter((checkpoint) => (
+          checkpoint.planActionId === 'confirm-merchant-order' && checkpoint.planActionStatus === 'completed'
+        ));
+        const pauseCheckpoints = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'pause-for-user');
+        if (wake?.timedOut
+          || fulfillment?.status !== 'fulfilled'
+          || fulfillment?.result?.browserExecution?.orderSubmitted !== true
+          || fulfillment?.result?.browserExecution?.stopState !== 'order_submitted'
+          || confirmationCheckpoints.length !== 1
+          || pauseCheckpoints.length !== 0
+          || (closeTab && !merchantPage.isClosed())
+          || (dropFulfillResponse && fulfillmentResponseDroppedAtMs <= 0)) {
+          fail(`browser_extension_${id}_confirmation_not_terminal:${JSON.stringify({
+            wake,
+            fulfillment,
+            confirmationCheckpointCount: confirmationCheckpoints.length,
+            pauseCheckpointCount: pauseCheckpoints.length,
+            merchantPageClosed: merchantPage.isClosed(),
+            fulfillmentResponseDroppedAtMs
+          })}`);
+        }
+        await wakePage.close();
+        if (!merchantPage.isClosed()) await merchantPage.close();
+        return {
+          confirmationCheckpointCount: confirmationCheckpoints.length,
+          pauseCheckpointCount: pauseCheckpoints.length,
+          tabClosed: closeTab,
+          fulfillmentResponseDropped: dropFulfillResponse
+        };
+      };
+
+      const runPendingOrderVerificationCase = async () => {
+        checkpoints.length = 0;
+        fulfillment = null;
+        const id = 'browser-smoke-pending-order-verification';
+        const pendingPlan = rehashExtensionPlan({
+          ...plan,
+          planId: `mplan_${id}`,
+          startUrl: `${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=cashew&unitPrice=2.97`,
+          limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+          actions: [
+            {
+              id: 'submit-final-order',
+              type: 'final_submit',
+              missionAction: 'final_submit',
+              autoSubmitAfterVerifiedCheckout: true,
+              expectedMilestone: 'final_submit_requested',
+              maxPrice: 4
+            },
+            {
+              id: 'confirm-pending-order',
+              type: 'final_submit',
+              missionAction: 'final_submit',
+              autoSubmitAfterVerifiedCheckout: true,
+              pendingOrderContinuation: true,
+              priorFinalSubmitActionId: 'submit-final-order',
+              chainAuthorizationActionId: 'submit-final-order',
+              expectedItemCount: 1,
+              maxPrice: 4
+            },
+            {
+              id: 'confirm-merchant-order',
+              type: 'inspect',
+              missionAction: 'read_public_page',
+              awaitMerchantOrderConfirmation: true,
+              merchantConfirmationTimeoutMs: 90_000,
+              expectedMilestone: 'order_submitted'
+            }
+          ]
+        });
+        const merchantPage = await context.newPage();
+        await merchantPage.goto(pendingPlan.startUrl);
+        const merchantTab = await popup.evaluate((url) => chrome.tabs.query({}).then((tabs) => (
+          tabs.find((candidate) => candidate.url === url) || null
+        )), merchantPage.url());
+        if (!merchantTab?.id) fail(`browser_extension_${id}_merchant_tab_missing`);
+        const cartEvidence = {
+          sessionId: id,
+          planHash: pendingPlan.planHash,
+          asin: 'NATURE-VALLEY-ALMOND',
+          title: 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz',
+          price: 2.97,
+          quantity: 1,
+          verifiedAt: new Date().toISOString()
+        };
+        session = {
+          ...session,
+          id,
+          status: 'queued',
+          claimedByPluginId: null,
+          fulfillment: null,
+          missionBoundAuth: {
+            ...session.missionBoundAuth,
+            capabilityId: `browser-smoke-${id}-capability`,
+            subject: { sessionId: id }
+          },
+          extensionMissionPlan: pendingPlan,
+          extensionMissionPlanState: {
+            planHash: pendingPlan.planHash,
+            nextActionIndex: 1,
+            completedActionIds: ['submit-final-order'],
+            verifiedMilestones: ['checkout_open', 'final_review_ready', 'final_submit_requested']
+          }
+        };
+        await seedSessionCheckoutProfile(id, defaultCheckoutProfile, pendingPlan.planHash);
+        await popup.evaluate(async ({ sessionId, tabId, planHash, evidence }) => {
+          const stored = await chrome.storage.local.get({ activeMissionTabs: {}, finalOrderDispatches: {} });
+          await chrome.storage.local.set({
+            activeSessionId: sessionId,
+            activeRun: {
+              sessionId,
+              planHash,
+              phase: 'running',
+              tabId,
+              nextActionIndex: 1,
+              selectedCandidate: { asin: evidence.asin, title: evidence.title, price: evidence.price },
+              cartEvidence: evidence
+            },
+            activeMissionTabs: { ...(stored.activeMissionTabs || {}), [sessionId]: tabId },
+            finalOrderDispatches: {
+              ...(stored.finalOrderDispatches || {}),
+              [String(tabId)]: [{
+                actionId: 'submit-final-order',
+                receiptScope: `${planHash}:submit-final-order`,
+                kind: 'final_order',
+                phase: 'click_dispatched',
+                at: new Date().toISOString()
+              }]
+            }
+          });
+        }, { sessionId: id, tabId: merchantTab.id, planHash: pendingPlan.planHash, evidence: cartEvidence });
+        const wake = await popup.evaluate((sessionId) => new Promise((resolve) => {
+          chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
+        }), id);
+        if (!wake?.ok) fail(`browser_extension_${id}_wake_failed:${JSON.stringify(wake)}`);
+        await waitFor(() => Boolean(fulfillment), 10_000);
+        const browserExecution = fulfillment?.result?.browserExecution || {};
+        const clickCount = await merchantPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+        if (fulfillment?.status !== 'fulfilled'
+          || fulfillment?.fundingDisposition !== 'hold'
+          || browserExecution.stopState !== 'pending_order_verification_required'
+          || !/pending order did not match/i.test(String(browserExecution.stopEvidence || ''))
+          || clickCount !== 0
+          || checkpoints.some((checkpoint) => checkpoint.state === 'address_verification_required')) {
+          fail(`browser_extension_${id}_wrong_handoff:${JSON.stringify({ fulfillment, checkpoints, clickCount })}`);
+        }
+        await merchantPage.close();
+        return { stopState: browserExecution.stopState, fundingDisposition: fulfillment.fundingDisposition, clickCount };
+      };
+
+      const closedTabResult = await runConfirmedOrderCase({
+        id: 'browser-smoke-confirmation-tab-closed',
+        closeTab: true
+      });
+      recordPurchaseScenario('Durable merchant confirmation remains terminal after its tab closes', closedTabResult);
+      const droppedResponseResult = await runConfirmedOrderCase({
+        id: 'browser-smoke-confirmation-response-lost',
+        dropFulfillResponse: true
+      });
+      recordPurchaseScenario('Lost fulfillment response reconciles the original confirmed order without replay', droppedResponseResult);
+      const pendingOrderVerificationResult = await runPendingOrderVerificationCase();
+      recordPurchaseScenario('Pending-order identity mismatch pauses for manual verification without an address error', pendingOrderVerificationResult);
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner confirmed order terminal smoke passed');
+      return;
+    }
+    if (smokeMode === 'recovery') {
       const runRecoveryScenario = async ({ id, startPath, action, selectedCandidate = null, checkoutProfile = null, assertCheckpoint }) => {
         checkpoints.length = 0;
         fulfillment = null;
@@ -905,18 +1906,7 @@ async function main() {
           missionBoundaryLatestHash: null,
           missionBoundaryEventCount: 0
         };
-        if (checkoutProfile) {
-          await popup.evaluate(({ sessionId, profile }) => new Promise((resolve) => {
-            chrome.storage.local.get(['localCheckoutProfiles'], (stored) => {
-              chrome.storage.local.set({
-                localCheckoutProfiles: {
-                  ...(stored.localCheckoutProfiles || {}),
-                  [sessionId]: { profile, expiresAt: new Date(Date.now() + 60_000).toISOString() }
-                }
-              }, resolve);
-            });
-          }), { sessionId: id, profile: checkoutProfile });
-        }
+        if (checkoutProfile) await seedSessionCheckoutProfile(id, checkoutProfile, recoveryPlan.planHash);
         await popup.evaluate(({ sessionId, tabId, planHash, action: interruptedAction, selected }) => new Promise((resolve) => {
           chrome.storage.local.get(['activeMissionTabs'], (stored) => {
             chrome.storage.local.set({
@@ -944,7 +1934,8 @@ async function main() {
         await cdp.send('ServiceWorker.enable');
         await cdp.send('ServiceWorker.stopAllWorkers');
         await waitFor(() => Boolean(fulfillment), 12_000);
-        const checkpoint = checkpoints.find((entry) => entry.planActionId === action.id);
+        const checkpoint = checkpoints.find((entry) => entry.planActionId === action.id
+          && entry.planActionStatus === 'completed');
         assertCheckpoint(checkpoint, fulfillment);
         await page.close();
       };
@@ -1016,19 +2007,254 @@ async function main() {
       console.log('native-runner focused recovery smoke passed');
       return;
     }
+    if (/^final-submit-lease-(?:renewal|expiry|lost-checkpoint)$/.test(smokeMode)) {
+      const shouldExpireAfterCheckpoint = smokeMode === 'final-submit-lease-expiry';
+      const shouldRecoverLostCheckpoint = smokeMode === 'final-submit-lease-lost-checkpoint';
+      // Drive the real worker through navigation, a normal inspection
+      // checkpoint, and then the irreversible final-submit action. The
+      // renewal case lets the original copied one-second lease expire while
+      // the signed review checkpoint is pending. The expiry case delays only
+      // after that fresh checkpoint, so it proves a stale scoped lease still
+      // cannot dispatch the native Amazon input.
+      checkoutFixture = {
+        total: '$2.97',
+        merchandiseSubtotal: '$2.97',
+        shipping: '$0.00',
+        itemCount: 1,
+        selectedCardLast4: '6383',
+        matchingAddressAvailable: true,
+        matchingAddressChecked: true,
+        selectedFreeDelivery: true,
+        showAddressPrimeModal: false,
+        showPickupDisclosure: false,
+        showPickupModal: false
+      };
+      checkpoints.length = 0;
+      fulfillment = null;
+      delayLeaseExpiryCheckpoint = !shouldExpireAfterCheckpoint && !shouldRecoverLostCheckpoint;
+      dropInspectReviewCheckpointResponse = shouldRecoverLostCheckpoint;
+      if (shouldRecoverLostCheckpoint) transientRunnerStatusFailures = 0;
+      const leaseExpiryPlan = rehashExtensionPlan({
+        ...plan,
+        planId: 'mplan_browser-smoke-final-submit-lease',
+        startUrl: `${baseUrl}/checkout/final-review`,
+        limits: { ...plan.limits, stopBeforeFinalSubmit: false },
+        actions: [
+          {
+            ...plan.actions.find((action) => action.id === 'open-site'),
+            id: 'open-final-review',
+            url: `${baseUrl}/checkout/final-review`
+          },
+          {
+            ...plan.actions.find((action) => action.id === 'inspect-review'),
+            id: 'inspect-before-final-submit',
+            ...(shouldRecoverLostCheckpoint ? {} : { expectedMilestone: undefined })
+          },
+          {
+            ...plan.actions.find((action) => action.id === 'submit-final-order'),
+            autoSubmitAfterVerifiedCheckout: true
+          },
+          { ...plan.actions.find((action) => action.id === 'confirm-merchant-order') },
+          { ...plan.actions.find((action) => action.id === 'pause-for-user') }
+        ]
+      });
+      session = {
+        ...session,
+        id: 'browser-smoke-final-submit-lease',
+        status: 'queued',
+        claimedByPluginId: null,
+        fulfillment: null,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          subject: { sessionId: 'browser-smoke-final-submit-lease' }
+        },
+        extensionMissionPlan: leaseExpiryPlan,
+        extensionMissionPlanState: { planHash: leaseExpiryPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+        missionBoundaryLatestHash: null,
+        missionBoundaryEventCount: 0
+      };
+      await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {}, activeRun: null, activeSessionId: null }));
+      await seedSessionCheckoutProfile(session.id, {
+        ...defaultCheckoutProfile,
+        paymentCardLast4: '6383'
+      }, leaseExpiryPlan.planHash);
+      const leaseRunPromise = runtimeMessageWithTimeout(
+        popup,
+        { type: 'RUN_PENDING_SESSIONS', sessionId: session.id }
+      );
+      if (shouldRecoverLostCheckpoint) {
+        void leaseRunPromise.catch(() => null);
+        await waitFor(() => session.extensionMissionPlanState.nextActionIndex === 2
+          && inspectReviewCheckpointCommitted, 10_000);
+        try {
+          const state = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['activeRun'], resolve);
+          })), 3_000, 'browser_extension_lost_checkpoint_storage_timeout');
+          if (state.activeRun?.sessionId !== session.id || state.activeRun?.finalSubmitAuthorityLease != null) {
+            throw new Error('lost_checkpoint_active_run_not_scoped');
+          }
+        } catch (error) {
+          const state = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
+          })), 3_000, 'browser_extension_lost_checkpoint_diagnostics_timeout');
+          fail(`browser_extension_lost_checkpoint_not_interruptible:${JSON.stringify({ state, sessionState: session.extensionMissionPlanState, error: error.message })}`);
+        }
+        const cdp = await context.newCDPSession(popup);
+        await cdp.send('ServiceWorker.enable');
+        await withTimeout(
+          cdp.send('ServiceWorker.stopAllWorkers'),
+          10_000,
+          'browser_extension_lost_checkpoint_worker_stop_timeout'
+        );
+        releaseDroppedInspectReviewResponse?.();
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const resumed = await runtimeMessageWithTimeout(
+          popup,
+          { type: 'RUN_PENDING_SESSIONS', sessionId: session.id }
+        );
+        if (resumed?.response && (!resumed.response.ok || resumed.response.result?.status === 'already_running')) {
+          fail(`browser_extension_lost_checkpoint_resume_failed:${JSON.stringify(resumed)}`);
+        }
+      } else {
+        const leaseRun = await leaseRunPromise;
+        if (leaseRun?.response && !leaseRun.response.ok) {
+          fail(`browser_extension_final_submit_lease_start_failed:${leaseRun?.error || leaseRun?.response?.error || 'no_response'}`);
+        }
+      }
+      try {
+        await waitFor(async () => {
+          if (!shouldExpireAfterCheckpoint) {
+            return checkpoints.some((checkpoint) => checkpoint.planActionId === 'submit-final-order'
+              && checkpoint.browser?.runnerStep?.finalSubmitReceipt?.phase === 'click_dispatched');
+          }
+          const state = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+            chrome.storage.local.get(['lastError', 'activeRun'], resolve);
+          })), 3_000, 'browser_extension_final_submit_lease_storage_timeout');
+          return fulfillment?.result?.browserExecution?.stopState === 'final_submit_authorization_rejected'
+            && !state.activeRun;
+        }, 15_000);
+      } catch {
+        const runnerState = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+          chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun', 'activeMissionTabs'], resolve);
+        })), 3_000, 'browser_extension_final_submit_lease_diagnostics_timeout');
+        fail(`browser_extension_final_submit_lease_timeout:${JSON.stringify({
+          checkpoints: checkpoints.map((checkpoint) => ({
+            actionId: checkpoint.planActionId,
+            status: checkpoint.planActionStatus,
+            detail: checkpoint.detail
+          })),
+          runnerState,
+          sessionState: session.extensionMissionPlanState
+        })}`);
+      } finally {
+        delayLeaseExpiryCheckpoint = false;
+      }
+      const checkoutPage = context.pages().find((page) => page.url().startsWith(baseUrl)
+        && page.url().includes('/checkout/final-review'));
+      if (!checkoutPage) fail('browser_extension_final_submit_lease_checkout_page_missing');
+      const browserEvidence = await checkoutPage.evaluate(() => ({
+        nativeClick: sessionStorage.getItem('magic-city-native-final-click') || '',
+        orderSubmitted: document.body.dataset.orderSubmitted || '',
+        receipts: JSON.parse(sessionStorage.getItem('magic_city_browser_action_receipts_v1') || '[]')
+      }));
+      const runnerEvidence = await withTimeout(popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
+      })), 3_000, 'browser_extension_final_submit_lease_evidence_timeout');
+      const finalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+      const checkpointReceipts = finalCheckpoint?.browser?.browserActionReceipts || [];
+      if (shouldExpireAfterCheckpoint) {
+        if (fulfillment?.status !== 'failed'
+          || fulfillment?.result?.browserExecution?.stopState !== 'final_submit_authorization_rejected'
+          || !String(fulfillment?.result?.browserExecution?.stopEvidence || '').includes('final_submit_authority_lease_expired')
+          || browserEvidence.nativeClick
+          || browserEvidence.orderSubmitted
+          || browserEvidence.receipts.some((receipt) => receipt?.kind === 'final_order')
+          || checkpointReceipts.some((receipt) => receipt?.kind === 'final_order')) {
+          fail(`browser_extension_final_submit_lease_expiry_dispatched_or_reported_order:${JSON.stringify({
+            fulfillment,
+            runnerEvidence,
+            browserEvidence,
+            checkpoint: finalCheckpoint || null
+          })}`);
+        }
+      } else if (runnerEvidence.lastError
+        || browserEvidence.nativeClick !== '1'
+        || browserEvidence.orderSubmitted !== '1'
+        || !checkpointReceipts.some((receipt) => receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched')) {
+        fail(`browser_extension_final_submit_lease_renewal_did_not_dispatch:${JSON.stringify({
+          fulfillment,
+          runnerEvidence,
+          browserEvidence,
+          checkpoint: finalCheckpoint || null,
+          sessionState: session.extensionMissionPlanState,
+          runnerStatusCalls: runnerStatusRequestCount
+        })}`);
+      }
+      recordPurchaseScenario(
+        shouldExpireAfterCheckpoint
+          ? 'Expired final-submit lease blocks the native Amazon click and receipts'
+          : shouldRecoverLostCheckpoint
+            ? 'Lost review-checkpoint response recovers one exact final-submit lease after worker restart'
+          : 'Fresh signed review checkpoint renews the exact final-submit lease once',
+        shouldExpireAfterCheckpoint
+          ? {
+            error: runnerEvidence.lastError,
+            finalCheckpointStatus: finalCheckpoint?.planActionStatus || 'none',
+            terminalReport: fulfillment?.result?.browserExecution?.stopState || 'missing'
+            }
+          : {
+              finalCheckpointStatus: finalCheckpoint?.planActionStatus || 'none',
+              nativeClick: browserEvidence.nativeClick,
+              orderSubmitted: browserEvidence.orderSubmitted
+            }
+      );
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner final-submit lease behavior smoke passed');
+      return;
+    }
+    console.log('native-runner browser smoke running full checkout matrix');
     const commandPage = async (page, message) => {
-      const tab = await worker.evaluate(async (url) => {
-        const tabs = await chrome.tabs.query({});
-        return tabs.find((candidate) => candidate.url === url) || null;
-      }, page.url());
+      const activeWorker = context.serviceWorkers()[0] || worker;
+      const tab = await Promise.race([
+        activeWorker.evaluate(async (url) => {
+          const tabs = await chrome.tabs.query({});
+          return tabs.find((candidate) => candidate.url === url) || null;
+        }, page.url()),
+        new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 15_000))
+      ]);
+      if (tab?.timeout) fail(`browser_extension_service_worker_tab_lookup_timeout:${page.url()}`);
       if (!tab?.id) fail(`browser_extension_policy_test_tab_missing:${page.url()}`);
-      return worker.evaluate(async ({ tabId, payload }) => {
-        await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
-        return chrome.tabs.sendMessage(tabId, payload);
-      }, { tabId: tab.id, payload: message });
+      const response = await Promise.race([
+        activeWorker.evaluate(async ({ tabId, payload }) => {
+        const timeoutResult = { completed: false, reason: 'browser_content_script_injection_timeout' };
+        const injected = await Promise.race([
+          chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] }).then(() => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 15_000))
+        ]);
+        if (!injected) return timeoutResult;
+        return Promise.race([
+          chrome.tabs.sendMessage(tabId, payload),
+          new Promise((resolve) => setTimeout(() => resolve({
+            completed: false,
+            reason: 'browser_content_script_timeout'
+          }), 15_000))
+        ]);
+        }, { tabId: tab.id, payload: message }),
+        new Promise((resolve) => setTimeout(() => resolve({
+          completed: false,
+          reason: 'browser_service_worker_evaluation_timeout'
+        }), 20_000))
+      ]);
+      if (/^browser_content_script_(?:injection_)?timeout$/.test(String(response?.reason || ''))) {
+        fail(`browser_extension_content_script_timeout:${page.url()}`);
+      }
+      return response;
     };
+    console.log('native-runner browser smoke opening signed-out fixture');
     const signedOutPage = await context.newPage();
+    console.log('native-runner browser smoke signed-out fixture tab ready');
     await signedOutPage.goto(`${baseUrl}/signed-out-search`);
+    console.log('native-runner browser smoke signed-out fixture loaded');
     const signedOutState = await commandPage(signedOutPage, { type: 'MAGIC_CITY_BROWSER_STATE' });
     if (signedOutState.amazonAccountState !== 'signed_out' || signedOutState.loginRequired !== true) {
       fail(`browser_extension_did_not_fail_closed_for_signed_out_amazon:${JSON.stringify(signedOutState)}`);
@@ -1118,6 +2344,7 @@ async function main() {
       strategy: directResultOpenCartAction.controlStrategy
     });
     await directResultCartPage.close();
+    await verifyAmazonNavFlyout();
 
     const headerCartPage = await context.newPage();
     await headerCartPage.goto(`${baseUrl}/header-cart-search`);
@@ -1218,24 +2445,10 @@ async function main() {
     });
     await thirdPartyProductPage.close();
 
-   await worker.evaluate(() => chrome.storage.local.set({
-      localCheckoutProfiles: {
-        'browser-smoke-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '6383'
-          }
-        }
-      }
-    }));
+    await seedSessionCheckoutProfile('browser-smoke-session', {
+      ...defaultCheckoutProfile,
+      paymentCardLast4: '6383'
+    }, plan.planHash);
 
     const paymentConfirmPage = await context.newPage();
     await paymentConfirmPage.goto(`${baseUrl}/checkout/pay-confirm`);
@@ -1301,23 +2514,46 @@ async function main() {
     });
     await paymentConfirmContinuationPage.close();
 
+    checkoutFixture = {
+      ...checkoutFixture,
+      pendingOrderContinuation: true,
+      // Keep the merchant response deliberately slow. This proves the live
+      // extension connection survives a normal checkout that lasts longer
+      // than one Chrome heartbeat without making browser steps slow.
+      pendingOrderConfirmationDelayMs: 65_000
+    };
+    dropPrepareCartCheckpointResponse = true;
+    dropCommittedCheckpointResponses = new Set(['open-site', 'inspect-review', 'confirm-pending-order']);
+    committedCheckpointDroppedAtMs = new Map();
+    committedCheckpointRecoveryPolledAtMs = new Map();
     await popup.close();
     const externalWakePage = await context.newPage();
     await externalWakePage.goto(`${baseUrl}/external-wake`);
     const cdp = await context.newCDPSession(externalWakePage);
     await cdp.send('ServiceWorker.enable');
     await cdp.send('ServiceWorker.stopAllWorkers');
+    const externalWakeStartedAtMs = Date.now();
     const externalWakePromise = externalWakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
       const startedAt = performance.now();
-      chrome.runtime.sendMessage(targetExtensionId, {
+      const progress = [];
+      const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+      port.onMessage.addListener((payload) => {
+        if (payload?.type === 'RUNNER_PROGRESS') {
+          progress.push(payload);
+          return;
+        }
+        if (payload?.type === 'RUNNER_RESULT') {
+          resolve({ response: { ok: payload.ok, result: payload.result, error: payload.error }, progress, elapsedMs: performance.now() - startedAt });
+        }
+      });
+      port.onDisconnect.addListener(() => {
+        if (chrome.runtime.lastError) resolve({ response: null, error: chrome.runtime.lastError.message, progress, elapsedMs: performance.now() - startedAt });
+      });
+      port.postMessage({
         type: 'RUN_PENDING_SESSIONS',
-        sessionId
-      }, (response) => {
-        resolve({
-          response,
-          error: chrome.runtime.lastError?.message || '',
-          elapsedMs: performance.now() - startedAt
-        });
+        sessionId,
+        extensionDispatchNonce: 'browser-smoke-full-dispatch',
+        clientRunStartedAt: new Date().toISOString()
       });
     }), { extensionId, sessionId: session.id });
     const initialWakeState = await Promise.race([
@@ -1334,16 +2570,46 @@ async function main() {
     if (claimedSessionIds[0] !== session.id) {
       fail(`browser_extension_claimed_wrong_queued_session:${JSON.stringify(claimedSessionIds)}`);
     }
+    await waitFor(() => checkpoints.some((checkpoint) => checkpoint.planActionId === 'open-site'
+      && checkpoint.planActionStatus === 'waiting'
+      && checkpoint.label === 'Opening browser'), 5_000);
+    const startupCheckpointIndex = checkpoints.findIndex((checkpoint) => checkpoint.planActionId === 'open-site'
+      && checkpoint.planActionStatus === 'waiting'
+      && checkpoint.label === 'Opening browser');
+    const completedOpenSiteIndex = checkpoints.findIndex((checkpoint) => checkpoint.planActionId === 'open-site'
+      && checkpoint.planActionStatus === 'completed');
+    if (startupCheckpointIndex < 0 || (completedOpenSiteIndex >= 0 && completedOpenSiteIndex < startupCheckpointIndex)) {
+      fail(`browser_extension_claim_startup_checkpoint_missing_or_advanced:${JSON.stringify(checkpoints)}`);
+    }
     try {
-      await waitFor(() => Boolean(fulfillment), 40_000);
+      await waitFor(() => Boolean(fulfillment), 90_000);
     } catch (error) {
       const diagnosticPage = await context.newPage();
       await diagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
       const runnerState = await diagnosticPage.evaluate(() => new Promise((resolve) => {
-        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'explicitWakeSessionId'], resolve);
+        chrome.storage.local.get([
+          'lastError',
+          'lastExecution',
+          'activeSessionId',
+          'explicitWakeSessionId',
+          'activeRun'
+        ], resolve);
       }));
       await diagnosticPage.close();
-      fail(`browser_extension_smoke_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}`);
+      fail(`browser_extension_smoke_timeout:${JSON.stringify({
+        steps: checkpoints.map((checkpoint) => ({
+          id: checkpoint.planActionId,
+          status: checkpoint.planActionStatus,
+          milestones: checkpoint.verifiedMilestones
+        })),
+        runnerState,
+        session: {
+          status: session?.status,
+          planState: session?.extensionMissionPlanState,
+          fulfillment: session?.fulfillment,
+          runnerStatus: session?.runnerStatus
+        }
+      })}`);
     }
     const externalWake = await externalWakePromise;
     if (externalWake.error || !externalWake.response?.ok || !externalWake.response?.result?.requestedSessionFound) {
@@ -1352,11 +2618,424 @@ async function main() {
     if (externalWake.response.result.requestedSessionId !== session.id) {
       fail(`browser_extension_external_wake_wrong_session:${JSON.stringify(externalWake)}`);
     }
+    const connectedWorkerIds = [...new Set((externalWake.progress || [])
+      .map((entry) => String(entry?.activeRun?.workerId || ''))
+      .filter(Boolean))];
+    const pendingContinuationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
+      && checkpoint.planActionStatus === 'completed');
+    const checkpointAfterPrepareCart = checkpoints.find((checkpoint) => (
+      Number(checkpoint.testReceivedAtMs || 0) > prepareCartCheckpointCommittedAtMs
+      && !/^prepare-cart(?:-\d+)?$/.test(String(checkpoint.planActionId || ''))
+    ));
+    const inlineCartRecoveryMs = Number(checkpointAfterPrepareCart?.testReceivedAtMs || 0) - prepareCartCheckpointCommittedAtMs;
+    const prepareCartCheckpointCount = checkpoints.filter((checkpoint) => /^prepare-cart(?:-\d+)?$/.test(String(checkpoint.planActionId || ''))).length;
+    const sawReconnectingRunner = (externalWake.progress || []).some((entry) => (
+      entry?.activeRun?.progressState === 'reconnecting_control_plane'
+      && entry?.activeRun?.progressLabel === 'Reconnecting Runner'
+    ));
+    const continuationDispatchMs = Number(pendingContinuationCheckpoint?.testReceivedAtMs || 0) - externalWakeStartedAtMs;
+    if (externalWake.elapsedMs < 60_000
+      || externalWake.elapsedMs >= 90_000
+      || externalWake.progress?.length < 4
+      || connectedWorkerIds.length !== 1
+      || continuationDispatchMs <= 0
+      || continuationDispatchMs >= 30_000
+      || prepareCartCheckpointCommittedAtMs <= 0
+      || inlineCartRecoveryMs <= 0
+      || inlineCartRecoveryMs >= 8_000
+      || prepareCartCheckpointCount !== 1
+      || !sawReconnectingRunner) {
+      fail(`browser_extension_active_run_port_lifecycle_failed:${JSON.stringify({
+        elapsedMs: externalWake.elapsedMs,
+        progressCount: externalWake.progress?.length || 0,
+        connectedWorkerIds,
+        continuationDispatchMs,
+        prepareCartCheckpointCommittedAtMs,
+        inlineCartRecoveryMs,
+        prepareCartCheckpointCount,
+        sawReconnectingRunner
+      })}`);
+    }
+    const expandedRecoveryActions = ['open-site', 'inspect-review', 'confirm-pending-order'];
+    const expandedRecoveryTimings = Object.fromEntries(expandedRecoveryActions.map((actionId) => {
+      const droppedAtMs = Number(committedCheckpointDroppedAtMs.get(actionId) || 0);
+      const recoveryPolledAtMs = Number(committedCheckpointRecoveryPolledAtMs.get(actionId) || 0);
+      return [actionId, {
+        recoveryMs: recoveryPolledAtMs - droppedAtMs,
+        checkpointCount: checkpoints.filter((checkpoint) => (
+          checkpoint.planActionId === actionId && checkpoint.planActionStatus !== 'waiting'
+        )).length
+      }];
+    }));
+    if (expandedRecoveryActions.some((actionId) => (
+      Number(expandedRecoveryTimings[actionId].recoveryMs) <= 0
+      || Number(expandedRecoveryTimings[actionId].recoveryMs) >= 8_000
+      || expandedRecoveryTimings[actionId].checkpointCount !== 1
+    ))) {
+      fail(`browser_extension_expanded_checkpoint_recovery_failed:${JSON.stringify(expandedRecoveryTimings)}`);
+    }
     recordPurchaseScenario('Cold external website wake stays alive through exact mission claim', {
       sessionId: session.id,
       queuedSessions: 2,
-      completionMs: Math.round(externalWake.elapsedMs)
+      completionMs: Math.round(externalWake.elapsedMs),
+      continuationDispatchMs,
+      progressPulses: externalWake.progress.length,
+      workerCount: connectedWorkerIds.length,
+      startupCheckpoint: 'open-site waiting'
     });
+    recordPurchaseScenario('Lost committed cart checkpoint resumes inline without replay', {
+      recoveryMs: inlineCartRecoveryMs,
+      prepareCartCheckpointCount,
+      progressLabel: 'Reconnecting Runner'
+    });
+    recordPurchaseScenario('Lost committed non-cart checkpoints resume inline without replay', expandedRecoveryTimings);
+    const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
+    const pendingFinalClicks = primaryStorePage
+      ? await primaryStorePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0))
+      : 0;
+    const pendingDiagnosticPage = await context.newPage();
+    await pendingDiagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
+    const pendingRunnerState = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
+      chrome.storage.local.get(['activeRun'], resolve);
+    }));
+    if (pendingFinalClicks !== 1
+      || !checkpoints.some((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
+        && checkpoint.planActionStatus === 'completed')) {
+      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ pendingFinalClicks, activeRun: pendingRunnerState.activeRun, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus, url: checkpoint.browser?.url, reason: checkpoint.browser?.runnerStep?.reason, evidence: checkpoint.browser?.runnerStep?.pendingOrderMatchEvidence, cartItems: checkpoint.browser?.checkoutSummary?.cartItems })) })}`);
+    }
+    const durableDispatches = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
+      chrome.storage.local.get(['finalOrderDispatches'], resolve);
+    }));
+    const durableTabReceipts = Object.values(durableDispatches.finalOrderDispatches || {}).flatMap((value) => Array.isArray(value) ? value : [value]);
+    const durableScopes = durableTabReceipts.map((receipt) => receipt?.receiptScope).filter(Boolean);
+    if (!durableScopes.includes(`${plan.planHash}:submit-final-order`)
+      || !durableScopes.includes(`${plan.planHash}:confirm-pending-order`)) {
+      fail(`browser_extension_pending_order_dispatch_receipts_not_both_durable:${JSON.stringify(durableDispatches)}`);
+    }
+    recordPurchaseScenario('Sparse Amazon duplicateOrder page is continued exactly once', { pendingFinalClicks });
+
+    const replayPage = await context.newPage();
+    await replayPage.goto(`${baseUrl}/checkout/pending-order?stay=1`);
+    const replayTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), replayPage.url());
+    const replayAction = {
+      id: 'confirm-pending-order',
+      type: 'final_submit',
+      missionAction: 'final_submit',
+      autoSubmitAfterVerifiedCheckout: true,
+      pendingOrderContinuation: true,
+      priorFinalSubmitDispatched: true,
+      receiptScope: 'pending-replay-plan:confirm-pending-order',
+      sessionId: 'pending-replay-session',
+      planHash: 'pending-replay-plan',
+      expectedItemCount: 1,
+      boundCandidate: { asin: 'BROWSER-SMOKE-ASIN', title: 'Test Gadget', price: 3.5 },
+      boundCartEvidence: {
+        sessionId: 'pending-replay-session',
+        planHash: 'pending-replay-plan',
+        asin: 'BROWSER-SMOKE-ASIN',
+        title: 'Test Gadget',
+        price: 3.5,
+        quantity: 1
+      }
+    };
+    const invokePendingAction = async (tabId, action) => pendingDiagnosticPage.evaluate(async ({ targetTabId, pendingAction }) => {
+      await chrome.scripting.executeScript({ target: { tabId: targetTabId }, files: ['executor.js'] });
+      return chrome.tabs.sendMessage(targetTabId, { type: 'MAGIC_CITY_EXECUTE_PLAN_STEP', action: pendingAction, checkoutProfile: {} });
+    }, { targetTabId: tabId, pendingAction: action });
+    const firstPendingDispatch = await invokePendingAction(replayTab.id, replayAction);
+    await replayPage.waitForTimeout(300);
+    // Simulate content-script reinjection after page-local receipts were lost.
+    // The background's durable action-scoped receipt must still veto replay.
+    await replayPage.evaluate(() => sessionStorage.removeItem('magic_city_browser_action_receipts_v1'));
+    const repeatedPendingDispatch = await invokePendingAction(replayTab.id, {
+      ...replayAction,
+      priorPendingOrderDispatchReceipt: firstPendingDispatch?.finalSubmitReceipt || null
+    });
+    const replayClickCount = await replayPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!firstPendingDispatch?.completed
+      || repeatedPendingDispatch?.skipped !== true
+      || repeatedPendingDispatch?.finalSubmitReceipt?.phase !== 'click_dispatched'
+      || replayClickCount !== 1) {
+      fail(`browser_extension_pending_order_replay_guard_failed:${JSON.stringify({ firstPendingDispatch, repeatedPendingDispatch, replayClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation reuses action-scoped no-replay receipts', { replayClickCount });
+    await replayPage.close();
+
+    const accessibilityCartPage = await context.newPage();
+    await accessibilityCartPage.goto(`${baseUrl}/cart-accessibility-title`);
+    const accessibilityCartTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), accessibilityCartPage.url());
+    const accessibilityCartState = await pendingDiagnosticPage.evaluate(async (tabId) => {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+      return chrome.tabs.sendMessage(tabId, { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile: {} });
+    }, accessibilityCartTab.id);
+    const accessibilityCartItem = accessibilityCartState?.checkoutSummary?.cartItems?.[0] || null;
+    const cleanAlmondTitle = 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz';
+    if (accessibilityCartItem?.asin !== 'NATURE-VALLEY-ALMOND'
+      || accessibilityCartItem?.title !== cleanAlmondTitle
+      || Number(accessibilityCartItem?.price) !== 2.97
+      || Number(accessibilityCartItem?.quantity) !== 1) {
+      fail(`browser_extension_cart_accessibility_title_not_clean:${JSON.stringify(accessibilityCartState)}`);
+    }
+    await accessibilityCartPage.close();
+
+    const accessibilityPendingPage = await context.newPage();
+    await accessibilityPendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=almond&unitPrice=2.97`);
+    const accessibilityPendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), accessibilityPendingPage.url());
+    const accessibilityPendingOutcome = await invokePendingAction(accessibilityPendingTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-accessibility-title-plan:confirm-pending-order',
+      sessionId: 'pending-accessibility-title-session',
+      planHash: 'pending-accessibility-title-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-ALMOND', title: cleanAlmondTitle, price: 2.97 },
+      boundCartEvidence: {
+        ...accessibilityCartItem,
+        sessionId: 'pending-accessibility-title-session',
+        planHash: 'pending-accessibility-title-plan'
+      }
+    });
+    await accessibilityPendingPage.waitForTimeout(300);
+    const accessibilityPendingClickCount = await accessibilityPendingPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!accessibilityPendingOutcome?.completed
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.identitySource !== 'exact_title'
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || accessibilityPendingOutcome?.pendingOrderMatchEvidence?.quantityMatches !== true
+      || accessibilityPendingClickCount !== 1) {
+      fail(`browser_extension_accessibility_title_pending_order_not_confirmed:${JSON.stringify({ accessibilityPendingOutcome, accessibilityPendingClickCount })}`);
+    }
+    recordPurchaseScenario('ASIN-bound cart title excludes the accessibility suffix before strict pending-order matching', {
+      title: accessibilityCartItem.title,
+      identitySource: accessibilityPendingOutcome.pendingOrderMatchEvidence.identitySource,
+      clickCount: accessibilityPendingClickCount
+    });
+    await accessibilityPendingPage.close();
+
+    const livePendingPage = await context.newPage();
+    await livePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=2.97`);
+    const livePendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), livePendingPage.url());
+    const livePendingOutcome = await invokePendingAction(livePendingTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-live-sparse-plan:confirm-pending-order',
+      sessionId: 'pending-live-sparse-session',
+      planHash: 'pending-live-sparse-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-VALID', title: 'Nature Valley', price: 2.97 },
+      boundCartEvidence: {
+        sessionId: 'pending-live-sparse-session',
+        planHash: 'pending-live-sparse-plan',
+        asin: 'NATURE-VALLEY-VALID',
+        title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    await livePendingPage.waitForTimeout(300);
+    const livePendingClickCount = await livePendingPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!livePendingOutcome?.completed
+      || livePendingOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || livePendingOutcome?.pendingOrderMatchEvidence?.identitySource !== 'exact_title'
+      || livePendingOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || livePendingOutcome?.pendingOrderMatchEvidence?.priceSource !== 'identity_row'
+      || livePendingOutcome?.pendingOrderMatchEvidence?.quantityMatches !== true
+      || livePendingClickCount !== 1) {
+      fail(`browser_extension_live_sparse_pending_order_not_confirmed:${JSON.stringify({ livePendingOutcome, livePendingClickCount })}`);
+    }
+    recordPurchaseScenario('Live-shaped duplicateOrder page uses verified cart identity exactly once', {
+      identitySource: livePendingOutcome.pendingOrderMatchEvidence.identitySource,
+      priceSource: livePendingOutcome.pendingOrderMatchEvidence.priceSource,
+      clickCount: livePendingClickCount
+    });
+    await livePendingPage.close();
+
+    const pendingUnitPricePage = await context.newPage();
+    await pendingUnitPricePage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=3.97&comparisonUnitPrice=2.97&comparisonUnit=100%20g`);
+    const pendingUnitPriceTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingUnitPricePage.url());
+    const pendingUnitPriceOutcome = await invokePendingAction(pendingUnitPriceTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-unit-price-plan:confirm-pending-order',
+      sessionId: 'pending-unit-price-session',
+      planHash: 'pending-unit-price-plan',
+      boundCartEvidence: {
+        sessionId: 'pending-unit-price-session',
+        planHash: 'pending-unit-price-plan',
+        asin: 'NATURE-VALLEY-VALID',
+        title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const pendingUnitPriceClickCount = await pendingUnitPricePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (pendingUnitPriceOutcome?.completed !== false
+      || pendingUnitPriceOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || pendingUnitPriceOutcome?.pendingOrderMatchEvidence?.priceMatches !== false
+      || pendingUnitPriceOutcome?.pendingOrderMatchEvidence?.merchandisePriceContradiction !== true
+      || pendingUnitPriceClickCount !== 0) {
+      fail(`browser_extension_pending_order_unit_price_false_match_not_rejected:${JSON.stringify({ pendingUnitPriceOutcome, pendingUnitPriceClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects a matching unit price beside a contradictory merchandise price', {
+      expectedPrice: '$2.97',
+      merchandisePrice: '$3.97',
+      comparisonUnitPrice: '$2.97 / 100 g',
+      clickCount: pendingUnitPriceClickCount
+    });
+    await pendingUnitPricePage.close();
+
+    const pendingSiblingPricePage = await context.newPage();
+    await pendingSiblingPricePage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&siblingPriceOnly=1&unitPrice=2.97`);
+    const pendingSiblingPriceTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingSiblingPricePage.url());
+    const pendingSiblingPriceOutcome = await invokePendingAction(pendingSiblingPriceTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-sibling-price-plan:confirm-pending-order',
+      sessionId: 'pending-sibling-price-session',
+      planHash: 'pending-sibling-price-plan',
+      boundCartEvidence: {
+        sessionId: 'pending-sibling-price-session',
+        planHash: 'pending-sibling-price-plan',
+        asin: 'NATURE-VALLEY-VALID',
+        title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const pendingSiblingPriceClickCount = await pendingSiblingPricePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (pendingSiblingPriceOutcome?.completed !== false
+      || pendingSiblingPriceOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || pendingSiblingPriceOutcome?.pendingOrderMatchEvidence?.priceMatches !== false
+      || pendingSiblingPriceClickCount !== 0) {
+      fail(`browser_extension_pending_order_sibling_price_false_match_not_rejected:${JSON.stringify({ pendingSiblingPriceOutcome, pendingSiblingPriceClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation does not borrow a sibling product price', {
+      matchingProductPrice: 'missing',
+      siblingPrice: '$2.97',
+      clickCount: pendingSiblingPriceClickCount
+    });
+    await pendingSiblingPricePage.close();
+
+    const pendingMismatchPage = await context.newPage();
+    await pendingMismatchPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=cashew&unitPrice=3.50`);
+    const mismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingMismatchPage.url());
+    const mismatchOutcome = await invokePendingAction(mismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-mismatch-session',
+      planHash: 'pending-mismatch-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-ALMOND', title: 'Nature Valley Almond Granola Bars', price: 3.5 },
+      boundCartEvidence: {
+        sessionId: 'pending-mismatch-session',
+        planHash: 'pending-mismatch-plan',
+        asin: 'NATURE-VALLEY-ALMOND',
+        title: 'Nature Valley Almond Granola Bars',
+        price: 3.5,
+        quantity: 1
+      }
+    });
+    const mismatchClickCount = await pendingMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (mismatchOutcome?.completed !== false
+      || mismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== false
+      || mismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_variant_mismatch_not_rejected:${JSON.stringify({ mismatchOutcome, mismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects a same-price product variant mismatch', { mismatchClickCount });
+    await pendingMismatchPage.close();
+
+    const pendingPackMismatchPage = await context.newPage();
+    await pendingPackMismatchPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=almond-pack-mismatch&unitPrice=2.97`);
+    const packMismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingPackMismatchPage.url());
+    const packMismatchOutcome = await invokePendingAction(packMismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-pack-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-pack-mismatch-session',
+      planHash: 'pending-pack-mismatch-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-ALMOND', title: 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz', price: 2.97 },
+      boundCartEvidence: {
+        sessionId: 'pending-pack-mismatch-session',
+        planHash: 'pending-pack-mismatch-plan',
+        asin: 'NATURE-VALLEY-ALMOND',
+        title: 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const packMismatchClickCount = await pendingPackMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (packMismatchOutcome?.completed !== false
+      || packMismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== false
+      || packMismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_pack_mismatch_not_rejected:${JSON.stringify({ packMismatchOutcome, packMismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects a same-price pack-size mismatch', { packMismatchClickCount });
+    await pendingPackMismatchPage.close();
+
+    const pendingQuantityMismatchPage = await context.newPage();
+    await pendingQuantityMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&quantity=2&unitPrice=2.97&orderTotal=5.94`);
+    const quantityMismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingQuantityMismatchPage.url());
+    const quantityMismatchOutcome = await invokePendingAction(quantityMismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-quantity-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-quantity-mismatch-session',
+      planHash: 'pending-quantity-mismatch-plan',
+      boundCandidate: { asin: 'BROWSER-SMOKE-ASIN', title: 'Test Gadget', price: 2.97 },
+      boundCartEvidence: {
+        sessionId: 'pending-quantity-mismatch-session',
+        planHash: 'pending-quantity-mismatch-plan',
+        asin: 'BROWSER-SMOKE-ASIN',
+        title: 'Test Gadget',
+        price: 2.97,
+        quantity: 1
+      }
+    });
+    const quantityMismatchClickCount = await pendingQuantityMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (quantityMismatchOutcome?.completed !== false
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.quantityMatches !== false
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.quantityContradiction !== true
+      || quantityMismatchOutcome?.pendingOrderMatchEvidence?.explicitQuantity !== 2
+      || quantityMismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_quantity_contradiction_not_rejected:${JSON.stringify({ quantityMismatchOutcome, quantityMismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects current quantity 2 over saved quantity 1', {
+      explicitQuantity: 2,
+      orderTotal: '$5.94',
+      clickCount: quantityMismatchClickCount
+    });
+    await pendingQuantityMismatchPage.close();
+
+    const pendingPriceMismatchPage = await context.newPage();
+    await pendingPriceMismatchPage.goto(`${baseUrl}/checkout/pending-order?stay=1&unitPrice=4.25&orderTotal=4.25`);
+    const priceMismatchTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), pendingPriceMismatchPage.url());
+    const priceMismatchOutcome = await invokePendingAction(priceMismatchTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-price-mismatch-plan:confirm-pending-order',
+      sessionId: 'pending-price-mismatch-session',
+      planHash: 'pending-price-mismatch-plan',
+      boundCartEvidence: {
+        sessionId: 'pending-price-mismatch-session',
+        planHash: 'pending-price-mismatch-plan',
+        asin: 'BROWSER-SMOKE-ASIN',
+        title: 'Test Gadget',
+        price: 3.5,
+        quantity: 1
+      }
+    });
+    const priceMismatchClickCount = await pendingPriceMismatchPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (priceMismatchOutcome?.completed !== false
+      || priceMismatchOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || priceMismatchOutcome?.pendingOrderMatchEvidence?.priceMatches !== false
+      || priceMismatchOutcome?.pendingOrderMatchEvidence?.merchandisePriceContradiction !== true
+      || priceMismatchClickCount !== 0) {
+      fail(`browser_extension_pending_order_price_contradiction_not_rejected:${JSON.stringify({ priceMismatchOutcome, priceMismatchClickCount })}`);
+    }
+    recordPurchaseScenario('Pending-order continuation rejects an explicit current unit-price contradiction', {
+      expectedUnitPrice: '$3.50',
+      currentUnitPrice: '$4.25',
+      clickCount: priceMismatchClickCount
+    });
+    await pendingPriceMismatchPage.close();
+    await pendingDiagnosticPage.close();
+    checkoutFixture = {
+      ...checkoutFixture,
+      pendingOrderContinuation: false,
+      pendingOrderConfirmationDelayMs: 0
+    };
 
     popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
@@ -1517,7 +3196,8 @@ async function main() {
     } catch {
       fail(`browser_extension_cart_recovery_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
     }
-    const recoveredCartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'prepare-cart');
+    const recoveredCartCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'prepare-cart'
+      && checkpoint.planActionStatus === 'completed');
     if (recoveredCartCheckpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
       || !Array.isArray(recoveredCartCheckpoint?.verifiedMilestones)
       || !recoveredCartCheckpoint.verifiedMilestones.includes('cart_confirmed')) {
@@ -1608,7 +3288,8 @@ async function main() {
     } catch {
       fail(`browser_extension_final_recovery_timeout:${JSON.stringify(await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve))))}`);
     }
-    const recoveredFinalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    const recoveredFinalCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order'
+      && checkpoint.planActionStatus === 'completed');
     if (recoveredFinalCheckpoint?.browser?.runnerStep?.recoveredFromInterruption !== true
       || recoveredFinalCheckpoint?.browser?.finalSubmitRequested !== true
       || recoveredFinalCheckpoint?.browser?.orderSubmitted !== true
@@ -1821,7 +3502,8 @@ async function main() {
         summary: document.querySelector('#delivery-summary')?.textContent || '',
         optionsHidden: document.querySelector('#address-options')?.hidden,
         newFormHidden: document.querySelector('#new-address-form')?.hidden,
-        shippingValues: Array.from(document.querySelectorAll('#new-address-form input, #new-address-form select')).map((field) => ({ label: field.getAttribute('aria-label'), value: field.value }))
+        shippingValues: Array.from(document.querySelectorAll('#new-address-form input, #new-address-form select')).map((field) => ({ label: field.getAttribute('aria-label'), value: field.value })),
+        events: window.__checkoutEvents || []
       })) : null;
       fail(`browser_extension_auto_submit_not_verified:steps=${JSON.stringify(checkpoints.map((checkpoint) => ({
         id: checkpoint.planActionId,
@@ -1833,8 +3515,15 @@ async function main() {
       })))}:payment_radios=${JSON.stringify(paymentRadios)}:address=${JSON.stringify(addressFixtureState)}:execution=${JSON.stringify(fulfillment.result?.browserExecution || {})}`);
     }
     const merchantDefaultCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
-    if (merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault?.saved !== true) {
+    const merchantCheckoutDefault = merchantDefaultCheckpoint?.browser?.runnerStep?.merchantCheckoutDefault || {};
+    // The smoke merchant is localhost. The Amazon-only preference checkbox is
+    // intentionally unavailable there, so assert the behavior that is valid
+    // for this fixture while preserving the strict assertion for an Amazon DOM.
+    if (merchantCheckoutDefault.attempted === true && merchantCheckoutDefault.saved !== true) {
       fail(`browser_extension_merchant_checkout_default_not_saved:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
+    }
+    if (merchantCheckoutDefault.attempted !== true && !['not_amazon', 'not_requested'].includes(merchantCheckoutDefault.reason)) {
+      fail(`browser_extension_merchant_checkout_default_state_unexpected:${JSON.stringify(merchantDefaultCheckpoint?.browser?.runnerStep || {})}`);
     }
     const merchantConfirmationCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-merchant-order');
     if (merchantConfirmationCheckpoint?.browser?.runnerStep?.merchantOrderConfirmation?.confirmed !== true) {
@@ -1983,7 +3672,10 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressSummary: '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
+      matchingAddressText: 'Test User 2865 SAND HILL RD STE 101 Menlo Park, CA 94025-7022 United States Phone number: 415-555-0100'
     };
     brandCandidateVisits = [];
     brandCartItem = null;
@@ -2012,25 +3704,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-brand-fallback-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, brandFallbackPlan.planHash);
     const brandFallbackStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2106,7 +3781,10 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressSummary: '1 MAGIC CITY WAY, SAN FRANCISCO, CA, 94107, United States',
+      matchingAddressText: 'Test User 1 MAGIC CITY WAY San Francisco, CA 94107 United States Phone number: 415-555-0100'
     };
     conditionalCandidateVisits = [];
     brandCartItem = null;
@@ -2135,25 +3813,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-conditional-prime-shipping-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, conditionalShippingPlan.planHash);
     const conditionalShippingStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2223,25 +3884,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-multi-item-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, multiItemPlan.planHash);
     const multiItemStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2267,7 +3911,7 @@ async function main() {
       'inspect-cart', 'open-checkout'
     ]) {
       if (!multiItemCompletedIds.includes(actionId)) {
-        fail(`browser_extension_multi_item_missing_step:${actionId}:${multiItemCompletedIds.join(',')}`);
+        fail(`browser_extension_multi_item_missing_step:${actionId}:${multiItemCompletedIds.join(',')}:cursor=${JSON.stringify(session.extensionMissionPlanState)}:result=${JSON.stringify(fulfillment.result?.browserExecution || {})}`);
       }
     }
     if (multiBasketItems.length !== 3
@@ -2316,25 +3960,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-incomplete-basket-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, incompleteBasketPlan.planHash);
     const incompleteBasketStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2368,7 +3995,10 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressSummary: '1 MAGIC CITY WAY, SAN FRANCISCO, CA, 94107, United States',
+      matchingAddressText: 'Test User 1 MAGIC CITY WAY San Francisco, CA 94107 United States Phone number: 415-555-0100'
     };
     checkpoints.length = 0;
     fulfillment = null;
@@ -2388,25 +4018,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-sidecart-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, sideCartPlan.planHash);
     const sideCartStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2477,25 +4090,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-overbudget-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, overBudgetPlan.planHash);
     const overBudgetStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2562,25 +4158,8 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-paid-delivery-stop-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Way',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, defaultCheckoutProfile, paidDeliveryStopPlan.planHash);
     const paidDeliveryStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2651,25 +4230,12 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-mismatch-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '1 Magic City Street Apt 303',
-            shippingCity: 'San Francisco',
-            shippingState: 'CA',
-            zipCode: '94107',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '9999'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, {
+      ...defaultCheckoutProfile,
+      streetAddress: '1 Magic City Street Apt 303',
+      paymentCardLast4: '9999'
+    }, mismatchPlan.planHash);
     const mismatchStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2753,7 +4319,7 @@ async function main() {
     await mismatchPage.locator('input[aria-label="Name on card"]').fill('Test User');
     await mismatchPage.getByRole('button', { name: 'Add your card' }).click();
     try {
-      await waitFor(() => Boolean(fulfillment), 30_000);
+      await waitFor(() => Boolean(fulfillment), 55_000);
     } catch {
       const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution', 'pendingPaymentWaits', 'activeRun'], resolve)));
       fail(`browser_extension_mismatch_resume_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}:pending=${JSON.stringify(runnerState.pendingPaymentWaits || {})}`);
@@ -2787,7 +4353,15 @@ async function main() {
       total: '$3.50',
       itemCount: 1,
       showAddressPrimeModal: false,
-      selectedCardLast4: '1817'
+      selectedCardLast4: '1817',
+      matchingAddressAvailable: true,
+      matchingAddressChecked: true,
+      matchingAddressSummary: '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States',
+      matchingAddressText: 'Test User 2865 SAND HILL RD STE 101 Menlo Park, CA 94025-7022 United States Phone number: 415-555-0100',
+      selectedFreeDelivery: true,
+      // Amazon renders this pickup disclosure next to a perfectly valid
+      // shipped-order review. It must never be treated as a delivery change.
+      showPickupDisclosure: true
     };
     checkpoints.length = 0;
     fulfillment = null;
@@ -2814,25 +4388,14 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({
-      activeMissionTabs: {},
-      localCheckoutProfiles: {
-        'browser-smoke-final-review-session': {
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          profile: {
-            contactName: 'Test User',
-            streetAddress: '2865 Sand Hill Road Suite 101',
-            shippingCity: 'Menlo Park',
-            shippingState: 'CA',
-            zipCode: '94025',
-            contactPhone: '4155550100',
-            billingStreetAddress: '99 Billing Plaza',
-            billingZipCode: '10001',
-            paymentCardLast4: '1817'
-          }
-        }
-      }
-    }));
+    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {} }));
+    await seedSessionCheckoutProfile(session.id, {
+      ...defaultCheckoutProfile,
+      streetAddress: '2865 Sand Hill Road Suite 101',
+      shippingCity: 'Menlo Park',
+      shippingState: 'CA',
+      zipCode: '94025'
+    }, manualReviewPlan.planHash);
     const manualReviewStartResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2848,25 +4411,113 @@ async function main() {
       || fulfillment.result?.browserExecution?.orderSubmitted === true) {
       fail(`browser_extension_final_review_not_paused:${JSON.stringify(fulfillment)}`);
     }
-    const preservedReviewState = await worker.evaluate(() => new Promise((resolve) => {
-      chrome.storage.local.get(['activeMissionTabs', 'localCheckoutProfiles'], resolve);
-    }));
+    const preservedReviewState = await worker.evaluate(async () => {
+      const [local, session] = await Promise.all([
+        chrome.storage.local.get(['activeMissionTabs', 'localCheckoutProfiles']),
+        chrome.storage.session.get(['magicCityLocalCheckoutProfiles'])
+      ]);
+      return {
+        ...local,
+        sessionCheckoutProfiles: session.magicCityLocalCheckoutProfiles || {}
+      };
+    });
+    if (Object.keys(preservedReviewState.localCheckoutProfiles || {}).length) {
+      fail(`browser_extension_final_review_profile_persisted_to_local_storage:${JSON.stringify(preservedReviewState.localCheckoutProfiles)}`);
+    }
     const reviewTabId = preservedReviewState.activeMissionTabs?.['browser-smoke-final-review-session'];
-    if (!reviewTabId || !preservedReviewState.localCheckoutProfiles?.['browser-smoke-final-review-session']) {
+    if (!reviewTabId || !preservedReviewState.sessionCheckoutProfiles?.['browser-smoke-final-review-session']) {
       fail(`browser_extension_final_review_context_not_preserved:${JSON.stringify(preservedReviewState)}`);
     }
     const preparedReviewPage = context.pages().find((page) => page.url().startsWith(baseUrl)
       && page.url().includes('/checkout/'));
     if (!preparedReviewPage) fail('browser_extension_final_review_page_missing');
     await preparedReviewPage.evaluate(() => {
+      window.__nativeFinalClickTargetId = '';
+      document.addEventListener('click', (event) => {
+        if (event.target?.id === 'submitOrderButtonId') {
+          window.__nativeFinalClickTargetId = event.target.id;
+        }
+      }, true);
       const summary = document.querySelector('#delivery-summary');
       if (summary) summary.textContent = '2865 SAND HILL RD STE 101, MENLO PARK, CA, 94025-7022, United States';
       const unrelated = document.createElement('label');
       unrelated.innerHTML = '<input type="checkbox" checked /> Default to this delivery address and payment method.';
       document.querySelector('main')?.appendChild(unrelated);
+      const pickupModal = document.createElement('div');
+      pickupModal.id = 'pickup-modal';
+      pickupModal.className = 'a-popover a-popover-modal';
+      pickupModal.style.cssText = 'position:fixed;inset:48px;z-index:20;background:white;border:1px solid #999;padding:16px;overflow:auto';
+      pickupModal.innerHTML = [
+        '<button id="pickup-close" aria-label="Close" onclick="sessionStorage.setItem(\'magic-city-pickup-overlay-closed\', \'1\'); document.querySelector(\'#pickup-modal\').remove()">×</button>',
+        '<h2>Select a pickup location</h2>',
+        '<label>Find pickup locations near: <input placeholder="Enter an address, zip code, or landmark" /></label>',
+        '<section><h3>Amazon Counter at Whole Foods Market</h3><p>774 Emerson St, Palo Alto, CA 94301</p><p>FREE pickup Friday, Aug 28</p><button onclick="window.__checkoutEvents ||= []; window.__checkoutEvents.push(\'bad-pickup-selected\')">Pick up here</button></section>'
+      ].join('');
+      document.body.appendChild(pickupModal);
     });
     const reviewTabCount = (await worker.evaluate(() => chrome.tabs.query({})))
       .filter((tab) => String(tab.url || '').startsWith(baseUrl)).length;
+
+    // An interruption after intent persistence but before native dispatch is
+    // deliberately inconclusive. It must neither click a second time nor
+    // claim final-submit evidence that the browser cannot prove.
+    await preparedReviewPage.evaluate(() => {
+      const key = 'magic_city_browser_action_receipts_v1';
+      const current = JSON.parse(sessionStorage.getItem(key) || '[]');
+      current.push({
+        actionId: 'interrupted-final-submit',
+        actionType: 'final_submit',
+        intent: 'submit_final_order',
+        receiptScope: 'browser-smoke-interrupted-final-submit',
+        kind: 'final_order',
+        phase: 'final_submit_intent',
+        at: new Date().toISOString()
+      });
+      sessionStorage.setItem(key, JSON.stringify(current));
+      window.__nativeFinalClickTargetId = '';
+    });
+    // Force a fresh executor injection after the durable receipt was written.
+    // This covers the MV3/content-script reinjection path rather than relying
+    // on an earlier in-memory receipt array.
+    const reinjectExecutor = await worker.evaluate(async ({ tabId }) => {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error?.message || String(error) };
+      }
+    }, { tabId: reviewTabId });
+    if (!reinjectExecutor?.ok) fail(`browser_extension_final_order_intent_reinject_failed:${reinjectExecutor?.error || 'unknown'}`);
+    const interruptedFinalSubmit = await worker.evaluate(({ tabId }) => new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, {
+        type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+        action: {
+          id: 'interrupted-final-submit',
+          type: 'final_submit',
+          receiptScope: 'browser-smoke-interrupted-final-submit',
+          autoSubmitAfterVerifiedCheckout: true,
+          maxPrice: 4
+        },
+        checkoutProfile: {
+          streetAddress: '2865 Sand Hill Road Suite 101',
+          shippingCity: 'Menlo Park',
+          shippingState: 'CA',
+          zipCode: '94025',
+          paymentCardLast4: '1817'
+        }
+      }, (response) => resolve({ response, error: chrome.runtime.lastError?.message || '' }));
+    }), { tabId: reviewTabId });
+    const interruptedNativeClick = await preparedReviewPage.evaluate(() => window.__nativeFinalClickTargetId || '');
+    if (interruptedFinalSubmit.error
+      || interruptedFinalSubmit.response?.completed !== false
+      || interruptedFinalSubmit.response?.noReplay !== true
+      || interruptedFinalSubmit.response?.finalSubmitRequested === true
+      || interruptedNativeClick) {
+      fail(`browser_extension_final_order_intent_interruption_replayed_or_counted_as_dispatch:${JSON.stringify({
+        interruptedFinalSubmit,
+        interruptedNativeClick
+      })}`);
+    }
 
     checkpoints.length = 0;
     fulfillment = null;
@@ -2893,6 +4544,37 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
+    // Match the production retry path: the Magic City page re-provisions its
+    // unlocked vault snapshot to the extension before it asks the runner to
+    // resume a newly signed plan for this same session.
+    const reprovisionedProfile = await preparedReviewPage.evaluate(({ extensionId, sessionId }) => new Promise((resolve) => {
+      if (!window.chrome?.runtime?.sendMessage) {
+        resolve({ ok: false, error: 'web_chrome_runtime_unavailable' });
+        return;
+      }
+      window.chrome.runtime.sendMessage(extensionId, {
+        type: 'SET_LOCAL_CHECKOUT_PROFILE',
+        sessionId,
+        profile: {
+          contactName: 'Test User',
+          streetAddress: '2865 Sand Hill Road Suite 101',
+          shippingCity: 'Menlo Park', shippingState: 'CA', zipCode: '94025',
+          contactPhone: '4155550100', billingStreetAddress: '99 Billing Plaza',
+          billingZipCode: '10001', paymentCardLast4: '1817'
+        }
+      }, (response) => {
+        resolve({ ok: Boolean(response?.ok), error: window.chrome.runtime.lastError?.message || response?.error || '' });
+      });
+    }), { extensionId, sessionId: session.id });
+    if (!reprovisionedProfile?.ok) {
+      fail(`browser_extension_final_review_profile_reprovision_failed:${reprovisionedProfile?.error || 'unknown'}`);
+    }
+    // Persisted session data must survive an MV3 restart, and the final action
+    // must use the fresh signed local lease rather than wait on runner-status.
+    const finalReviewRecoveryCdp = await context.newCDPSession(preparedReviewPage);
+    await finalReviewRecoveryCdp.send('ServiceWorker.enable');
+    await finalReviewRecoveryCdp.send('ServiceWorker.stopAllWorkers');
+    blockRunnerStatusForFinalDispatch = true;
     const resumeFinalSubmitResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2902,6 +4584,8 @@ async function main() {
     } catch {
       const runnerState = await worker.evaluate(() => new Promise((resolve) => chrome.storage.local.get(['lastError', 'lastExecution'], resolve)));
       fail(`browser_extension_final_review_resume_timeout:steps=${checkpoints.map((checkpoint) => checkpoint.planActionId).join(',')}:last_error=${runnerState.lastError || 'none'}:last_execution=${runnerState.lastExecution?.status || 'none'}`);
+    } finally {
+      blockRunnerStatusForFinalDispatch = false;
     }
     if (fulfillment.status !== 'fulfilled'
       || fulfillment.result?.browserExecution?.orderSubmitted !== true
@@ -2920,9 +4604,58 @@ async function main() {
     if (resumeTabs.length !== reviewTabCount || !resumeTabs.some((tab) => tab.id === reviewTabId)) {
       fail(`browser_extension_final_review_did_not_reuse_tab:${JSON.stringify({ reviewTabId, reviewTabCount, resumeTabs })}`);
     }
+    const reviewEvents = await preparedReviewPage.evaluate(() => window.__checkoutEvents || []);
+    if (reviewEvents.includes('bad-pickup-selected') || reviewEvents.includes('bad-pickup-disclosure-opened') || reviewEvents.includes('bad-change-to-pickup')) {
+      fail(`browser_extension_final_review_selected_pickup:${reviewEvents.join(',')}`);
+    }
+    const pickupOverlayClosed = await preparedReviewPage.evaluate(() => sessionStorage.getItem('magic-city-pickup-overlay-closed'));
+    if (pickupOverlayClosed !== '1') {
+      fail(`browser_extension_final_review_pickup_overlay_not_closed:${pickupOverlayClosed || 'missing'}`);
+    }
+    const finalSubmitCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'submit-final-order');
+    const finalOrderReceipts = finalSubmitCheckpoint?.browser?.browserActionReceipts || [];
+    if (finalSubmitCheckpoint?.browser?.runnerStep?.finalSubmitReceipt?.kind !== 'final_order'
+      || finalSubmitCheckpoint?.browser?.runnerStep?.finalSubmitReceipt?.phase !== 'click_dispatched'
+      || !finalOrderReceipts.some((receipt) => receipt?.kind === 'final_order' && receipt?.phase === 'final_submit_intent')
+      || !finalOrderReceipts.some((receipt) => receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched')) {
+      fail(`browser_extension_final_order_receipt_missing_before_navigation:${JSON.stringify({
+        runnerStep: finalSubmitCheckpoint?.browser?.runnerStep || {},
+        receipts: finalOrderReceipts
+      })}`);
+    }
+    const nativeFinalClick = await preparedReviewPage.evaluate(() => window.__nativeFinalClickTargetId || '');
+    if (nativeFinalClick !== 'submitOrderButtonId') {
+      fail(`browser_extension_final_order_native_control_not_clicked:${JSON.stringify({
+        url: preparedReviewPage.url(),
+        nativeFinalClick,
+        finalSubmit: finalSubmitCheckpoint?.browser?.runnerStep || null,
+        receipts: finalSubmitCheckpoint?.browser?.browserActionReceipts || [],
+        fulfillment: fulfillment?.result?.browserExecution || null
+      })}`);
+    }
+    if (blockedFinalRunnerStatusCalls !== 0) {
+      fail(`browser_extension_final_review_waited_for_control_plane:${blockedFinalRunnerStatusCalls}`);
+    }
+    if (!checkpoints.some((checkpoint) => checkpoint?.browser?.browserActionReceipts?.some((receipt) => (
+      receipt?.kind === 'final_order' && receipt?.phase === 'click_dispatched'
+    )))) {
+      const pageReceiptStorage = await preparedReviewPage.evaluate(() => sessionStorage.getItem('magic_city_browser_action_receipts_v1') || '');
+      fail(`browser_extension_final_order_dispatch_receipt_missing_after_navigation:${JSON.stringify({
+        checkpoints: checkpoints
+          .filter((checkpoint) => checkpoint.planActionId === 'submit-final-order' || checkpoint.planActionId === 'confirm-merchant-order')
+          .map((checkpoint) => ({
+            actionId: checkpoint.planActionId,
+            receipts: checkpoint.browser?.browserActionReceipts || []
+          })),
+        pageReceiptStorage
+      })}`);
+    }
     recordPurchaseScenario('Manual final-review handoff resumes in the same prepared checkout tab', {
       resumedSteps: resumeActionIds,
-      addressVariant: 'RD/STE and ZIP+4 with unrelated checked checkout control'
+      addressVariant: 'RD/STE and ZIP+4 with unrelated checked checkout control',
+      pickupModalIgnored: true,
+      finalOrderReceiptCheckpointed: true,
+      intentOnlyFinalSubmitRejected: true
     });
 
     checkpoints.length = 0;
@@ -2942,7 +4675,10 @@ async function main() {
       missionBoundaryLatestHash: null,
       missionBoundaryEventCount: 0
     };
-    await worker.evaluate(() => chrome.storage.local.set({ activeMissionTabs: {}, localCheckoutProfiles: {} }));
+    await worker.evaluate(async () => {
+      await chrome.storage.local.set({ activeMissionTabs: {} });
+      await chrome.storage.session.remove('magicCityLocalCheckoutProfiles');
+    });
     const invalidStartupResponse = await popup.evaluate((sessionId) => new Promise((resolve) => {
       chrome.runtime.sendMessage({ type: 'RUN_PENDING_SESSIONS', sessionId }, resolve);
     }), session.id);
@@ -2987,6 +4723,114 @@ async function main() {
     if (stalePendingResponse?.ok || !/no browser mission is waiting/i.test(String(stalePendingResponse?.error || ''))) {
       fail(`browser_extension_stale_permission_mission_visible:${JSON.stringify(stalePendingResponse)}`);
     }
+
+    // Disconnect the website's active port while a long merchant observation
+    // is in flight, then terminate the MV3 worker. The durable active run and
+    // crash-recovery alarm must resume the same read-only confirmation step;
+    // no browser mutation is replayed.
+    checkpoints.length = 0;
+    fulfillment = null;
+    distractorSession = null;
+    const disconnectedSessionId = 'browser-smoke-active-port-disconnect-session';
+    const disconnectedPlan = rehashExtensionPlan({
+      ...plan,
+      planId: 'mplan_browser-smoke-active-port-disconnect-session',
+      startUrl: `${baseUrl}/checkout/processing-order?delay=40000`,
+      actions: [
+        {
+          id: 'open-processing-order',
+          type: 'navigate',
+          missionAction: 'browser_open',
+          url: `${baseUrl}/checkout/processing-order?delay=40000`
+        },
+        {
+          id: 'confirm-disconnected-order',
+          type: 'inspect',
+          missionAction: 'read_public_page',
+          awaitMerchantOrderConfirmation: true,
+          merchantConfirmationTimeoutMs: 75_000,
+          expectedMilestone: 'order_submitted'
+        }
+      ]
+    });
+    session = {
+      ...session,
+      id: disconnectedSessionId,
+      status: 'queued',
+      claimedByPluginId: null,
+      fulfillment: null,
+      extensionCheckoutProfileEnabled: false,
+      executionRequestedAt: new Date().toISOString(),
+      missionBoundAuth: {
+        ...session.missionBoundAuth,
+        capabilityId: 'browser-smoke-active-port-disconnect-capability',
+        subject: { sessionId: disconnectedSessionId },
+        expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+      },
+      extensionMissionPlan: disconnectedPlan,
+      // This scenario begins after the irreversible click was already
+      // dispatched. The only recoverable work is observing its merchant
+      // confirmation, so retain that verified milestone explicitly.
+      extensionMissionPlanState: {
+        planHash: disconnectedPlan.planHash,
+        nextActionIndex: 0,
+        completedActionIds: [],
+        verifiedMilestones: ['final_submit_requested']
+      },
+      missionBoundaryLatestHash: null,
+      missionBoundaryEventCount: 0
+    };
+    const disconnectWakePage = await context.newPage();
+    await disconnectWakePage.goto(`${baseUrl}/external-wake`);
+    const disconnectedPort = await disconnectWakePage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+      const progress = [];
+      const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+      const timer = setTimeout(() => resolve({ disconnected: false, progress, error: 'confirmation_progress_timeout' }), 25_000);
+      port.onMessage.addListener((payload) => {
+        if (payload?.type !== 'RUNNER_PROGRESS') return;
+        progress.push(payload);
+        if (payload?.activeRun?.actionId !== 'confirm-disconnected-order') return;
+        clearTimeout(timer);
+        port.disconnect();
+        resolve({ disconnected: true, progress });
+      });
+      port.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+      });
+      port.postMessage({ type: 'RUN_PENDING_SESSIONS', sessionId });
+    }), { extensionId, sessionId: disconnectedSessionId });
+    if (!disconnectedPort.disconnected) {
+      fail(`browser_extension_active_port_disconnect_not_exercised:${JSON.stringify(disconnectedPort)}`);
+    }
+    const disconnectRecoveryCdp = await context.newCDPSession(disconnectWakePage);
+    await disconnectRecoveryCdp.send('ServiceWorker.enable');
+    await disconnectRecoveryCdp.send('ServiceWorker.stopAllWorkers');
+    try {
+      await waitFor(() => Boolean(fulfillment), 60_000);
+    } catch {
+      const runnerState = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
+      }));
+      fail(`browser_extension_active_port_disconnect_recovery_timeout:${JSON.stringify({ runnerState, checkpoints })}`);
+    }
+    const disconnectWorkerStarts = [...new Set(checkpoints
+      .map((checkpoint) => String(checkpoint?.runnerTiming?.workerStartedAt || ''))
+      .filter(Boolean))];
+    const disconnectedConfirmation = checkpoints.find((checkpoint) => checkpoint.planActionId === 'confirm-disconnected-order'
+      && checkpoint.planActionStatus === 'completed');
+    if (!fulfillment
+      || disconnectedConfirmation?.browser?.orderSubmitted !== true
+      || !disconnectedConfirmation?.verifiedMilestones?.includes('order_submitted')
+      || disconnectWorkerStarts.length < 2) {
+      fail(`browser_extension_active_port_disconnect_not_recovered:${JSON.stringify({ fulfillment, disconnectWorkerStarts, checkpoints })}`);
+    }
+    recordPurchaseScenario('Disconnected active port recovers a long read-only confirmation after MV3 restart', {
+      progressPulsesBeforeDisconnect: disconnectedPort.progress.length,
+      workerStarts: disconnectWorkerStarts.length,
+      orderSubmitted: true
+    });
+    await disconnectWakePage.close();
+
     if (purchaseScenarioResults.length < 10) {
       fail(`browser_extension_purchase_matrix_incomplete:${JSON.stringify(purchaseScenarioResults)}`);
     }

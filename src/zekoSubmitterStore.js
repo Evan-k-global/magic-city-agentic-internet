@@ -5,9 +5,12 @@ import pg from 'pg';
 import { buildPostgresPoolOptions } from './postgresConfig.js';
 
 const { Pool } = pg;
-const DATA_PATH = path.resolve(process.cwd(), 'data', 'zeko-submitter-state.json');
+const DATA_PATH = process.env.MAGIC_CITY_ZEKO_SUBMITTER_STATE_PATH
+  ? path.resolve(process.env.MAGIC_CITY_ZEKO_SUBMITTER_STATE_PATH)
+  : path.resolve(process.cwd(), 'data', 'zeko-submitter-state.json');
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const REQUIRE_PRODUCTION_PERSISTENCE = String(process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE || '').toLowerCase() === 'true';
+const SCHEMA_MANAGED_EXTERNALLY = String(process.env.MAGIC_CITY_RELAYER_SCHEMA_MANAGED || '').toLowerCase() === 'true';
 const pool = DATABASE_URL
   ? new Pool(buildPostgresPoolOptions({ connectionString: DATABASE_URL, requirePersistence: REQUIRE_PRODUCTION_PERSISTENCE }))
   : null;
@@ -58,20 +61,32 @@ function normalizeSubmission(row = {}) {
 
 async function initializeStore() {
   if (!pool) {
+    if (REQUIRE_PRODUCTION_PERSISTENCE) throw new Error('zeko_relayer_database_required');
     persistence.ready = true;
     persistence.healthy = true;
     return;
   }
   try {
-    await pool.query(`
-      create table if not exists zeko_relayer_submissions (
-        id text primary key,
-        submission_json jsonb not null,
-        created_at timestamptz not null,
-        updated_at timestamptz not null
-      )
-    `);
-    await pool.query('create index if not exists zeko_relayer_submissions_created_at_idx on zeko_relayer_submissions (created_at desc)');
+    if (SCHEMA_MANAGED_EXTERNALLY) {
+      await pool.query('select id from zeko_relayer_submissions limit 1');
+    } else {
+      await pool.query(`
+        create table if not exists zeko_relayer_submissions (
+          id text primary key,
+          anchor_key text,
+          payload_hash text,
+          submission_json jsonb not null,
+          created_at timestamptz not null,
+          updated_at timestamptz not null
+        )
+      `);
+      await pool.query('alter table zeko_relayer_submissions add column if not exists anchor_key text');
+      await pool.query('alter table zeko_relayer_submissions add column if not exists payload_hash text');
+      await pool.query("update zeko_relayer_submissions set anchor_key = submission_json ->> 'anchorKey', payload_hash = submission_json ->> 'payloadHash' where anchor_key is null or payload_hash is null");
+      await pool.query('create unique index if not exists zeko_relayer_submissions_anchor_key_uidx on zeko_relayer_submissions (anchor_key) where anchor_key is not null');
+      await pool.query('create unique index if not exists zeko_relayer_submissions_payload_hash_uidx on zeko_relayer_submissions (payload_hash) where payload_hash is not null');
+      await pool.query('create index if not exists zeko_relayer_submissions_created_at_idx on zeko_relayer_submissions (created_at desc)');
+    }
     const count = await pool.query('select count(*)::int as count from zeko_relayer_submissions');
     if (count.rows[0]?.count === 0) {
       state = loadFileState();
@@ -82,10 +97,10 @@ async function initializeStore() {
         await client.query('begin');
         for (const row of state.submissions.map(normalizeSubmission)) {
           await client.query(
-            `insert into zeko_relayer_submissions (id, submission_json, created_at, updated_at)
-             values ($1, $2::jsonb, $3, $4)
+            `insert into zeko_relayer_submissions (id, anchor_key, payload_hash, submission_json, created_at, updated_at)
+             values ($1, $2, $3, $4::jsonb, $5, $6)
              on conflict (id) do nothing`,
-            [row.id, JSON.stringify(row), row.createdAt, row.updatedAt]
+            [row.id, row.anchorKey || null, row.payloadHash || null, JSON.stringify(row), row.createdAt, row.updatedAt]
           );
         }
         await client.query('commit');
@@ -111,11 +126,12 @@ await initializeStore();
 
 async function writePostgresSubmission(row) {
   await pool.query(
-    `insert into zeko_relayer_submissions (id, submission_json, created_at, updated_at)
-     values ($1, $2::jsonb, $3, $4)
+    `insert into zeko_relayer_submissions (id, anchor_key, payload_hash, submission_json, created_at, updated_at)
+     values ($1, $2, $3, $4::jsonb, $5, $6)
      on conflict (id) do update
-       set submission_json = excluded.submission_json, updated_at = excluded.updated_at`,
-    [row.id, JSON.stringify(row), row.createdAt, row.updatedAt]
+       set anchor_key = excluded.anchor_key, payload_hash = excluded.payload_hash,
+           submission_json = excluded.submission_json, updated_at = excluded.updated_at`,
+    [row.id, row.anchorKey || null, row.payloadHash || null, JSON.stringify(row), row.createdAt, row.updatedAt]
   );
   persistence.healthy = true;
   persistence.lastWriteAt = new Date().toISOString();
@@ -137,6 +153,49 @@ export async function createSubmission(row) {
   try {
     await writePostgresSubmission(submission);
     return submission;
+  } catch (error) {
+    recordWriteFailure(error);
+    throw error;
+  }
+}
+
+export async function createOrGetSubmission(row) {
+  const submission = normalizeSubmission(row);
+  const anchorKey = String(submission.anchorKey || '').trim();
+  const payloadHash = String(submission.payloadHash || '').trim();
+  if (!anchorKey || !payloadHash) throw new Error('submission_idempotency_key_required');
+  if (persistence.driver !== 'postgres') {
+    const existing = state.submissions.find((candidate) => candidate.anchorKey === anchorKey || candidate.payloadHash === payloadHash);
+    if (existing) return { submission: existing, created: false };
+    state.submissions.push(submission);
+    persistFileState();
+    return { submission, created: true };
+  }
+  try {
+    const inserted = await pool.query(
+      `insert into zeko_relayer_submissions (id, anchor_key, payload_hash, submission_json, created_at, updated_at)
+       values ($1, $2, $3, $4::jsonb, $5, $6)
+       on conflict do nothing
+       returning submission_json`,
+      [submission.id, anchorKey, payloadHash, JSON.stringify(submission), submission.createdAt, submission.updatedAt]
+    );
+    if (inserted.rows[0]?.submission_json) {
+      persistence.healthy = true;
+      persistence.lastWriteAt = submission.updatedAt;
+      persistence.lastWriteError = null;
+      return { submission: inserted.rows[0].submission_json, created: true };
+    }
+    const existing = await pool.query(
+      `select submission_json from zeko_relayer_submissions
+        where anchor_key = $1 or payload_hash = $2
+        order by created_at asc
+        limit 1`,
+      [anchorKey, payloadHash]
+    );
+    if (!existing.rows[0]?.submission_json) throw new Error('submission_idempotency_conflict_missing_row');
+    persistence.healthy = true;
+    persistence.lastWriteError = null;
+    return { submission: existing.rows[0].submission_json, created: false };
   } catch (error) {
     recordWriteFailure(error);
     throw error;
@@ -196,5 +255,5 @@ export async function listSubmissions(limit = 50) {
 }
 
 export function getZekoRelayerPersistenceStatus() {
-  return { ...persistence, databaseConfigured: Boolean(DATABASE_URL) };
+  return { ...persistence, databaseConfigured: Boolean(DATABASE_URL), schemaManagedExternally: SCHEMA_MANAGED_EXTERNALLY };
 }

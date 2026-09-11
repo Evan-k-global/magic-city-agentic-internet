@@ -2,8 +2,8 @@
 
 This walkthrough proves the smallest useful custom helper path:
 
-pairing code -> scoped device token -> helper registration -> mission poll ->
-claim -> holder-signed checkpoint -> fulfillment.
+pairing code -> scoped device token -> helper registration -> explicit dispatch
+-> mission poll -> nonce-bound claim -> holder-signed checkpoint -> fulfillment.
 
 ## 1. Pick Helper IDs
 
@@ -26,7 +26,7 @@ npm run package:custom-helper-extension
 Output:
 
 ```text
-dist/custom-helper-extension-starter/custom-magic-city-helper-starter-0.2.0.zip
+dist/custom-helper-extension-starter/custom-magic-city-helper-starter-0.2.1.zip
 ```
 
 ## 3. Run The Release Smoke
@@ -45,11 +45,12 @@ The smoke does the full local loop with the packaged artifact:
 6. Registers the custom helper.
 7. Polls once so Magic City sees the helper is awake.
 8. Starts a Magic Internet Agent mission assigned to the helper.
-9. Polls again.
-10. Claims the mission with a holder key.
-11. Emits a holder-signed checkpoint.
-12. Fulfills with the starter's `starter_not_implemented` result.
-13. Verifies Magic City recorded mission-bound events without leaking the runner
+9. Explicitly starts execution and dispatches it to the paired helper device.
+10. Polls again and receives the short-lived dispatch nonce.
+11. Claims the mission with that nonce and a holder key.
+12. Emits a holder-signed checkpoint.
+13. Fulfills with the starter's `starter_not_implemented` result.
+14. Verifies Magic City recorded mission-bound events without leaking the runner
     token or pairing code.
 
 ## 4. Manual Pairing Flow

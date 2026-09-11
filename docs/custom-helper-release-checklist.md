@@ -47,7 +47,9 @@ emits a holder-signed checkpoint, and fulfills the session with a proof trail.
 - Poll sessions with the device token and extension headers:
   - `x-magic-city-runner-surface: chrome-extension`
   - `x-magic-city-runner-protocol: declarative-v1`
-- Claim with a runtime holder public key.
+- Accept only sessions explicitly started and dispatched to this paired device.
+- Claim with the session's current `extensionRunDispatch.nonce` and a runtime
+  holder public key. Do not cache or reuse dispatch nonces.
 - Every checkpoint includes `planHash`, `planActionId`, and holder
   proof-of-possession.
 - Fulfillment releases held credits on failure and holds/captures only when the
@@ -91,6 +93,7 @@ Include these points in review notes:
 - The extension uses optional site access so the user grants host permission per
   mission domain.
 - The extension does not import or execute remote code.
+- Polling discovers explicitly dispatched work; it does not authorize a run.
 - Checkout, login, payment authentication, and final submit remain user-visible
   stops.
 - Magic City receives only mission-scoped checkpoints and cryptographic proof

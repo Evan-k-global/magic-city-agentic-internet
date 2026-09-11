@@ -3630,13 +3630,15 @@
           <div class="execution-panel ${expanded ? 'expanded' : 'collapsed'}" data-session-panel="${session.id}">
             <div class="execution-panel-head">
               <div class="execution-panel-head-main">
-                <div class="execution-panel-title">${escapeExecutionValue(title)}</div>
-                <div class="execution-panel-meta">${escapeExecutionValue(statusLine)}${latestSummary ? ` · ${escapeExecutionValue(latestSummary)}` : ''}</div>
+                <button class="execution-panel-open-target" type="button" data-execution-open="${session.id}" aria-label="Open execution panel">
+                  <span class="execution-panel-title">${escapeExecutionValue(title)}</span>
+                  <span class="execution-panel-meta">${escapeExecutionValue(statusLine)}${latestSummary ? ` · ${escapeExecutionValue(latestSummary)}` : ''}</span>
+                </button>
                 ${['queued', 'claimed', 'executing'].includes(statusValue) ? '<div class="execution-activity-bar"></div>' : ''}
               </div>
               <div class="execution-panel-controls">
                 <span class="execution-status-badge ${statusBadge.cls}">${escapeExecutionValue(statusBadge.label)}</span>
-                <button class="execution-collapse" type="button" data-execution-toggle="${session.id}" aria-label="${expanded ? 'Collapse execution panel' : 'Expand execution panel'}">${expanded ? '&raquo;' : '&laquo;'}</button>
+                <button class="execution-collapse ${expanded ? '' : 'open-label'}" type="button" data-execution-toggle="${session.id}" aria-label="${expanded ? 'Collapse execution panel' : 'Open execution panel'}">${expanded ? '&raquo;' : 'Open'}</button>
                 <button class="execution-close" type="button" data-execution-close="${session.id}">Close</button>
               </div>
             </div>
@@ -3691,6 +3693,15 @@
 
       dock.querySelectorAll('[data-execution-toggle]').forEach((button) => {
         button.addEventListener('click', () => toggleExecutionPanel(button.dataset.executionToggle));
+      });
+      dock.querySelectorAll('[data-execution-open]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const sessionId = button.dataset.executionOpen;
+          if (!sessionId) return;
+          activeExecutionSessionId = sessionId;
+          executionCollapsedSessions.delete(sessionId);
+          renderExecutionDock();
+        });
       });
       dock.querySelectorAll('[data-execution-close]').forEach((button) => {
         button.addEventListener('click', () => removeExecutionPanel(button.dataset.executionClose));

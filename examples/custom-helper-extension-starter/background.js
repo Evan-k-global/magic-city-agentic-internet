@@ -179,11 +179,14 @@ async function register() {
 
 async function claim(session) {
   const config = await ensureHolderKey();
+  const extensionDispatchNonce = String(session.extensionRunDispatch?.nonce || '').trim();
+  if (!extensionDispatchNonce) throw new Error('extension_run_dispatch_required');
   const data = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/claim`, {
     method: 'POST',
     bearer: config.deviceToken,
     body: {
       pluginId: HELPER_PLUGIN_ID,
+      extensionDispatchNonce,
       holderPublicKeyJwk: config.holderPublicJwk
     }
   });

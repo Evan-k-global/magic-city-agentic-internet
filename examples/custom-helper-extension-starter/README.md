@@ -8,7 +8,8 @@ helper must keep:
 - Store only the device-scoped runner token locally.
 - Register a custom `pluginId`.
 - Generate a runtime holder key.
-- Poll, claim, checkpoint, and fulfill Magic Internet Agent sessions.
+- Poll explicitly dispatched sessions, claim with the session-scoped dispatch
+  nonce, checkpoint, and fulfill Magic Internet Agent sessions.
 - Send redacted summaries and holder-signed boundary events.
 
 ## Setup
@@ -29,6 +30,12 @@ helper must keep:
 3. Load this folder as an unpacked Chrome extension during development.
 
 4. Register and poll from the popup.
+
+Polling is a recovery/discovery mechanism, not purchase authorization. A user
+must start the mission in Magic City first. The returned session contains a
+short-lived `extensionRunDispatch.nonce`; the starter presents that same nonce
+when claiming the mission. Do not remove or persist the nonce outside the
+session payload.
 
 ## Package And Smoke
 
