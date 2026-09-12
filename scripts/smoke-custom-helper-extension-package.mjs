@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,11 +7,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { chromium } from 'playwright';
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const starterManifestPath = path.join(rootDir, 'examples/custom-helper-extension-starter/manifest.json');
-const starterManifest = JSON.parse(fs.readFileSync(starterManifestPath, 'utf8'));
-const zipPath = path.join(rootDir, 'dist/custom-helper-extension-starter', `custom-magic-city-helper-starter-${starterManifest.version}.zip`);
-const HELPER_PLUGIN_ID = 'acme-shopping-helper';
-const HELPER_OWNER_AGENT_ID = 'acme-shopping-agent';
+const HELPER_PLUGIN_ID = 'acme-reading-helper';
+const HELPER_OWNER_AGENT_ID = 'acme-reading-agent';
 const apiKey = 'custom-helper-extension-smoke-key';
 
 function fail(message) {
@@ -67,17 +65,55 @@ async function waitForServer(baseUrl) {
   throw new Error('server_start_timeout');
 }
 
-function packageStarter() {
-  const packageResult = spawnSync(process.execPath, ['scripts/package-custom-helper-extension.mjs'], {
+function packageStarter(tmpDir, baseUrl, fixtureOrigin) {
+  const configPath = path.join(tmpDir, 'partner.config.json');
+  const outDir = path.join(tmpDir, 'partner-build');
+  fs.writeFileSync(configPath, JSON.stringify({
+    controlPlaneOrigin: baseUrl,
+    launchOrigins: [fixtureOrigin],
+    helperPluginId: HELPER_PLUGIN_ID,
+    helperOwnerAgentId: HELPER_OWNER_AGENT_ID,
+    extensionName: 'Acme Read-Only Helper',
+    extensionDescription: 'Read-only helper package smoke fixture.',
+    optionalMerchantOrigins: [`${fixtureOrigin}/*`]
+  }));
+  const packageResult = spawnSync(process.execPath, [
+    'scripts/package-custom-helper-extension.mjs',
+    '--config', configPath,
+    '--profile', 'development',
+    '--out-dir', outDir
+  ], {
     cwd: rootDir,
     stdio: 'inherit'
   });
   if (packageResult.error) fail(packageResult.error.message);
   if (packageResult.status !== 0) fail(`package script exited with ${packageResult.status}`);
+  const version = JSON.parse(fs.readFileSync(path.join(outDir, 'package/manifest.json'), 'utf8')).version;
+  const zipPath = path.join(outDir, `${HELPER_PLUGIN_ID}-${version}-development.zip`);
   if (!fs.existsSync(zipPath)) fail(`missing release zip ${zipPath}`);
+  return zipPath;
 }
 
-function unpackForLocalSmoke(tmpDir, baseUrl) {
+async function startHttpsFixture(tmpDir) {
+  const keyPath = path.join(tmpDir, 'fixture-key.pem');
+  const certPath = path.join(tmpDir, 'fixture-cert.pem');
+  const generated = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=localhost'
+  ], { encoding: 'utf8' });
+  if (generated.error || generated.status !== 0) fail(`fixture_certificate_failed:${generated.stderr || generated.error?.message}`);
+  const server = https.createServer({ key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) }, (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><html><head><title>Partner Fixture</title><meta name="description" content="Harmless partner helper fixture"></head><body><h1>Authorized partner page</h1></body></html>');
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return { server, origin: `https://localhost:${server.address().port}` };
+}
+
+function unpackForLocalSmoke(tmpDir, zipPath) {
   const unpackedDir = path.join(tmpDir, 'unpacked-extension');
   fs.mkdirSync(unpackedDir, { recursive: true });
   const unzip = spawnSync('unzip', ['-q', zipPath, '-d', unpackedDir], {
@@ -86,15 +122,6 @@ function unpackForLocalSmoke(tmpDir, baseUrl) {
   });
   if (unzip.error) fail(unzip.error.message);
   if (unzip.status !== 0) fail(`unzip exited with ${unzip.status}`);
-  const manifestPath = path.join(unpackedDir, 'manifest.json');
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  manifest.host_permissions = [
-    ...new Set([
-      ...(manifest.host_permissions || []),
-      'http://127.0.0.1/*'
-    ])
-  ];
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return unpackedDir;
 }
 
@@ -123,10 +150,11 @@ async function registerSmokeUser(baseUrl) {
 }
 
 async function main() {
-  packageStarter();
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-custom-helper-smoke-'));
   const port = await getAvailablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  const fixture = await startHttpsFixture(tmpDir);
+  const zipPath = packageStarter(tmpDir, baseUrl, fixture.origin);
   const serverEnv = {
     ...process.env,
     NODE_ENV: 'test',
@@ -156,7 +184,7 @@ async function main() {
   let context = null;
   try {
     await waitForServer(baseUrl);
-    const extensionDir = unpackForLocalSmoke(tmpDir, baseUrl);
+    const extensionDir = unpackForLocalSmoke(tmpDir, zipPath);
     const { cookie } = await registerSmokeUser(baseUrl);
     const pairingStart = await request(baseUrl, '/native-runner/helper/pairing/start', {
       method: 'POST',
@@ -187,7 +215,6 @@ async function main() {
     const extensionId = new URL(worker.url()).host;
     const popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
-    await popup.locator('#baseUrl').fill(baseUrl);
     await popup.locator('#pairingCode').fill(pairingCode);
     await popup.locator('#pairBtn').click();
     await popup.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('Paired.'), null, { timeout: 10_000 });
@@ -202,7 +229,7 @@ async function main() {
       body: {
         connectorId: 'browser-worker-demo-v1',
         preferredExecutionAgentId: HELPER_PLUGIN_ID,
-        prompt: 'Open https://example.com/shop and prepare a checkout handoff for one starter item under $4.'
+        prompt: `Open ${fixture.origin}/demo and prepare a checkout handoff for one starter item under $4.`
       }
     });
     if (started.response.status !== 201) {
@@ -236,7 +263,11 @@ async function main() {
     }
 
     await popup.locator('#pollBtn').click();
-    await popup.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('starter_not_implemented'), null, { timeout: 20_000 });
+    try {
+      await popup.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('read_only_demo_complete'), null, { timeout: 20_000 });
+    } catch {
+      fail(`read_only_demo_did_not_complete:${await popup.locator('#status').textContent()}`);
+    }
 
     const ownerView = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}`, { cookie });
     if (!ownerView.response.ok) fail(`owner_session_fetch_failed:${ownerView.response.status}:${JSON.stringify(ownerView.data)}`);
@@ -254,8 +285,40 @@ async function main() {
     if (payload.includes('mcnr_') || payload.includes(pairingCode)) {
       fail('session_response_leaked_runner_secret');
     }
-    if (!payload.includes('starter_not_implemented')) {
-      fail('starter_fulfillment_marker_missing');
+    if (!payload.includes('Authorized partner page') || !payload.includes('read-only-page-summary.json')) {
+      fail('starter_read_only_result_missing');
+    }
+
+    const pageCountBeforeRejectedOrigin = context.pages().length;
+    const rejectedOriginStart = await request(baseUrl, '/connectors/sessions/start', {
+      method: 'POST',
+      cookie,
+      body: {
+        connectorId: 'browser-worker-demo-v1',
+        preferredExecutionAgentId: HELPER_PLUGIN_ID,
+        prompt: 'Open https://unapproved.partner.test/demo and prepare a checkout handoff for one starter item under $4.'
+      }
+    });
+    const rejectedOriginSessionId = rejectedOriginStart.data.session?.id;
+    if (rejectedOriginStart.response.status !== 201 || !rejectedOriginSessionId) {
+      fail(`rejected_origin_session_start_failed:${rejectedOriginStart.response.status}:${JSON.stringify(rejectedOriginStart.data)}`);
+    }
+    const rejectedOriginMode = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(rejectedOriginSessionId)}/completion-mode`, {
+      method: 'POST',
+      cookie,
+      body: { mode: 'agent_checkout' }
+    });
+    if (!rejectedOriginMode.response.ok) fail(`rejected_origin_mode_failed:${rejectedOriginMode.response.status}`);
+    const rejectedOriginDispatch = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(rejectedOriginSessionId)}/start-execution`, {
+      method: 'POST',
+      cookie,
+      body: { mode: 'agent_checkout', preferredExecutionAgentId: HELPER_PLUGIN_ID }
+    });
+    if (!rejectedOriginDispatch.response.ok) fail(`rejected_origin_dispatch_failed:${rejectedOriginDispatch.response.status}`);
+    await popup.locator('#pollBtn').click();
+    await popup.waitForFunction(() => document.querySelector('#status')?.textContent?.includes('mission_origin_not_allowed'), null, { timeout: 10_000 });
+    if (context.pages().length !== pageCountBeforeRejectedOrigin) {
+      fail('rejected_origin_created_browser_tab');
     }
 
     console.log(`custom helper extension release package smoke passed: ${zipPath}`);
@@ -269,6 +332,7 @@ async function main() {
       child.kill('SIGTERM');
       await new Promise((resolve) => child.once('exit', resolve));
     }
+    await new Promise((resolve) => fixture.server.close(resolve));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }

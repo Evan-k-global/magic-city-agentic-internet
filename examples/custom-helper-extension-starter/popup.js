@@ -6,17 +6,27 @@ function send(type, payload = {}) {
 
 async function refresh() {
   const status = await send('HELPER_STATUS');
+  if (status.ok) {
+    $('extensionName').textContent = status.extensionName || 'Custom Magic City Helper';
+    $('baseUrl').textContent = status.controlPlaneOrigin || 'Not configured';
+  }
   $('status').textContent = status.ok
-    ? `Paired: ${status.paired ? 'yes' : 'no'}\nRegistered: ${status.registered ? 'yes' : 'no'}\nLast: ${status.last || 'none'}`
+    ? `Build: ${status.profile}\nPaired: ${status.paired ? 'yes' : 'no'}\nRegistered: ${status.registered ? 'yes' : 'no'}\nAllowed pages: ${(status.launchOrigins || []).join(', ') || 'none'}\nLast: ${status.last || 'none'}`
     : `Error: ${status.error}`;
 }
 
 $('pairBtn').addEventListener('click', async () => {
   const response = await send('HELPER_PAIR', {
-    baseUrl: $('baseUrl').value,
     code: $('pairingCode').value
   });
   $('status').textContent = response.ok ? 'Paired.' : `Pair failed: ${response.error}`;
+});
+
+$('permissionBtn').addEventListener('click', async () => {
+  const response = await send('HELPER_GRANT_SITE_ACCESS');
+  $('status').textContent = response.ok
+    ? `Site access granted for:\n${(response.origins || []).join('\n')}`
+    : 'Site access was not granted.';
 });
 
 $('registerBtn').addEventListener('click', async () => {

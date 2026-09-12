@@ -5,28 +5,39 @@ This walkthrough proves the smallest useful custom helper path:
 pairing code -> scoped device token -> helper registration -> explicit dispatch
 -> mission poll -> nonce-bound claim -> holder-signed checkpoint -> fulfillment.
 
-## 1. Pick Helper IDs
+## 1. Create The Partner Config
 
-The starter uses:
+Copy `examples/custom-helper-extension-starter/partner.config.example.json` and
+set the partner-owned control plane, page origins, identity and visible name:
 
-```js
-const HELPER_PLUGIN_ID = 'acme-shopping-helper';
-const HELPER_OWNER_AGENT_ID = 'acme-shopping-agent';
+```json
+{
+  "controlPlaneOrigin": "https://agents.example.com",
+  "launchOrigins": ["https://shop.example.com"],
+  "helperPluginId": "example-reading-helper",
+  "helperOwnerAgentId": "example-reading-agent",
+  "extensionName": "Example Browser Helper",
+  "extensionDescription": "Read-only mission helper for Example.",
+  "optionalMerchantOrigins": ["https://shop.example.com/*"]
+}
 ```
 
-Change these in `examples/custom-helper-extension-starter/background.js` before
-shipping your own helper.
+The build validates exact origins. Release builds require HTTPS; development
+builds may use explicit loopback HTTP origins.
 
 ## 2. Package The Starter
 
 ```bash
-npm run package:custom-helper-extension
+node scripts/package-custom-helper-extension.mjs \
+  --config path/to/partner.config.json \
+  --profile release
 ```
 
 Output:
 
 ```text
-dist/custom-helper-extension-starter/custom-magic-city-helper-starter-0.2.1.zip
+dist/custom-helper-extension-starter/<helper-plugin-id>/release/
+  <helper-plugin-id>-0.3.0-release.zip
 ```
 
 ## 3. Run The Release Smoke
@@ -49,9 +60,10 @@ The smoke does the full local loop with the packaged artifact:
 10. Polls again and receives the short-lived dispatch nonce.
 11. Claims the mission with that nonce and a holder key.
 12. Emits a holder-signed checkpoint.
-13. Fulfills with the starter's `starter_not_implemented` result.
-14. Verifies Magic City recorded mission-bound events without leaking the runner
-    token or pairing code.
+13. Opens and summarizes an allow-listed intercepted partner page.
+14. Stops before the next unsupported shopping action.
+15. Verifies Magic City recorded the redacted result and mission-bound events
+    without leaking the runner token or pairing code.
 
 ## 4. Manual Pairing Flow
 
@@ -63,8 +75,8 @@ Content-Type: application/json
 Cookie: <signed-in Magic City user cookie>
 
 {
-  "pluginId": "acme-shopping-helper",
-  "ownerAgentId": "acme-shopping-agent",
+  "pluginId": "example-reading-helper",
+  "ownerAgentId": "example-reading-agent",
   "label": "Acme Shopping Helper",
   "trustMode": "trusted_under_cap",
   "useExistingBrowser": true
@@ -80,16 +92,16 @@ The helper registers itself with:
 
 ```json
 {
-  "pluginId": "acme-shopping-helper",
-  "ownerAgentId": "acme-shopping-agent",
+  "pluginId": "example-reading-helper",
+  "ownerAgentId": "example-reading-agent",
   "kind": "browser",
   "endpoint": "chrome-extension://<extension-id>",
   "executionAgent": true,
   "capabilities": [
     "browser-worker-agent",
     "browser.extension_dom_executor",
-    "browser.prepare_cart",
-    "browser.open_checkout",
+    "browser.open",
+    "browser.read_public_page",
     "browser.pause_before_sensitive_action"
   ],
   "metadata": {
@@ -110,10 +122,10 @@ Each checkpoint binds the helper's local action to the mission:
 
 ```json
 {
-  "pluginId": "acme-shopping-helper",
-  "label": "Custom helper starter checkpoint",
-  "state": "needs_implementation",
-  "missionAction": "read_public_page",
+  "pluginId": "example-reading-helper",
+  "label": "Read approved page",
+  "state": "read_only_page_summarized",
+  "missionAction": "browser_open",
   "targetUrl": "https://example.com",
   "planHash": "<magic-city-browser-plan-v1 hash>",
   "planActionId": "<ordered action id>",
@@ -145,7 +157,8 @@ The signature covers:
 
 ## 7. Where To Add Smarts
 
-Replace `executeSession` in `background.js`. Keep these boundaries intact:
+Extend `executeSession` in `background.js`. The checked-in implementation is a
+real read-only example, not shopping automation. Keep these boundaries intact:
 
 - Consume only Magic City's declarative plan.
 - Score and execute safe next browser actions locally.

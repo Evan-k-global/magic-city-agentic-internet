@@ -22,9 +22,9 @@ The rule is simple:
 
    ```json
    {
-     "pluginId": "acme-shopping-helper",
-     "ownerAgentId": "acme-shopping-agent",
-     "label": "Acme Shopping Helper",
+     "pluginId": "example-reading-helper",
+     "ownerAgentId": "example-reading-agent",
+     "label": "Example Browser Helper",
      "trustMode": "trusted_under_cap",
      "useExistingBrowser": true
    }
@@ -47,16 +47,16 @@ The rule is simple:
 
    ```json
    {
-     "pluginId": "acme-shopping-helper",
-     "ownerAgentId": "acme-shopping-agent",
+     "pluginId": "example-reading-helper",
+     "ownerAgentId": "example-reading-agent",
      "kind": "browser",
      "endpoint": "chrome-extension://<extension-id>",
      "executionAgent": true,
      "capabilities": [
        "browser-worker-agent",
        "browser.extension_dom_executor",
-       "browser.prepare_cart",
-       "browser.open_checkout",
+       "browser.open",
+       "browser.read_public_page",
        "browser.pause_before_sensitive_action"
      ],
      "privacyModes": ["local-private", "private"],
@@ -139,16 +139,21 @@ Use `examples/custom-helper-extension-starter` as the base package. It includes:
 - Scoped helper registration.
 - Ed25519 holder-key generation.
 - Proof-of-possession signing.
-- Session polling/claim/checkpoint/fulfill skeleton.
+- Session polling/claim/checkpoint/fulfill transport.
+- A real read-only page-open and redacted-summary example for configured origins.
 
-The starter intentionally does not contain advanced browsing intelligence. Add
-site logic behind the existing plan executor boundary. Keep the public protocol
-surface small and stable.
+The starter intentionally does not contain shopping or other advanced browsing
+intelligence. It performs its first allow-listed read-only action, then stops
+before unsupported work. Add site logic behind the existing plan executor
+boundary and advertise only capabilities that implementation supports.
 
 Package and smoke-test the starter before you submit anything:
 
 ```bash
-npm run package:custom-helper-extension
+node scripts/package-custom-helper-extension.mjs \
+  --config path/to/partner.config.json \
+  --profile release
+npm run test:custom-helper-extension-packaging
 npm run smoke:custom-helper-extension-package
 ```
 
@@ -160,6 +165,7 @@ tested as a source folder.
 Release kit docs:
 
 - [Hello custom helper](custom-helper-hello-walkthrough.md)
+- [Partner website and custom helper deployment](custom-helper-partner-deployment.md)
 - [Release checklist](custom-helper-release-checklist.md)
 - [Privacy template](custom-helper-privacy-template.md)
 
