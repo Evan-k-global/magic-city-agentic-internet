@@ -18591,8 +18591,6 @@
 	      if (!items.length || !isSantaClawzCodeAuditDelivery(session, items)) return '';
 	      const payload = getSantaClawzAuditPayload(items);
 	      const markdown = getSantaClawzAuditMarkdown(items);
-	      const markdownArtifact = items.find((item) => item?.url && /(?:markdown|\.md(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
-	      const jsonArtifact = items.find((item) => item?.url && /(?:json|\.json(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
 	      const status = normalizeSantaClawzAuditStatus(getSantaClawzAuditValue(payload, ['audit_status', 'status']) || (markdown ? 'completed' : 'available'));
 	      const highestSeverity = getSantaClawzAuditHighestSeverity(payload, markdown);
 	      const findingCount = getSantaClawzAuditFindingCount(payload, markdown);
@@ -18604,23 +18602,16 @@
 	        ['Findings', findingCount === '' ? 'See report' : String(findingCount)],
 	        deferredCount !== '' ? ['Deferred', String(deferredCount)] : null
 	      ].filter(Boolean);
-	      const outputControls = [
-	        markdownArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(markdownArtifact.url)}" target="_blank" rel="noopener noreferrer">Open Markdown report</a>` : '',
-	        !markdownArtifact?.url && markdown ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="markdown" data-session-id="${escapeExecutionValue(session.id)}">Open Markdown report</button>` : '',
-	        jsonArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(jsonArtifact.url)}" target="_blank" rel="noopener noreferrer">Open JSON data</a>` : '',
-	        !jsonArtifact?.url && payload ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="json" data-session-id="${escapeExecutionValue(session.id)}">Open JSON report</button>` : ''
-	      ].filter(Boolean).join('');
 	      return `
 	        <div class="execution-audit-report">
 	          <div class="execution-audit-report-head">
 	            <strong>Code audit report</strong>
-	            <span>${markdownArtifact?.url || jsonArtifact?.url ? 'Report links ready' : 'Readable summary'}</span>
+	            <span>Verified summary</span>
 	          </div>
 	          <div class="execution-audit-facts">
 	            ${facts.map(([label, value]) => `<div class="execution-audit-fact"><small>${escapeExecutionValue(label)}</small><strong>${escapeExecutionValue(value)}</strong></div>`).join('')}
 	          </div>
 	          <p class="execution-audit-summary">${escapeExecutionValue(summary)}</p>
-	          ${outputControls ? `<div class="execution-audit-actions">${outputControls}</div>` : ''}
 	        </div>
 	      `;
 	    }

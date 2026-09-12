@@ -249,7 +249,7 @@ assert.equal(helpers.hasPendingSantaClawzDeliveryVerification(cancelledSession),
 assert.equal(helpers.shouldPollExecutionSession(cancelledSession), false);
 assert.equal(helpers.getExecutionStatusModel(cancelledSession).label, 'Cancelled');
 assert.equal(helpers.describeExecutionRunState(cancelledSession, helpers.getExecutionStatusModel(cancelledSession)).title, 'Cancelled');
-assert.match(helpers.renderSantaClawzCodeAuditPanel(cancelledSession, helpers.collectSantaClawzDeliveryItems(cancelledSession)), /Open Markdown report/);
+assert.doesNotMatch(helpers.renderSantaClawzCodeAuditPanel(cancelledSession, helpers.collectSantaClawzDeliveryItems(cancelledSession)), /Open Markdown report/);
 const preCancellationResponse = structuredClone(watchdogFailedSession);
 preCancellationResponse.updatedAt = cancelledSession.updatedAt;
 assert.equal(helpers.shouldApplyPolledExecutionSession(cancelledSession, preCancellationResponse), false);
@@ -289,10 +289,9 @@ assert.match(panel, /Highest severity[\s\S]*high/i);
 assert.match(panel, /Findings[\s\S]*6/);
 assert.match(panel, /Status[\s\S]*complete/i);
 assert.doesNotMatch(panel, />completed</i);
-assert.match(panel, /data-santaclawz-audit-output="markdown"/);
-assert.match(panel, /data-santaclawz-audit-output="json"/);
-assert.match(panel, /Open Markdown report/);
-assert.match(panel, /Open JSON report/);
+assert.match(panel, /Verified summary/);
+assert.doesNotMatch(panel, /data-santaclawz-audit-output/);
+assert.doesNotMatch(panel, /Open (?:Markdown|JSON)/);
 assert.doesNotMatch(panel, /Additional Model Notes/);
 assert.doesNotMatch(panel, /Protocol Surfaces Detected/);
 assert.doesNotMatch(panel, /<details|<pre/i);
@@ -311,7 +310,8 @@ const structuredPanel = helpers.renderSantaClawzCodeAuditPanel(
   structuredSession,
   helpers.collectSantaClawzDeliveryItems(structuredSession)
 );
-assert.match(structuredPanel, /Open JSON report/, 'object-valued structured output must remain available as JSON');
+assert.match(structuredPanel, /Verified summary/, 'object-valued structured output must remain summarized');
+assert.doesNotMatch(structuredPanel, /Open JSON report/);
 
 const activeSession = structuredClone(session);
 activeSession.santaclawzDirectPayment.executionState = { status: 'running' };
@@ -366,7 +366,7 @@ const layout = await page.locator('.execution-audit-report').evaluate((element) 
 }));
 assert.ok(layout.height < 260, `compact audit panel should remain short, got ${layout.height}px`);
 assert.ok(layout.scrollWidth <= layout.clientWidth, 'compact audit panel must not overflow horizontally');
-assert.equal(await page.locator('[data-santaclawz-audit-output]').count(), 2);
+assert.equal(await page.locator('[data-santaclawz-audit-output]').count(), 0);
 assert.equal((await page.locator('.execution-audit-fact strong').first().textContent()).trim(), 'complete');
 if (process.env.MAGIC_CITY_UI_SCREENSHOT) {
   await page.screenshot({ path: process.env.MAGIC_CITY_UI_SCREENSHOT });
