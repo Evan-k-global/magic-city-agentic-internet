@@ -15748,7 +15748,6 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
     const expectedReturnRequestId = sessionForStatus.santaclawzDirectPayment?.submittedRequestId || '';
     const verifiedReturn = await verifySantaClawzCompletedReturn(combinedStatusPayload, {
       expectedRequestId: expectedReturnRequestId,
-      expectedInputDigestSha256: sessionForStatus.santaclawzDirectPayment?.hireRequestDigestSha256 || '',
       resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
     });
     const delivery = materializeChangedSantaClawzDelivery(
@@ -17580,7 +17579,6 @@ const server = http.createServer(async (req, res) => {
         : submit.payload;
       const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
-        expectedInputDigestSha256: hireRequestDigestSha256,
         resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
       });
       const delivery = materializeSantaClawzInlineArtifacts(
@@ -17939,7 +17937,6 @@ const server = http.createServer(async (req, res) => {
         : submit.payload;
       const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
-        expectedInputDigestSha256: hireRequestDigestSha256,
         resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
       });
       const delivery = materializeSantaClawzInlineArtifacts(

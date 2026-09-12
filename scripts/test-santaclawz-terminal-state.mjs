@@ -172,9 +172,10 @@ const directPayload = {
     }
   }
 };
+// Magic City hashes the complete paid request; SantaClawz hashes normalized audit input.
+// Authenticated state and request-id binding remain authoritative across those digest domains.
 const directVerified = await verifySantaClawzCompletedReturn(directPayload, {
-  expectedRequestId: 'hire_direct_complete',
-  expectedInputDigestSha256: 'd'.repeat(64)
+  expectedRequestId: 'hire_direct_complete'
 });
 assert.equal(directVerified.ok, true);
 assert.equal(directVerified.mode, 'authenticated_direct_output');
