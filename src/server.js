@@ -15059,6 +15059,38 @@ function santaClawzSourceDeliveryDigest(delivery = {}) {
   });
 }
 
+function shouldRefreshSantaClawzFulfilledDelivery(session = {}, delivery = {}) {
+  if (String(session?.status || '').toLowerCase() !== 'fulfilled') return true;
+  const outputCount = Number(delivery?.inlineOutputs?.length || 0)
+    + Number(delivery?.artifacts?.length || 0);
+  return outputCount === 0 || delivery?.verification?.partialDelivery === true;
+}
+
+function buildSantaClawzFulfillmentDeliveryPatch(session = {}, delivery = {}, {
+  paymentState = {},
+  executionState = {}
+} = {}) {
+  const fulfillment = session?.fulfillment;
+  const result = fulfillment?.result;
+  if (String(session?.status || '').toLowerCase() !== 'fulfilled' || !result) return null;
+  const currentDelivery = result.santaclawzDelivery || {
+    artifacts: Array.isArray(result.artifacts) ? result.artifacts : []
+  };
+  if (santaClawzSourceDeliveryDigest(currentDelivery) === santaClawzSourceDeliveryDigest(delivery)) {
+    return null;
+  }
+  return {
+    ...fulfillment,
+    result: {
+      ...result,
+      artifacts: Array.isArray(delivery?.artifacts) ? delivery.artifacts : [],
+      santaclawzDelivery: delivery,
+      santaclawzPaymentState: sanitizeMetadata(paymentState),
+      santaclawzExecutionState: sanitizeMetadata(executionState)
+    }
+  };
+}
+
 function materializeChangedSantaClawzDelivery(sessionId, existingDelivery = {}, incomingDelivery = {}) {
   if (
     santaClawzSourceDeliveryDigest(existingDelivery)
@@ -15718,9 +15750,7 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
   }
   if (!digest) return { session, refreshed: false };
   const existingDelivery = sessionForStatus.santaclawzDirectPayment?.delivery || {};
-  const existingOutputCount = Number(existingDelivery.inlineOutputs?.length || 0)
-    + Number(existingDelivery.artifacts?.length || 0);
-  if (sessionForStatus.status === 'fulfilled' && existingOutputCount > 0) {
+  if (!shouldRefreshSantaClawzFulfilledDelivery(sessionForStatus, existingDelivery)) {
     return { session: sessionForStatus, refreshed: false };
   }
   const source = getSantaClawzSourceStatus();
@@ -15859,6 +15889,13 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
           proofRef: digest
         }
       });
+    }
+    if (summary.completed && sessionForStatus.status === 'fulfilled') {
+      const fulfillment = buildSantaClawzFulfillmentDeliveryPatch(sessionForStatus, delivery, {
+        paymentState: status.payload,
+        executionState: executionState?.payload || {}
+      });
+      if (fulfillment) sessionPatch.fulfillment = fulfillment;
     }
     if (summary.terminalFailure && sessionForStatus.status !== 'failed') {
       const failureMessage = summary.failureReason || 'SantaClawz ended the run without an accepted result package.';

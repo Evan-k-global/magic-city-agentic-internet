@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {
   createSantaClawzStatusRefreshCoordinator,
-  hasSemanticSantaClawzStatusChanged
+  hasSemanticSantaClawzStatusChanged,
+  semanticSantaClawzStatusDigest
 } from '../src/santaclawzStatusRefresh.js';
 
 const productionShapedState = {
@@ -118,11 +119,64 @@ await coordinator.run('cs-259:digest', async () => {
 assert.equal(upstreamCalls, 2);
 
 const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+const refreshDecisionStart = server.indexOf('function shouldRefreshSantaClawzFulfilledDelivery(');
+const refreshDecisionEnd = server.indexOf('\nfunction buildSantaClawzFulfillmentDeliveryPatch', refreshDecisionStart);
+assert.ok(refreshDecisionStart >= 0 && refreshDecisionEnd > refreshDecisionStart, 'fulfilled delivery refresh decision not found');
+const shouldRefreshFulfilledDelivery = new Function(
+  `${server.slice(refreshDecisionStart, refreshDecisionEnd)}\nreturn shouldRefreshSantaClawzFulfilledDelivery;`
+)();
+const partialFulfilled = structuredClone(productionShapedState);
+partialFulfilled.status = 'fulfilled';
+partialFulfilled.santaclawzDirectPayment.delivery.verification = { partialDelivery: true };
+assert.equal(shouldRefreshFulfilledDelivery(partialFulfilled, partialFulfilled.santaclawzDirectPayment.delivery), true);
+const completeFulfilled = structuredClone(partialFulfilled);
+completeFulfilled.santaclawzDirectPayment.delivery.verification.partialDelivery = false;
+assert.equal(shouldRefreshFulfilledDelivery(completeFulfilled, completeFulfilled.santaclawzDirectPayment.delivery), false);
+
+const fulfillmentPatchStart = server.indexOf('function buildSantaClawzFulfillmentDeliveryPatch(');
+const fulfillmentPatchEnd = server.indexOf('\nfunction materializeChangedSantaClawzDelivery', fulfillmentPatchStart);
+assert.ok(fulfillmentPatchStart >= 0 && fulfillmentPatchEnd > fulfillmentPatchStart, 'fulfilled delivery patch function not found');
+const buildFulfillmentDeliveryPatch = new Function(
+  'santaClawzSourceDeliveryDigest',
+  'sanitizeMetadata',
+  `${server.slice(fulfillmentPatchStart, fulfillmentPatchEnd)}\nreturn buildSantaClawzFulfillmentDeliveryPatch;`
+)(
+  semanticSantaClawzStatusDigest,
+  (value) => value
+);
+const upgradedFulfilled = structuredClone(completeFulfilled);
+upgradedFulfilled.fulfillment = {
+  status: 'fulfilled',
+  result: {
+    completionState: 'completed',
+    artifacts: [{ label: 'audit.md', url: '/artifacts/session/audit.md' }],
+    santaclawzDelivery: structuredClone(partialFulfilled.santaclawzDirectPayment.delivery)
+  }
+};
+const upgradedDelivery = structuredClone(upgradedFulfilled.santaclawzDirectPayment.delivery);
+const expandedJson = JSON.stringify({
+  findings: Array.from({ length: 700 }, (_, index) => ({ id: index, detail: 'verified structured finding' }))
+});
+assert.ok(expandedJson.length > 8000, 'upgrade regression must exceed the former inline limit');
+upgradedDelivery.inlineOutputs.push('code-audit-result.json', expandedJson);
+upgradedDelivery.artifacts.push({ label: 'code-audit-result.json', url: '/artifacts/session/code-audit-result.json' });
+upgradedDelivery.verification = { partialDelivery: false, suppressedOutputs: [] };
+const fulfillmentPatch = buildFulfillmentDeliveryPatch(upgradedFulfilled, upgradedDelivery, {
+  paymentState: { paymentStatus: 'settled' },
+  executionState: { status: 'completed' }
+});
+assert.ok(fulfillmentPatch, 'new verified JSON must update the existing fulfillment');
+assert.equal(fulfillmentPatch.result.artifacts.length, 2);
+assert.equal(fulfillmentPatch.result.artifacts[1].label, 'code-audit-result.json');
+assert.equal(fulfillmentPatch.result.santaclawzDelivery.verification.partialDelivery, false);
+assert.equal(buildFulfillmentDeliveryPatch({ ...upgradedFulfilled, fulfillment: fulfillmentPatch }, upgradedDelivery), null);
+
 assert.match(server, /const changed = hasSemanticSantaClawzStatusChanged\(currentSemanticState, nextSemanticState\)/);
 assert.match(server, /const updated = changed\s*\? updateConnectorSession/);
 assert.match(server, /const sendStatusResponse = refreshed\.persisted \? sendJson : sendAdvisoryJson/);
 assert.match(server, /materializeChangedSantaClawzDelivery/);
 assert.match(server, /resolveSantaClawzAuthenticatedStateUrl/);
+assert.match(server, /if \(summary\.completed && sessionForStatus\.status === 'fulfilled'\)/);
 assert.match(server, /completed_after_refund_no_recharge/);
 assert.doesNotMatch(
   server,
