@@ -4207,7 +4207,7 @@
 
 	    .wallet-topup-row {
 	      display: grid;
-	      grid-template-columns: minmax(78px, 0.72fr) minmax(132px, 1fr);
+	      grid-template-columns: minmax(0, 1fr);
 	      gap: 8px;
 	      align-items: stretch;
 	      margin-top: 10px;
@@ -4394,7 +4394,7 @@
 
 	    @media (max-width: 520px) {
 	      .wallet-topup-row {
-	        grid-template-columns: minmax(74px, 0.72fr) minmax(118px, 1fr);
+	        grid-template-columns: minmax(0, 1fr);
 	      }
 	      .wallet-compact-row {
 	        align-items: stretch;
@@ -5207,11 +5207,6 @@
         font-size: 0;
       }
 
-      #sendBtn::after {
-        font-size: 26px;
-        transform: translate(-0.25px, 0.5px);
-      }
-
       .sidebar .row {
         gap: 6px;
       }
@@ -5566,46 +5561,27 @@
               <span>Credits</span>
               <input id="controlsTopupCreditsInput" type="number" min="50" step="50" value="2500" aria-label="Credits to add" />
             </label>
-            <label class="wallet-topup-field wallet-topup-payment">
-              <span>Pay with</span>
-              <span class="wallet-select-shell">
-                <select id="controlsFundingRail" aria-label="Credit funding method">
-                  <option value="stripe">Stripe</option>
-                  <option value="onchain">Stablecoin</option>
-                </select>
-              </span>
-            </label>
-            <button class="action action-soft" id="controlsTopupBtn">Add credits</button>
+            <input id="controlsFundingRail" type="hidden" value="stripe" />
+            <button class="action action-soft" id="controlsTopupBtn">Add credits with Stripe</button>
           </div>
-          <div id="controlsTopupHint" class="wallet-policy-line">Choose credits and payment method.</div>
+          <div id="controlsTopupHint" class="wallet-policy-line">Choose how many credits to add.</div>
           <div id="controlsCreditsMsg" class="muted"></div>
           <div id="stripeTopupSuccess" class="wallet-success-note" hidden></div>
-          <div class="wallet-agent-payment-default" data-santaclawz-feature>
-            <label class="wallet-topup-field">
-              <span>SantaClawz default</span>
-              <span class="wallet-select-shell">
-                <select id="santaclawzPaymentPreference" aria-label="Default SantaClawz agent payment method">
-                  <option value="credits">Credits</option>
-                  <option value="crypto">Crypto</option>
-                </select>
-              </span>
-            </label>
-          </div>
-          <div class="wallet-compact-row">
-            <div>
-              <div class="wallet-compact-label">Wallet</div>
-              <div id="evmWalletStatus" class="muted">Checking wallet…</div>
+          <div id="stripeTopupHistory" class="wallet-topup-history" hidden></div>
+          <input id="santaclawzPaymentPreference" type="hidden" value="credits" />
+          <div hidden data-dormant-payment-controls>
+            <div class="wallet-compact-row" hidden>
+              <div>
+                <div class="wallet-compact-label">Wallet</div>
+                <div id="evmWalletStatus" class="muted">Checking wallet…</div>
+              </div>
+              <div class="wallet-inline-actions">
+                <button type="button" class="action action-provider" id="evmWalletConnectBtn">Link Base</button>
+                <button type="button" class="action action-soft" id="evmWalletDisconnectBtn" hidden>Disconnect</button>
+              </div>
             </div>
-            <div class="wallet-inline-actions">
-              <button type="button" class="action action-provider" id="evmWalletConnectBtn">Link Base</button>
-              <button type="button" class="action action-soft" id="evmWalletDisconnectBtn" hidden>Disconnect</button>
-            </div>
-          </div>
-          <div id="evmTopupSummary" class="muted" hidden></div>
-          <div id="controlsAlphaSummary" class="muted" hidden></div>
-
-          <details class="settings-subdetails wallet-advanced-details">
-            <summary>Advanced</summary>
+            <div id="evmTopupSummary" class="muted" hidden></div>
+            <div id="controlsAlphaSummary" class="muted" hidden></div>
             <div class="wallet-model-note" id="creditUsdRateLine"><strong>1 credit = $0.01.</strong></div>
             <div class="wallet-fx-converter" aria-label="Local currency credit estimator">
               <div class="wallet-fx-title">Local buying power</div>
@@ -5623,14 +5599,13 @@
               </div>
               <div id="fxQuoteResult" class="wallet-policy-line wallet-fx-result">Credits are USD-backed. Local estimates include a 2% FX buffer.</div>
             </div>
-            <div id="stripeTopupHistory" class="wallet-topup-history" hidden></div>
             <div class="wallet-runtime-panel" hidden>
               <div id="evmWalletRuntimeSummary" class="wallet-runtime-summary">Wallet payments and receipts appear here.</div>
               <div class="settings-badges" id="evmWalletRuntimeBadges"></div>
               <div class="connector-activity-list" id="evmPaymentAuthorizationList"></div>
             </div>
-            <div class="vault-subsection-title">Base wallet checks</div>
-            <div class="connector-account-body">
+            <div class="vault-subsection-title" hidden>Base wallet checks</div>
+            <div class="connector-account-body" hidden>
               <div class="connector-policy-grid" id="evmWalletPolicyGrid">
                 <label class="connector-policy-card" id="evmPolicyCardSettlement">
                   <input type="checkbox" id="evmPolicySettlementSignatures" checked />
@@ -5653,7 +5628,7 @@
               <div id="evmWalletConfigStatus" class="muted"></div>
               <div class="connector-activity-list" id="evmWalletActivity"></div>
             </div>
-          </details>
+          </div>
         </div>
       </details>
 
@@ -10214,7 +10189,7 @@
 	      }
 	      button.hidden = false;
 	      button.classList.toggle('wallet-stripe-primary', fundingRail === 'stripe');
-	      button.textContent = 'Add credits';
+	      button.textContent = 'Add credits with Stripe';
 	      if (!authSessionUser) {
 	        button.disabled = true;
 	        hint.textContent = 'Sign in to add credits.';
@@ -10388,11 +10363,7 @@
     }
 
     function getSantaClawzPaymentPreference() {
-      try {
-        return normalizeSantaClawzPaymentPreference(localStorage.getItem(getScopedStorageKey(SANTACLAWZ_PAYMENT_PREFERENCE_KEY)));
-      } catch {
-        return 'credits';
-      }
+      return 'credits';
     }
 
     function applySantaClawzPaymentPreferenceUi(value = getSantaClawzPaymentPreference()) {
@@ -13151,6 +13122,7 @@
 		        }
 	        status.textContent = `Opening ${name} in the execution widget...`;
 	        try {
+	          let openedSessionId = '';
 	          let reusableSessionId = String(context.connectorSessionId || '').trim() || rememberedSessionId;
 	          if (reusableSessionId) {
 	            const existing = await api(`/connectors/sessions/${encodeURIComponent(reusableSessionId)}`).catch(() => null);
@@ -13175,6 +13147,7 @@
 	              openRequestId
 	            });
 	            await revealExecutionSheet(reusableSessionId, { awaitRender: true });
+	            openedSessionId = reusableSessionId;
 	            status.textContent = `${name} is ready in the execution widget. Add task inputs there; chat can stay focused on questions.`;
 	          } else {
 	            const session = await openContextualExecutionSession({
@@ -13193,9 +13166,12 @@
 	              sessionId: session.id,
 	              openRequestId
 	            });
+	            openedSessionId = session.id;
 	            const intake = formatAgentCompletionIntake(agent);
 	            status.textContent = `${name} is open in the execution widget.${intake ? ` ${intake}.` : ''}`;
 	          }
+	          const autoStarted = await autoStartReadyCodeAuditHire(openedSessionId);
+	          if (autoStarted) status.textContent = `${name} is starting in the execution widget.`;
 	          if (button) {
 	            button.textContent = 'Selected';
 	            button.disabled = true;
@@ -15870,19 +15846,21 @@
       const txHash = verification?.txHash || '';
       const chainAuthorization = session.finalSubmitChainAuthorization || null;
       const chainAuthorizationReady = chainAuthorization?.status === 'anchored';
+      const authorizationTxHash = chainAuthorization?.txHash || '';
+      const authorizationExplorerUrl = chainAuthorization?.explorerUrl || '';
       const chainStatusCheckFailed = !chainAuthorization && zekoNetworkStatus?.statusCheck === 'failed';
       const chainAuthorizationBypassed = (chainAuthorization?.status === 'unavailable' && chainAuthorization?.bypassAllowed === true)
         || (!chainAuthorization && !chainStatusCheckFailed && zekoNetworkStatus?.available === false);
       const chainAuthorizationLabel = chainAuthorizationReady
-        ? 'Zeko authorization ready'
+        ? 'Zeko authorization anchored'
         : chainAuthorizationBypassed
-          ? 'Zeko Sepolia unavailable - continuing'
+          ? 'Zeko unavailable - local authorization active'
           : chainStatusCheckFailed
             ? 'Zeko status check failed'
           : chainAuthorization?.status === 'preparing'
-            ? 'Preparing Zeko authorization'
+            ? 'Zeko authorization pending'
             : chainAuthorization?.status === 'failed'
-              ? 'Zeko authorization needs review'
+              ? 'Zeko anchor needs review'
               : '';
       const offchainProof = String(verification?.submitMode || '').toLowerCase() === 'record'
         || String(verification?.network || '').toLowerCase() === 'offchain';
@@ -15903,6 +15881,7 @@
             ${receiptUrl ? `<a href="${receiptUrl}" target="_blank" rel="noopener noreferrer">Receipt</a>` : ''}
             ${anchorUrl ? `<a href="${anchorUrl}" target="_blank" rel="noopener noreferrer">${offchainProof ? 'Proof record' : 'Anchor'}</a>` : ''}
             ${txHash && txExplorerUrl ? `<a href="${escapeExecutionValue(txExplorerUrl)}" target="_blank" rel="noopener noreferrer">Zeko tx</a>` : ''}
+            ${authorizationTxHash && authorizationExplorerUrl ? `<a href="${escapeExecutionValue(authorizationExplorerUrl)}" target="_blank" rel="noopener noreferrer">Authorization tx</a>` : ''}
           </div>
           ${!txHash ? `<div class="execution-inline-note">${offchainProof ? `Off-chain proof retained locally.${escapeExecutionValue(offchainTarget)}` : 'Zeko anchor after receipt.'}</div>` : ''}
           ${chainAuthorizationBypassed ? `<div class="execution-inline-note">Zeko Sepolia is unavailable. Checkout continues under the signed one-order authorization.</div>` : ''}
@@ -18550,7 +18529,15 @@
 	      const relayStatus = String(summary.relayDeliveryStatus || operational.relayDeliveryStatus || paymentState.relayDeliveryStatus || '').trim().toLowerCase();
 	      const paymentStatus = String(summary.paymentStatus || operational.paymentStatus || paymentState.paymentStatus || directPayment.status || '').trim().toLowerCase();
 	      if (delivery.accepted) {
-	        return { title: 'Audit complete', detail: 'The Markdown report and structured JSON are ready.', badgeLabel: 'Done', summary: 'Audit complete · files ready' };
+	        const partialDelivery = directPayment?.delivery?.verification?.partialDelivery === true;
+	        return {
+	          title: 'Audit complete',
+	          detail: partialDelivery
+	            ? 'SantaClawz completed the audit. The intact Markdown report is ready; incomplete structured output was omitted.'
+	            : 'The Markdown report and structured JSON are ready.',
+	          badgeLabel: 'Done',
+	          summary: partialDelivery ? 'Audit complete · Markdown ready' : 'Audit complete · files ready'
+	        };
 	      }
 	      if (delivery.pending) {
 	        return { title: 'Verifying report', detail: 'SantaClawz returned the report. Magic City is verifying its delivery package.', badgeLabel: 'Verifying', summary: 'Report received · verifying delivery' };
@@ -18604,8 +18591,6 @@
 	      if (!items.length || !isSantaClawzCodeAuditDelivery(session, items)) return '';
 	      const payload = getSantaClawzAuditPayload(items);
 	      const markdown = getSantaClawzAuditMarkdown(items);
-	      const markdownArtifact = items.find((item) => item?.url && /(?:markdown|\.md(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
-	      const jsonArtifact = items.find((item) => item?.url && /(?:json|\.json(?:$|\?))/i.test(`${item.url || ''} ${item.label || ''}`));
 	      const status = normalizeSantaClawzAuditStatus(getSantaClawzAuditValue(payload, ['audit_status', 'status']) || (markdown ? 'completed' : 'available'));
 	      const highestSeverity = getSantaClawzAuditHighestSeverity(payload, markdown);
 	      const findingCount = getSantaClawzAuditFindingCount(payload, markdown);
@@ -18617,23 +18602,16 @@
 	        ['Findings', findingCount === '' ? 'See report' : String(findingCount)],
 	        deferredCount !== '' ? ['Deferred', String(deferredCount)] : null
 	      ].filter(Boolean);
-	      const outputControls = [
-	        markdownArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(markdownArtifact.url)}" target="_blank" rel="noopener noreferrer">Open Markdown report</a>` : '',
-	        !markdownArtifact?.url && markdown ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="markdown" data-session-id="${escapeExecutionValue(session.id)}">Open Markdown report</button>` : '',
-	        jsonArtifact?.url ? `<a class="execution-result-link" href="${escapeExecutionValue(jsonArtifact.url)}" target="_blank" rel="noopener noreferrer">Open JSON data</a>` : '',
-	        !jsonArtifact?.url && payload ? `<button class="execution-secondary" type="button" data-santaclawz-audit-output="json" data-session-id="${escapeExecutionValue(session.id)}">Open JSON report</button>` : ''
-	      ].filter(Boolean).join('');
 	      return `
 	        <div class="execution-audit-report">
 	          <div class="execution-audit-report-head">
 	            <strong>Code audit report</strong>
-	            <span>${markdownArtifact?.url || jsonArtifact?.url ? 'Report links ready' : 'Readable summary'}</span>
+	            <span>Verified summary</span>
 	          </div>
 	          <div class="execution-audit-facts">
 	            ${facts.map(([label, value]) => `<div class="execution-audit-fact"><small>${escapeExecutionValue(label)}</small><strong>${escapeExecutionValue(value)}</strong></div>`).join('')}
 	          </div>
 	          <p class="execution-audit-summary">${escapeExecutionValue(summary)}</p>
-	          ${outputControls ? `<div class="execution-audit-actions">${outputControls}</div>` : ''}
 	        </div>
 	      `;
 	    }
@@ -18666,6 +18644,7 @@
 		        ? ''
 		        : `updated ${lastUpdateSeconds}s ago`;
 		      const retryBlocked = directPayment?.summary?.retryBlocked === true || directPayment?.summary?.returnRejected === true;
+		      const upstreamLifecycleVerified = directPayment?.summary?.returnValidation?.verificationSource === 'santaclawz_authenticated_lifecycle';
 		      const waitingText = verificationPending
 		        ? 'Report available. Delivery verification is pending.'
 		        : terminalFailure
@@ -18688,6 +18667,7 @@
 	          <div class="trace-meta">
 	            <div class="execution-proof-row">
 		              <span class="execution-proof-badge ${terminalFailure ? 'failed' : items.length ? 'ready' : 'prepared'}">${escapeExecutionValue(terminalFailure ? 'Return rejected' : outputReady ? 'Report ready' : verificationPending ? 'Verification pending' : progress?.badgeLabel || statusLabel)}</span>
+		              ${outputReady && upstreamLifecycleVerified ? '<span class="execution-proof-badge ready">Verified by SantaClawz</span>' : ''}
 		              ${requestId ? `<span class="execution-proof-badge">request ${escapeExecutionValue(String(requestId).slice(0, 18))}</span>` : ''}
 		              ${elapsedBadge ? `<span class="execution-proof-badge">${escapeExecutionValue(elapsedBadge)}</span>` : ''}
 		            </div>
@@ -20299,6 +20279,37 @@
 	    async function autoRunExecutionSessionFromChat(sessionId) {
 	      if (!sessionId || executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return false;
 	      await renderExecutionSheet(sessionId, { focus: false });
+	      const root = getExecutionSheetScrollElement(sessionId);
+	      const runButton = root?.querySelector?.('[data-execution-run-agent="true"]');
+	      if (!runButton || runButton.disabled) return false;
+	      runButton.click();
+	      return true;
+	    }
+
+	    function canAutoStartReadyCodeAuditHire(session = {}, availableCredits = null) {
+	      const selectedAgent = session?.handoffData?.selectedAgent || session?.preferredExecutionAgentSnapshot || {
+	        pluginId: session?.preferredExecutionAgentId || ''
+	      };
+	      if (!isSantaClawzExecutionSession(session) || !isCodeAuditCompletionAgent(selectedAgent)) return false;
+	      if (String(session?.status || '').toLowerCase() !== 'ready' || santaClawzExecutionHasStarted(session)) return false;
+	      if (getMissingAgentInputLabels(session).length) return false;
+	      const requiredCredits = executionRequiredCredits(session);
+	      return requiredCredits <= 0
+	        || (Number.isFinite(Number(availableCredits)) && Number(availableCredits) >= requiredCredits);
+	    }
+
+	    async function autoStartReadyCodeAuditHire(sessionId = '') {
+	      if (!sessionId || executionCancellingSessions.has(sessionId) || executionDismissedSessions.has(sessionId)) return false;
+	      await renderExecutionSheet(sessionId, { focus: false });
+	      let session = executionSessionCache.get(sessionId) || null;
+	      if (!session || !isSantaClawzExecutionSession(session)) return false;
+	      let availableCredits = executionKnownAvailableCredits();
+	      if (executionRequiredCredits(session) > 0 && availableCredits == null) {
+	        await refreshCreditsBalance().catch(() => null);
+	        availableCredits = executionKnownAvailableCredits();
+	        session = executionSessionCache.get(sessionId) || session;
+	      }
+	      if (!canAutoStartReadyCodeAuditHire(session, availableCredits)) return false;
 	      const root = getExecutionSheetScrollElement(sessionId);
 	      const runButton = root?.querySelector?.('[data-execution-run-agent="true"]');
 	      if (!runButton || runButton.disabled) return false;

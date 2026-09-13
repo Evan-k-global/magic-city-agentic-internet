@@ -122,5 +122,12 @@ assert.match(server, /const changed = hasSemanticSantaClawzStatusChanged\(curren
 assert.match(server, /const updated = changed\s*\? updateConnectorSession/);
 assert.match(server, /const sendStatusResponse = refreshed\.persisted \? sendJson : sendAdvisoryJson/);
 assert.match(server, /materializeChangedSantaClawzDelivery/);
+assert.match(server, /resolveSantaClawzAuthenticatedStateUrl/);
+assert.match(server, /completed_after_refund_no_recharge/);
+assert.doesNotMatch(
+  server,
+  /creditReservation\?\.status === 'released'[\s\S]{0,1200}lockUserCreditsForIntent/,
+  'a completed SantaClawz run must not re-charge a released reservation'
+);
 
 console.log('santaclawz status refresh coalescing and no-op persistence regression passed');

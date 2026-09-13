@@ -66,6 +66,7 @@ assert.match(server, /selected_santaclawz_agent_unavailable/);
 assert.match(server, /recordSantaClawzRuntimeOutcome/);
 assert.match(server, /materializeSantaClawzInlineArtifacts\(\s*sessionForSubmit\.id,/);
 assert.match(server, /materializeSantaClawzInlineArtifacts\(\s*sessionForDirectSubmit\.id,/);
+assert.doesNotMatch(server, /expectedInputDigestSha256:/);
 
 assert.match(ui, /start-execution[\s\S]{0,2200}santaclawz-credit-backed\/submit/);
 assert.match(ui, /syncSantaClawzActionResultForPolling\(session\.id, data\)/);

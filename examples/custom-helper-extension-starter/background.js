@@ -1,7 +1,12 @@
-const DEFAULT_BASE_URL = 'https://magic-city.ai';
-const HELPER_PLUGIN_ID = 'acme-shopping-helper';
-const HELPER_OWNER_AGENT_ID = 'acme-shopping-agent';
+import { PARTNER_CONFIG } from './partner-config.js';
+
+const CONTROL_PLANE_ORIGIN = String(PARTNER_CONFIG.controlPlaneOrigin || '').replace(/\/+$/, '');
+const HELPER_PLUGIN_ID = PARTNER_CONFIG.helperPluginId;
+const HELPER_OWNER_AGENT_ID = PARTNER_CONFIG.helperOwnerAgentId;
+const LAUNCH_ORIGINS = new Set(PARTNER_CONFIG.launchOrigins || []);
+const OPTIONAL_MERCHANT_ORIGINS = PARTNER_CONFIG.optionalMerchantOrigins || [];
 const RUNNER_PROTOCOL = 'declarative-v1';
+const PLAN_SCHEMA = 'magic-city-browser-plan-v1';
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -58,14 +63,25 @@ function normalizeMissionAction(value = '') {
 }
 
 async function getConfig() {
-  return chrome.storage.local.get([
-    'baseUrl',
+  const config = await chrome.storage.local.get([
     'deviceToken',
+    'pairedControlPlaneOrigin',
     'holderPublicJwk',
     'holderPrivateJwk',
     'registered',
     'last'
   ]);
+  if (config.deviceToken && config.pairedControlPlaneOrigin !== CONTROL_PLANE_ORIGIN) {
+    await chrome.storage.local.remove([
+      'deviceToken',
+      'pairedControlPlaneOrigin',
+      'holderPublicJwk',
+      'holderPrivateJwk',
+      'registered'
+    ]);
+    return { last: 'Control-plane origin changed. Pair this build again.' };
+  }
+  return config;
 }
 
 async function saveConfig(patch) {
@@ -74,8 +90,7 @@ async function saveConfig(patch) {
 }
 
 async function api(path, { method = 'GET', body = null, bearer = '' } = {}) {
-  const config = await getConfig();
-  const response = await fetch(`${String(config.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '')}${path}`, {
+  const response = await fetch(`${CONTROL_PLANE_ORIGIN}${path}`, {
     method,
     headers: {
       ...(body ? { 'content-type': 'application/json' } : {}),
@@ -124,8 +139,7 @@ async function proofOfPossession(session, { action, targetUrl }) {
   };
 }
 
-async function pair({ baseUrl, code }) {
-  await saveConfig({ baseUrl: String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '') });
+async function pair({ code }) {
   const data = await api('/native-runner/extension/pairing/claim', {
     method: 'POST',
     body: {
@@ -134,7 +148,13 @@ async function pair({ baseUrl, code }) {
       extensionId: chrome.runtime.id
     }
   });
-  await saveConfig({ deviceToken: data.setup?.deviceToken || '', registered: false, last: 'paired' });
+  await chrome.storage.local.remove(['deviceToken', 'holderPublicJwk', 'holderPrivateJwk', 'registered']);
+  await saveConfig({
+    deviceToken: data.setup?.deviceToken || '',
+    pairedControlPlaneOrigin: CONTROL_PLANE_ORIGIN,
+    registered: false,
+    last: 'paired'
+  });
   await ensureHolderKey();
   return data;
 }
@@ -156,17 +176,18 @@ async function register() {
       capabilities: [
         'browser-worker-agent',
         'browser.extension_dom_executor',
-        'browser.prepare_cart',
-        'browser.open_checkout',
+        'browser.open',
+        'browser.read_public_page',
         'browser.pause_before_sensitive_action'
       ],
-      tools: ['browser.inspect', 'browser.prepare_cart', 'browser.open_checkout'],
+      tools: ['browser.open', 'browser.inspect'],
       privacyModes: ['local-private', 'private'],
       metadata: {
         customHelperAgent: true,
         executionBackend: 'extension_dom_executor',
         runnerProtocol: RUNNER_PROTOCOL,
         proofMode: 'mission-bound-auth-holder-signatures',
+        starterCapability: 'read_only_page_summary',
         browserPermissionOrigins: origins,
         extensionId: chrome.runtime.id,
         version: chrome.runtime.getManifest().version
@@ -231,17 +252,25 @@ async function fulfill(session, report) {
           mode: 'custom_extension_dom_executor',
           browserRuntimeMode: 'user_chrome_extension',
           finalUrl: report.finalUrl || '',
-          stopState: report.stopState || 'starter_not_implemented',
-          stopEvidence: report.stopEvidence || 'Starter helper registered and proved the mission boundary. Add local browser execution logic here.',
+          stopState: report.stopState || 'unsupported_plan_action',
+          stopEvidence: report.stopEvidence || 'The read-only example completed its supported action and stopped before unsupported browser work.',
+          pageSummary: report.pageSummary || null,
           rawCredentialsAccess: false,
           rawPaymentAccess: false,
           finalApprovalRequired: true
         },
         needsUserHandoff: true,
-        finalUrl: report.finalUrl || ''
+        finalUrl: report.finalUrl || '',
+        artifacts: report.pageSummary
+          ? [{
+              name: 'read-only-page-summary.json',
+              mimeType: 'application/json',
+              content: JSON.stringify(report.pageSummary, null, 2)
+            }]
+          : []
       },
       handoff: { label: 'Review in browser', url: report.finalUrl || '' },
-      notes: report.stopEvidence || 'Custom helper starter stopped before browser execution.',
+      notes: report.stopEvidence || 'Read-only custom helper example completed and stopped before unsupported actions.',
       fundingDisposition: report.status === 'fulfilled' ? 'hold' : 'release',
       proofRef: `${HELPER_PLUGIN_ID}:${session.id}:local-browser`,
       planHash: session.extensionMissionPlan?.planHash
@@ -249,34 +278,98 @@ async function fulfill(session, report) {
   });
 }
 
+function originForUrl(value = '') {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return '';
+  }
+}
+
+function permissionPatternForOrigin(origin = '') {
+  return `${String(origin).replace(/\/+$/, '')}/*`;
+}
+
+function validateReadOnlyAction(session, action) {
+  const plan = session.extensionMissionPlan || {};
+  if (plan.schema !== PLAN_SCHEMA || plan.protocol !== RUNNER_PROTOCOL) throw new Error('unsupported_mission_plan');
+  if (!plan.planHash || !action?.id) throw new Error('mission_plan_binding_missing');
+  const missionAction = normalizeMissionAction(action.missionAction || action.action || action.type);
+  if (missionAction !== 'browser_open') throw new Error(`unsupported_plan_action:${missionAction}`);
+  const targetUrl = String(action.url || plan.startUrl || '').trim();
+  const origin = originForUrl(targetUrl);
+  if (!origin || !LAUNCH_ORIGINS.has(origin)) throw new Error('mission_origin_not_allowed');
+  if (domainForUrl(targetUrl) !== String(plan.targetDomain || '').replace(/^www\./, '')) {
+    throw new Error('mission_plan_domain_mismatch');
+  }
+  return { targetUrl, origin, missionAction };
+}
+
+async function readPublicPage(targetUrl, origin) {
+  const permission = permissionPatternForOrigin(origin);
+  const granted = await chrome.permissions.contains({ origins: [permission] });
+  if (!granted) throw new Error(`site_permission_required:${origin}`);
+  const tab = await chrome.tabs.create({ url: targetUrl, active: true });
+  const tabId = tab.id;
+  if (!Number.isInteger(tabId)) throw new Error('browser_tab_not_created');
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const current = await chrome.tabs.get(tabId).catch(() => null);
+    if (!current) throw new Error('browser_tab_closed');
+    if (current.status === 'complete') break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const compact = (value, limit) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+      return {
+        url: location.href,
+        title: compact(document.title, 160),
+        heading: compact(document.querySelector('h1')?.textContent, 240),
+        description: compact(document.querySelector('meta[name="description"]')?.content, 320)
+      };
+    }
+  });
+  const summary = result?.result || {};
+  if (originForUrl(summary.url) !== origin) throw new Error('browser_redirect_origin_not_allowed');
+  return { tabId, summary };
+}
+
 async function executeSession(rawSession) {
   const session = await claim(rawSession);
   const plan = session.extensionMissionPlan || {};
-  const firstAction = Array.isArray(plan.actions) ? plan.actions[0] : null;
-  const targetUrl = firstAction?.url || plan.startUrl || rawSession.selections?.targetUrl || '';
+  const actionIndex = Number(session.extensionMissionPlanState?.nextActionIndex || 0);
+  const firstAction = Array.isArray(plan.actions) ? plan.actions[actionIndex] : null;
+  const { targetUrl, origin, missionAction } = validateReadOnlyAction(session, firstAction);
+  const { tabId, summary } = await readPublicPage(targetUrl, origin);
   const browser = {
-    url: targetUrl,
-    title: 'Custom helper starter',
-    browserState: 'inspect',
+    url: summary.url,
+    title: summary.title,
+    tabId,
+    browserState: 'read_only_page_summarized',
+    pageSummary: summary,
     checkoutSummary: {
-      stage: 'starter',
-      nextAction: 'Add local browser execution logic'
+      stage: 'read_only_demo',
+      nextAction: 'Implement the next signed action in partner code'
     }
   };
   const afterCheckpoint = await checkpoint(session, {
-    label: 'Custom helper starter checkpoint',
-    state: 'needs_implementation',
-    missionAction: firstAction?.missionAction || 'read_public_page',
-    targetUrl,
+    label: 'Read approved page',
+    state: 'read_only_page_summarized',
+    missionAction,
+    targetUrl: summary.url,
     browser,
     planAction: firstAction
   });
   await fulfill(afterCheckpoint, {
     status: 'failed',
-    finalUrl: targetUrl,
-    stopState: 'starter_not_implemented'
+    finalUrl: summary.url,
+    stopState: 'unsupported_plan_action',
+    stopEvidence: 'The starter opened and summarized the approved page, then stopped before the next unsupported plan action.',
+    pageSummary: summary
   });
-  return { sessionId: session.id, status: 'starter_not_implemented' };
+  return { sessionId: session.id, status: 'read_only_demo_complete', pageSummary: summary };
 }
 
 async function pollOnce() {
@@ -295,10 +388,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message?.type === 'HELPER_PAIR') return { ok: true, data: await pair(message) };
     if (message?.type === 'HELPER_REGISTER') return { ok: true, data: await register() };
+    if (message?.type === 'HELPER_GRANT_SITE_ACCESS') {
+      if (!OPTIONAL_MERCHANT_ORIGINS.length) return { ok: true, granted: true, origins: [] };
+      const granted = await chrome.permissions.request({ origins: OPTIONAL_MERCHANT_ORIGINS });
+      return { ok: granted, granted, origins: OPTIONAL_MERCHANT_ORIGINS };
+    }
     if (message?.type === 'HELPER_POLL_ONCE') return { ok: true, result: await pollOnce() };
     if (message?.type === 'HELPER_STATUS') {
       const config = await getConfig();
-      return { ok: true, paired: Boolean(config.deviceToken), registered: Boolean(config.registered), last: config.last || '' };
+      return {
+        ok: true,
+        paired: Boolean(config.deviceToken),
+        registered: Boolean(config.registered),
+        last: config.last || '',
+        controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
+        launchOrigins: Array.from(LAUNCH_ORIGINS),
+        extensionName: PARTNER_CONFIG.extensionName,
+        profile: PARTNER_CONFIG.profile
+      };
     }
     return { ok: false, error: 'unknown_message' };
   })()

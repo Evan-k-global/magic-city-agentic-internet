@@ -190,17 +190,27 @@
   }
 
   function canonicalProductTitle(value = '') {
-    return compactText(value, 500)
+    const title = compactText(value, 500)
       .replace(/\s*(?:\|\s*\.{0,3}\s*)?opens in (?:a )?new tab\s*$/i, '')
       .trim();
+    if (title.length < 24) return title;
+    const midpoint = Math.floor(title.length / 2);
+    for (let split = Math.max(12, midpoint - 2); split <= Math.min(title.length - 12, midpoint + 2); split += 1) {
+      const first = title.slice(0, split).trim();
+      const second = title.slice(split).trim();
+      if (first.length >= 12 && normalizeMatchText(first) === normalizeMatchText(second)) return first;
+    }
+    return title;
   }
 
   function productTitleFromRow(row, link = null) {
     const titleLink = link || row?.querySelector?.('a[href*="/dp/"], a[href*="/gp/product/"]') || null;
+    const rowTitle = row?.querySelector?.('.sc-product-title, [data-testid*="title" i], h2, h3') || null;
     const candidates = [
-      titleLink?.getAttribute?.('aria-label'),
       titleLink?.querySelector?.('.a-truncate-full')?.textContent,
-      row?.querySelector?.('.sc-product-title, [data-testid*="title" i], h2, h3')?.textContent,
+      rowTitle && rowTitle !== titleLink ? (rowTitle.innerText || rowTitle.textContent) : '',
+      titleLink?.innerText,
+      titleLink?.getAttribute?.('aria-label'),
       titleLink?.textContent
     ];
     return candidates.map(canonicalProductTitle).find(Boolean) || '';

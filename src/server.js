@@ -72,6 +72,7 @@ import {
   grantRewardCredits,
   debitUserAccount,
   lockUserCreditsForIntent,
+  restoreReleasedCreditsForIntent,
   settleLockedCredits,
   refundSettledCredits,
   releaseLockedCredits,
@@ -169,6 +170,11 @@ import {
   recordSantaClawzRuntimeRejection,
   clearSantaClawzRuntimeRejection
 } from './store.js';
+import {
+  assessStaleSantaClawzCreditRestore,
+  hasSantaClawzSubmissionEvidence,
+  isActiveCreditReservationSessionStatus
+} from './creditReservationLifecycle.js';
 import { computeLaneProfiles, computeReputation, getBondTier } from './reputation.js';
 import { verifyReceiptSignature } from './crypto.js';
 import { hashIdentifier, hashPrompt, sanitizeMetadata, sealPayload } from './privacy.js';
@@ -226,7 +232,7 @@ import {
 import { toUnits, fromUnits, CREDIT_SCALE } from './units.js';
 import { buildSeededAgents, executeProvider, executeProviderStream, getConfiguredProviders, rankAmazonCandidatesWithProvider } from './providers.js';
 import { buildAnchorPayload, compileArtifactProofProgram, generateArtifactProof, verifyArtifactProof } from './zekoProof.js';
-import { getAnchorConfig, getMbaRelayerReadiness, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
+import { getAnchorConfig, getMbaRelayerReadiness, getMissionAuthorizationRelayerReadiness, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
 import { canonicalValueToFieldDecimal } from './mba/canonicalField.js';
 import {
   createSantaClawzStatusRefreshCoordinator,
@@ -727,8 +733,16 @@ const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
 const FINAL_SUBMIT_CHAIN_GATE_ENABLED = String(
   process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_GATE_ENABLED || ''
 ).trim().toLowerCase() === 'true';
+const MISSION_AUTH_ANCHOR_ENABLED = FINAL_SUBMIT_CHAIN_GATE_ENABLED || String(
+  process.env.MAGIC_CITY_MISSION_AUTH_ANCHOR_ENABLED || ''
+).trim().toLowerCase() === 'true';
+const MISSION_AUTH_ANCHOR_RETRY_MS = Math.max(
+  5_000,
+  Number(process.env.MAGIC_CITY_MISSION_AUTH_ANCHOR_RETRY_MS || 30_000)
+);
 const MINA_FIELD_ORDER = '28948022309329048855892746252171976963363056481941647379679742748393362948097';
 const finalSubmitChainAuthorizationTasks = new Map();
+const finalSubmitChainAuthorizationRetryTimers = new Map();
 let zekoNetworkStatusCache = null;
 
 const SPREADSHEET_PRICING = {
@@ -2680,24 +2694,60 @@ function buildAutoSubmitMissionApprovalReceipt({ req, session = {}, selections =
 
 function finalSubmitChainAuthorizationForRunner(value = null) {
   if (!value || typeof value !== 'object') return null;
-  return {
+  const commitment = {
     schema: value.schema || null,
-    status: value.status || 'preparing',
-    network: value.network || null,
     sessionId: value.sessionId || null,
     planHash: value.planHash || null,
     actionId: value.actionId || null,
     approvalHash: value.approvalHash || null,
     expiresAt: value.expiresAt || null,
+    targetDomain: value.targetDomain || null
+  };
+  const expectedStatementHash = commitment.schema
+    ? canonicalValueToFieldDecimal(commitment, MINA_FIELD_ORDER)
+    : null;
+  return {
+    ...commitment,
+    status: value.status || 'preparing',
+    network: value.network || null,
+    policy: value.policy || 'asynchronous_fail_open',
+    statementHash: value.statementHash || null,
+    submissionId: value.submissionId || null,
     txHash: value.txHash || null,
     explorerUrl: value.explorerUrl || null,
+    registryMode: value.registryMode || null,
     registryAddress: value.registryAddress || null,
+    previousRegistryRoot: value.previousRegistryRoot || null,
+    registryRoot: value.registryRoot || null,
     registrySequence: value.registrySequence || null,
+    capabilityCommitment: value.capabilityCommitment || null,
+    approvalCommitment: value.approvalCommitment || null,
+    registryKey: value.registryKey || null,
+    payloadDigest: value.payloadDigest || null,
+    verificationKeyHash: value.verificationKeyHash || null,
     preparedAt: value.preparedAt || null,
+    lastAttemptAt: value.lastAttemptAt || null,
+    nextRetryAt: value.nextRetryAt || null,
+    attemptCount: Math.max(0, Number(value.attemptCount || 0)),
     settledAt: value.settledAt || null,
+    anchoredAfterApprovalExpiry: value.anchoredAfterApprovalExpiry === true,
+    anchoredAfterExecution: value.anchoredAfterExecution === true,
     bypassAllowed: value.bypassAllowed === true,
     bypassReason: value.bypassReason || null,
     gateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+    anchorEnabled: MISSION_AUTH_ANCHOR_ENABLED,
+    verification: {
+      commitmentMatches: Boolean(expectedStatementHash && value.statementHash === expectedStatementHash),
+      confirmedEvidenceComplete: value.status === 'anchored'
+        ? Boolean(
+            value.txHash
+            && value.registryAddress
+            && value.registrySequence
+            && value.approvalCommitment === value.statementHash
+            && (value.registryMode === 'mission_auth_registry' ? value.payloadDigest : value.registryRoot)
+          )
+        : null
+    },
     detail: value.detail || null
   };
 }
@@ -2720,6 +2770,7 @@ function buildFinalSubmitChainAuthorization(session = {}) {
   return {
     ...commitment,
     status: 'preparing',
+    policy: 'asynchronous_fail_open',
     network: getAnchorConfig().networkId,
     preparedAt: new Date().toISOString(),
     statementHash: canonicalValueToFieldDecimal(commitment, MINA_FIELD_ORDER),
@@ -2760,6 +2811,35 @@ function localFinalSubmitChainBypass(prepared, reason, detail) {
   });
 }
 
+function finalSubmitChainAuthorizationCanRetry(session = null) {
+  const authorization = session?.finalSubmitChainAuthorization || null;
+  if (!MISSION_AUTH_ANCHOR_ENABLED || !authorization) return false;
+  return ['preparing', 'unavailable'].includes(String(authorization.status || ''));
+}
+
+function scheduleFinalSubmitChainAuthorization(sessionId, delayMs = 0) {
+  if (!MISSION_AUTH_ANCHOR_ENABLED || !sessionId) return null;
+  if (finalSubmitChainAuthorizationRetryTimers.has(sessionId)) return null;
+  const timer = setTimeout(() => {
+    finalSubmitChainAuthorizationRetryTimers.delete(sessionId);
+    const session = getConnectorSession(sessionId);
+    if (session?.finalSubmitChainAuthorization?.status === 'anchored') return;
+    void beginFinalSubmitChainAuthorization(sessionId);
+  }, Math.max(0, Number(delayMs) || 0));
+  timer.unref?.();
+  finalSubmitChainAuthorizationRetryTimers.set(sessionId, timer);
+  return timer;
+}
+
+function recoverFinalSubmitChainAuthorizations() {
+  if (!MISSION_AUTH_ANCHOR_ENABLED) return;
+  for (const session of listConnectorSessions(200)) {
+    if (finalSubmitChainAuthorizationCanRetry(session)) {
+      scheduleFinalSubmitChainAuthorization(session.id, MISSION_AUTH_ANCHOR_RETRY_MS);
+    }
+  }
+}
+
 function setFinalSubmitChainAuthorization(sessionId, authorization, trace = null) {
   const session = getConnectorSession(sessionId);
   if (!session) return null;
@@ -2774,9 +2854,20 @@ function setFinalSubmitChainAuthorization(sessionId, authorization, trace = null
 function beginFinalSubmitChainAuthorization(sessionId) {
   const existing = finalSubmitChainAuthorizationTasks.get(sessionId);
   if (existing) return existing;
-  const prepared = buildFinalSubmitChainAuthorization(getConnectorSession(sessionId));
+  const session = getConnectorSession(sessionId);
+  const built = buildFinalSubmitChainAuthorization(session);
+  const current = session?.finalSubmitChainAuthorization || null;
+  const prepared = built
+    ? {
+        ...built,
+        preparedAt: current?.preparedAt || built.preparedAt,
+        attemptCount: Math.max(0, Number(current?.attemptCount || 0)) + 1,
+        lastAttemptAt: new Date().toISOString(),
+        nextRetryAt: null
+      }
+    : null;
   if (!prepared) return null;
-  if (!FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
+  if (!MISSION_AUTH_ANCHOR_ENABLED) {
     const bypass = localFinalSubmitChainBypass(
       prepared,
       'chain_gate_disabled',
@@ -2804,8 +2895,9 @@ function beginFinalSubmitChainAuthorization(sessionId) {
       // outage a cheap, explicit local bypass instead of an o1js compile.
       const networkStatus = await getZekoNetworkStatus();
       if (!networkStatus.available) {
+        const retryAt = new Date(Date.now() + MISSION_AUTH_ANCHOR_RETRY_MS).toISOString();
         const fallback = localFinalSubmitChainBypass(
-          prepared,
+          { ...prepared, nextRetryAt: retryAt },
           'zeko_sepolia_unavailable',
           'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
         );
@@ -2816,21 +2908,35 @@ function beginFinalSubmitChainAuthorization(sessionId) {
           state: 'final_submit_chain_bypassed',
           createdAt: new Date().toISOString()
         });
+        scheduleFinalSubmitChainAuthorization(sessionId, MISSION_AUTH_ANCHOR_RETRY_MS);
         return fallback;
       }
-      if (networkStatus.mbaRelayer?.ready !== true) {
-        const fallback = localFinalSubmitChainBypass(
-          prepared,
-          'zeko_mba_relayer_unavailable',
-          'The Zeko MBA relayer is not ready. Magic City will continue with the signed local one-order authorization.'
-        );
+      const authorizationRelayer = networkStatus.authorizationRelayer || networkStatus.mbaRelayer;
+      if (authorizationRelayer?.ready !== true) {
+        const chainUnavailable = authorizationRelayer?.status === 'unreachable'
+          || authorizationRelayer?.chain?.reachable === false;
+        const retryAt = new Date(Date.now() + MISSION_AUTH_ANCHOR_RETRY_MS).toISOString();
+        const fallback = chainUnavailable
+          ? localFinalSubmitChainBypass(
+              { ...prepared, nextRetryAt: retryAt },
+              'zeko_mba_relayer_unavailable',
+              'Zeko or its authorization relayer is temporarily unavailable. Shopping continues under the signed local one-order authorization.'
+            )
+          : finalSubmitChainAuthorizationForRunner({
+              ...prepared,
+              status: 'failed',
+              bypassAllowed: !FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+              bypassReason: !FINAL_SUBMIT_CHAIN_GATE_ENABLED ? 'local_authorization_active' : null,
+              detail: 'The Zeko authorization relayer is reachable but its registry state is not ready. Shopping continues under the signed local one-order authorization.'
+            });
         setFinalSubmitChainAuthorization(sessionId, fallback, {
           pluginId: RUNNER_EXTENSION_PLUGIN_ID,
-          label: 'Zeko MBA relayer unavailable',
+          label: chainUnavailable ? 'Zeko MBA relayer unavailable' : 'Zeko MBA relayer needs reconciliation',
           detail: fallback.detail,
-          state: 'final_submit_chain_bypassed',
+          state: chainUnavailable ? 'final_submit_chain_bypassed' : 'final_submit_chain_failed',
           createdAt: new Date().toISOString()
         });
+        if (chainUnavailable) scheduleFinalSubmitChainAuthorization(sessionId, MISSION_AUTH_ANCHOR_RETRY_MS);
         return fallback;
       }
       const anchor = await submitAnchorPayload({
@@ -2843,34 +2949,88 @@ function beginFinalSubmitChainAuthorization(sessionId) {
         missionBoundary: prepared.missionBoundary,
         publicInputs: prepared.publicInputs
       });
-      if (anchor?.mode !== 'relay' || !anchor?.txHash) {
+      if (anchor?.status === 'submission_unknown' || ['received', 'processing', 'pending'].includes(String(anchor?.status || ''))) {
+        const pending = finalSubmitChainAuthorizationForRunner({
+          ...prepared,
+          status: 'preparing',
+          submissionId: anchor?.submissionId || null,
+          txHash: anchor?.txHash || null,
+          nextRetryAt: new Date(Date.now() + MISSION_AUTH_ANCHOR_RETRY_MS).toISOString(),
+          detail: 'The Zeko authorization submission is pending reconciliation. Shopping continues under the signed local one-order authorization.'
+        });
+        setFinalSubmitChainAuthorization(sessionId, pending, {
+          pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+          label: 'Zeko authorization pending',
+          detail: pending.detail,
+          state: 'final_submit_chain_preparing',
+          createdAt: new Date().toISOString()
+        });
+        scheduleFinalSubmitChainAuthorization(sessionId, MISSION_AUTH_ANCHOR_RETRY_MS);
+        return pending;
+      }
+      if (anchor?.mode !== 'relay'
+        || anchor?.status !== 'submitted'
+        || !anchor?.txHash
+        || !anchor?.registryAddress
+        || !anchor?.registrySequence
+        || anchor?.approvalCommitment !== prepared.statementHash
+        || (anchor?.registryMode === 'mission_auth_registry' ? !anchor?.payloadDigest : !anchor?.registryRoot)) {
         const err = new Error('final_submit_chain_anchor_not_settled');
-        err.statusCode = 503;
+        err.statusCode = 409;
         throw err;
       }
+      const settledAt = new Date().toISOString();
+      const latestSession = getConnectorSession(sessionId) || session;
+      const approvalExpiresAtMs = Date.parse(String(prepared.expiresAt || ''));
+      const executionCompletedAtMs = Date.parse(String(
+        latestSession?.fulfilledAt
+        || latestSession?.completedAt
+        || latestSession?.executionCompletedAt
+        || ''
+      ));
+      const anchoredAfterApprovalExpiry = Number.isFinite(approvalExpiresAtMs)
+        && approvalExpiresAtMs <= Date.parse(settledAt);
+      const anchoredAfterExecution = Number.isFinite(executionCompletedAtMs)
+        && executionCompletedAtMs <= Date.parse(settledAt);
       const settled = finalSubmitChainAuthorizationForRunner({
         ...prepared,
         status: 'anchored',
         txHash: anchor.txHash || null,
+        submissionId: anchor.submissionId || null,
         explorerUrl: anchor.txHash ? zekoExplorerTxUrl(anchor.txHash) : null,
+        registryMode: anchor.registryMode || null,
         registryAddress: anchor.registryAddress || null,
+        previousRegistryRoot: anchor.previousRegistryRoot || null,
+        registryRoot: anchor.registryRoot || null,
         registrySequence: anchor.registrySequence || null,
-        settledAt: new Date().toISOString(),
-        detail: 'Zeko confirmed this exact one-order authorization.'
+        capabilityCommitment: anchor.capabilityCommitment || null,
+        approvalCommitment: anchor.approvalCommitment || null,
+        registryKey: anchor.registryKey || null,
+        payloadDigest: anchor.payloadDigest || null,
+        verificationKeyHash: anchor.verificationKeyHash || null,
+        settledAt,
+        anchoredAfterApprovalExpiry,
+        anchoredAfterExecution,
+        detail: anchoredAfterExecution
+          ? 'Zeko confirmed this historical one-order authorization after execution completed.'
+          : 'Zeko confirmed this exact one-order authorization.'
       });
       setFinalSubmitChainAuthorization(sessionId, settled, {
         pluginId: RUNNER_EXTENSION_PLUGIN_ID,
         label: 'Zeko authorization anchored',
-        detail: 'The signed final-submit authorization settled before checkout completed.',
+        detail: anchoredAfterExecution
+          ? 'The signed authorization was anchored after execution completed.'
+          : 'The signed authorization was anchored while execution continued.',
         state: 'final_submit_chain_anchored',
         createdAt: new Date().toISOString()
       });
       return settled;
     } catch (error) {
       const unavailable = chainAuthorizationUnavailable(error);
+      const retryAt = unavailable ? new Date(Date.now() + MISSION_AUTH_ANCHOR_RETRY_MS).toISOString() : null;
       const fallback = unavailable
         ? localFinalSubmitChainBypass(
-            prepared,
+            { ...prepared, nextRetryAt: retryAt },
             'zeko_sepolia_unavailable',
             'Zeko Sepolia is unavailable. Magic City will continue with the signed local one-order authorization.'
           )
@@ -2886,6 +3046,7 @@ function beginFinalSubmitChainAuthorization(sessionId) {
         state: unavailable ? 'final_submit_chain_bypassed' : 'final_submit_chain_failed',
         createdAt: new Date().toISOString()
       });
+      if (unavailable) scheduleFinalSubmitChainAuthorization(sessionId, MISSION_AUTH_ANCHOR_RETRY_MS);
       return fallback;
     } finally {
       finalSubmitChainAuthorizationTasks.delete(sessionId);
@@ -2915,12 +3076,17 @@ async function getZekoNetworkStatus({ force = false } = {}) {
     });
     const payload = await response.json();
     if (!response.ok || payload?.errors?.length || !payload?.data?.account?.publicKey) throw new Error('zeko_graphql_unavailable');
-    const mbaRelayer = await getMbaRelayerReadiness();
+    const [mbaRelayer, authorizationRelayer] = await Promise.all([
+      getMbaRelayerReadiness(),
+      getMissionAuthorizationRelayerReadiness()
+    ]);
     zekoNetworkStatusCache = {
       network: anchor.networkId,
       available: true,
       finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+      missionAuthorizationAnchoringEnabled: MISSION_AUTH_ANCHOR_ENABLED,
       mbaRelayer,
+      authorizationRelayer,
       checkedAt: new Date().toISOString()
     };
   } catch {
@@ -2928,7 +3094,9 @@ async function getZekoNetworkStatus({ force = false } = {}) {
       network: anchor.networkId,
       available: false,
       finalSubmitGateEnabled: FINAL_SUBMIT_CHAIN_GATE_ENABLED,
+      missionAuthorizationAnchoringEnabled: MISSION_AUTH_ANCHOR_ENABLED,
       mbaRelayer: await getMbaRelayerReadiness(),
+      authorizationRelayer: await getMissionAuthorizationRelayerReadiness(),
       checkedAt: new Date().toISOString(),
       warning: 'Zeko Sepolia is unavailable. Checkout will continue under the signed local authorization.'
     };
@@ -3962,6 +4130,7 @@ function buildMissionBoundaryTraceExport(req, session) {
     exportedAt: new Date().toISOString(),
     sessionId: session.id,
     mode: getMissionBoundaryMode(session),
+    authorizationAnchor: finalSubmitChainAuthorizationForRunner(session?.finalSubmitChainAuthorization),
     browserMissionProfile,
     retailCheckoutProfile,
     retailCheckoutProfileVerification,
@@ -7214,7 +7383,11 @@ function formatConnectorSessionForExtension(session = null) {
         }
       : null,
     missionBoundAuth: formatExtensionMissionCapability(session.missionBoundAuth),
-    finalSubmitChainAuthorization: finalSubmitChainAuthorizationForRunner(session.finalSubmitChainAuthorization),
+    // Background anchoring is evidence only. The extension receives this
+    // object solely when a signed policy requires a final-click chain check.
+    finalSubmitChainAuthorization: FINAL_SUBMIT_CHAIN_GATE_ENABLED
+      ? finalSubmitChainAuthorizationForRunner(session.finalSubmitChainAuthorization)
+      : null,
     missionBoundaryLatestHash: session.missionBoundaryLatestHash || null,
     missionBoundaryEventCount: Array.isArray(session.missionBoundaryTrace) ? session.missionBoundaryTrace.length : 0,
     executionLive: session.executionLive
@@ -8014,7 +8187,6 @@ function updateSessionTravelFromAgent(session, travel = {}, runtime = null, note
   }));
 }
 
-const ACTIVE_SESSION_LOCK_STATUSES = new Set(['queued', 'claimed', 'executing']);
 const STALE_LOCK_WINDOW_MS = 30 * 60 * 1000;
 const EXECUTION_WATCHDOG_RELEASABLE_SETTLEMENT_STATUSES = new Set([
   'pending_execution',
@@ -8034,7 +8206,7 @@ function listActiveAccountLocks(userHash) {
       const lock = getEscrowLock(session.id);
       const updatedAt = session.updatedAt || session.createdAt || null;
       const updatedMs = updatedAt ? Date.parse(updatedAt) : NaN;
-      const stale = !ACTIVE_SESSION_LOCK_STATUSES.has(String(session.status || '')) ||
+      const stale = !isActiveCreditReservationSessionStatus(session.status) ||
         (Number.isFinite(updatedMs) && Date.now() - updatedMs > STALE_LOCK_WINDOW_MS);
       return {
         sessionId: session.id,
@@ -8521,7 +8693,7 @@ async function sweepConnectorSessionExecutionWatchdog({ sessionId = null } = {})
     const activeSessions = candidates.filter((session) => (
       session
       && session.completionMode === 'agent_checkout'
-      && ACTIVE_SESSION_LOCK_STATUSES.has(String(session.status || '').trim().toLowerCase())
+      && isActiveCreditReservationSessionStatus(session.status)
     ));
     for (const session of activeSessions) {
       const timeoutMs = resolveConnectorSessionWatchdogTimeoutMs(session);
@@ -14856,6 +15028,28 @@ function materializeSantaClawzInlineArtifacts(sessionId, delivery = {}) {
   };
 }
 
+function restrictSantaClawzDeliveryToVerifiedOutputs(delivery = {}, verifiedReturn = null) {
+  if (!['authenticated_terminal_lifecycle', 'authenticated_pending_lifecycle'].includes(verifiedReturn?.mode)) {
+    return delivery;
+  }
+  const verifiedOutputs = Array.isArray(verifiedReturn.verifiedBuyerOutputs)
+    ? verifiedReturn.verifiedBuyerOutputs
+    : [];
+  const inlineOutputs = verifiedOutputs.flatMap((output) => [output.name, output.text]);
+  return {
+    ...delivery,
+    summary: verifiedOutputs.find((output) => /\.md$/i.test(output.name))?.text || delivery.summary || null,
+    inlineOutputs,
+    verification: {
+      source: 'santaclawz_authenticated_lifecycle',
+      requestId: verifiedReturn.requestId,
+      accessMode: verifiedReturn.accessMode,
+      partialDelivery: verifiedReturn.partialDelivery === true,
+      suppressedOutputs: verifiedReturn.suppressedBuyerOutputs || []
+    }
+  };
+}
+
 function santaClawzSourceDeliveryDigest(delivery = {}) {
   return semanticSantaClawzStatusDigest({
     summary: delivery?.summary || null,
@@ -14904,6 +15098,27 @@ async function fetchSantaClawzExecutionStateForDirectPayment(directPayment = {})
       url: endpoint
     };
   }
+}
+
+function resolveSantaClawzAuthenticatedStateUrl(directPayment = {}, submittedRequestId = '', source = getSantaClawzSourceStatus()) {
+  const candidates = [
+    directPayment?.response?.stateUrl,
+    directPayment?.response?.paidExecution?.stateUrl,
+    directPayment?.stateUrl,
+    directPayment?.executionState?.stateUrl
+  ].map((entry) => String(entry || '').trim()).filter(Boolean);
+  const authenticated = candidates.find((entry) => {
+    try {
+      return Boolean(new URL(buildSantaClawzEndpointUrl(entry, source)).searchParams.get('token'));
+    } catch {
+      return false;
+    }
+  });
+  if (authenticated) return authenticated;
+  if (candidates.length) return candidates[0];
+  return submittedRequestId
+    ? `${source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
+    : null;
 }
 
 function resolveSantaClawzExecutionRequestId(payload = {}, fallback = '') {
@@ -15197,7 +15412,9 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
     'protocol_fee_settled',
     'partially_settled'
   ].includes(String(paymentStatus));
-  const paymentAccepted = paymentAuthorized && !terminalFailure;
+  const authenticatedSettlementPending = returnValidation.mode === 'authenticated_pending_lifecycle'
+    && returnValidation.upstreamLifecycleVerified === true;
+  const paymentAccepted = (paymentAuthorized || authenticatedSettlementPending) && !terminalFailure;
   const protocolState = String(protocolLifecycle.protocolState || payload.protocolState || payload.executionState?.protocolState || '').toUpperCase();
   const paymentFinality = String(protocolLifecycle.paymentFinality || payload.paymentFinality || payload.executionState?.paymentFinality || '').toLowerCase();
   const settlementSettled = [
@@ -15285,7 +15502,10 @@ function summarizeSantaClawzPaidExecution(responseOk, payload = {}, {
           schemaVersion: 'santaclawz-return/1.0',
           requestId: returnValidation.requestId,
           packageHash: returnValidation.packageHash,
-          deliverableCount: returnValidation.deliverables.length
+          deliverableCount: returnValidation.deliverables.length,
+          verificationSource: returnValidation.mode === 'authenticated_terminal_lifecycle'
+            ? 'santaclawz_authenticated_lifecycle'
+            : 'magic_city_verified_return'
         }
       : {
           ok: false,
@@ -15512,9 +15732,11 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
       status.payload,
       sessionForStatus.santaclawzDirectPayment?.submittedRequestId || ''
     );
-    const stateUrl = submittedRequestId
-      ? `${source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
-      : sessionForStatus.santaclawzDirectPayment?.stateUrl || null;
+    const stateUrl = resolveSantaClawzAuthenticatedStateUrl(
+      sessionForStatus.santaclawzDirectPayment || {},
+      submittedRequestId,
+      source
+    );
     const executionState = await fetchSantaClawzExecutionStateForDirectPayment({
       ...(sessionForStatus.santaclawzDirectPayment || {}),
       submittedRequestId,
@@ -15523,17 +15745,19 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
     const combinedStatusPayload = executionState?.payload
       ? sanitizeMetadata({ ...status.payload, executionState: executionState.payload })
       : status.payload;
-    const delivery = materializeChangedSantaClawzDelivery(
-      sessionForStatus.id,
-      existingDelivery,
-      extractSantaClawzDelivery(combinedStatusPayload)
-    );
     const expectedReturnRequestId = sessionForStatus.santaclawzDirectPayment?.submittedRequestId || '';
     const verifiedReturn = await verifySantaClawzCompletedReturn(combinedStatusPayload, {
       expectedRequestId: expectedReturnRequestId,
-      expectedInputDigestSha256: sessionForStatus.santaclawzDirectPayment?.hireRequestDigestSha256 || '',
       resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
     });
+    const delivery = materializeChangedSantaClawzDelivery(
+      sessionForStatus.id,
+      existingDelivery,
+      restrictSantaClawzDeliveryToVerifiedOutputs(
+        extractSantaClawzDelivery(combinedStatusPayload),
+        verifiedReturn
+      )
+    );
     const summary = summarizeSantaClawzPaidExecution(status.ok || Boolean(executionState?.ok), combinedStatusPayload, {
       expectedRequestId: expectedReturnRequestId,
       verifiedReturn
@@ -15587,46 +15811,12 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
       }
     }
     if (creditBackedPayment && summary.completed && sessionForStatus.creditReservation?.status === 'released') {
-      const recoveryIntentId = `santaclawz-reconcile:${sessionForStatus.id}:${digest}`;
-      const requiredCredits = Number(
-        sessionForStatus.creditReservation?.requiredCredits
-        || sessionForStatus.paymentOrchestration?.requiredCredits
-        || 0
-      );
-      const lock = lockUserCreditsForIntent(
-        sessionForStatus.requesterHash,
-        toUnits(requiredCredits),
-        recoveryIntentId,
-        { eventKey: `santaclawz-reconcile-lock:${digest}`, sourceSessionId: sessionForStatus.id }
-      );
-      const settled = lock.ok
-        ? settleLockedCredits(
-            recoveryIntentId,
-            `santaclawz:${externalSantaClawzAgentId(nextDirectPayment.agentId || sessionForStatus.preferredExecutionAgentId || '')}`,
-            PROTOCOL_FEE_BPS
-          )
-        : { ok: false, reason: lock.reason };
-      if (settled.ok) {
-        sessionPatch.creditReservation = {
-          ...(sessionForStatus.creditReservation || {}),
-          status: 'settled',
-          settledAt: settled.lock.updatedAt,
-          settlementMode: 'late_x402_reconciliation',
-          recoveryIntentId,
-          revenueCapturedCredits: fromUnits(settled.lock.platformCaptured || 0),
-          burnedCredits: fromUnits(settled.lock.creditsBurned || 0),
-          platformTreasury: formatPlatformTreasuryForApi(settled.treasury),
-          account: formatUserAccountForApi(settled.account),
-          holdReason: null
-        };
-      } else {
-        sessionPatch.creditReservation = {
-          ...(sessionForStatus.creditReservation || {}),
-          status: 'reconciliation_required',
-          reconciliationReason: settled.reason || 'late_x402_credit_reconciliation_failed',
-          recoveryIntentId
-        };
-      }
+      sessionPatch.creditReservation = {
+        ...(sessionForStatus.creditReservation || {}),
+        status: 'released',
+        settlementMode: sessionForStatus.creditReservation?.settlementMode || 'completed_after_refund_no_recharge',
+        holdReason: null
+      };
     }
     if (creditBackedPayment && summary.terminalFailure) {
       sessionPatch.creditReservation = returnSantaClawzCreditsForTerminalFailure(
@@ -15656,6 +15846,7 @@ async function refreshSantaClawzPaidSessionStatusOnce(session) {
       });
       Object.assign(sessionPatch, {
         status: 'fulfilled',
+        failedAt: null,
         fulfilledAt: new Date().toISOString(),
         fulfillment: {
           status: 'fulfilled',
@@ -17376,24 +17567,27 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const submittedRequestId = resolveSantaClawzExecutionRequestId(submit.payload);
-      const stateUrl = submittedRequestId
-        ? `${submit.source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
-        : null;
+      const stateUrl = resolveSantaClawzAuthenticatedStateUrl({
+        ...directPayment,
+        response: submit.payload
+      }, submittedRequestId, submit.source);
       const executionState = stateUrl
         ? await fetchSantaClawzExecutionStateForDirectPayment({ ...directPayment, stateUrl, submittedRequestId })
         : null;
       const combinedSubmitPayload = executionState?.payload
         ? sanitizeMetadata({ ...submit.payload, executionState: executionState.payload })
         : submit.payload;
-      const delivery = materializeSantaClawzInlineArtifacts(
-        sessionForSubmit.id,
-        extractSantaClawzDelivery(combinedSubmitPayload)
-      );
       const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
-        expectedInputDigestSha256: hireRequestDigestSha256,
         resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
       });
+      const delivery = materializeSantaClawzInlineArtifacts(
+        sessionForSubmit.id,
+        restrictSantaClawzDeliveryToVerifiedOutputs(
+          extractSantaClawzDelivery(combinedSubmitPayload),
+          verifiedReturn
+        )
+      );
       const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
         verifiedReturn
@@ -17731,24 +17925,27 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const submittedRequestId = resolveSantaClawzExecutionRequestId(submit.payload);
-      const stateUrl = submittedRequestId
-        ? `${submit.source.apiBase}/api/executions/${encodeURIComponent(submittedRequestId)}/state`
-        : null;
+      const stateUrl = resolveSantaClawzAuthenticatedStateUrl({
+        ...directPayment,
+        response: submit.payload
+      }, submittedRequestId, submit.source);
       const executionState = stateUrl
         ? await fetchSantaClawzExecutionStateForDirectPayment({ ...directPayment, stateUrl, submittedRequestId })
         : null;
       const combinedSubmitPayload = executionState?.payload
         ? sanitizeMetadata({ ...submit.payload, executionState: executionState.payload })
         : submit.payload;
-      const delivery = materializeSantaClawzInlineArtifacts(
-        sessionForDirectSubmit.id,
-        extractSantaClawzDelivery(combinedSubmitPayload)
-      );
       const verifiedReturn = await verifySantaClawzCompletedReturn(combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
-        expectedInputDigestSha256: hireRequestDigestSha256,
         resolveArtifactBytes: resolveSantaClawzReturnArtifactBytes
       });
+      const delivery = materializeSantaClawzInlineArtifacts(
+        sessionForDirectSubmit.id,
+        restrictSantaClawzDeliveryToVerifiedOutputs(
+          extractSantaClawzDelivery(combinedSubmitPayload),
+          verifiedReturn
+        )
+      );
       const summary = summarizeSantaClawzPaidExecution(submit.ok || Boolean(executionState?.ok), combinedSubmitPayload, {
         expectedRequestId: submittedRequestId || '',
         verifiedReturn
@@ -19706,6 +19903,25 @@ const server = http.createServer(async (req, res) => {
         const userHash = hashIdentifier(requesterId);
         const amountUnits = toUnits(paymentOrchestration.requiredCredits);
         const existingLock = getEscrowLock(sessionId);
+        const creditBackedSantaClawz = directSantaClawzX402Payment && !santaclawzDirectWalletPayment;
+        if (creditBackedSantaClawz && existingLock?.status === 'released' && hasSantaClawzSubmissionEvidence(session)) {
+          const paymentDigest = String(session.santaclawzDirectPayment?.paymentPayloadDigestSha256 || '').trim();
+          if (!paymentDigest) {
+            return sendJson(res, 409, {
+              error: 'santaclawz_submission_reconciliation_required',
+              message: 'This session already records a SantaClawz submission. Reconcile that payment before restoring credits.',
+              session
+            });
+          }
+          const refreshed = await refreshSantaClawzPaidSessionStatus(session, { force: true });
+          return sendJson(res, 200, {
+            started: true,
+            alreadySubmitted: true,
+            reconciliationOnly: true,
+            session: refreshed.session || session,
+            ...(refreshed.error ? { statusWarning: refreshed.error.message || 'santaclawz_status_unavailable' } : {})
+          });
+        }
         if (
           existingLock?.status === 'locked' &&
           existingLock.userHash === userHash &&
@@ -19725,10 +19941,22 @@ const server = http.createServer(async (req, res) => {
           if (existingLock?.status === 'locked') {
             releaseLockedCredits(sessionId, 'session_repriced');
           }
-          const lockResult = lockUserCreditsForIntent(userHash, amountUnits, sessionId);
+          const restoreAssessment = assessStaleSantaClawzCreditRestore({
+            session,
+            lock: existingLock,
+            requesterHash: userHash,
+            amountUnits,
+            creditBacked: creditBackedSantaClawz
+          });
+          const lockResult = restoreAssessment.ok
+            ? restoreReleasedCreditsForIntent(userHash, amountUnits, sessionId)
+            : lockUserCreditsForIntent(userHash, amountUnits, sessionId);
           if (!lockResult.ok) {
             return sendJson(res, 409, {
-              error: 'insufficient_credits',
+              error: lockResult.reason || 'credit_reservation_failed',
+              message: lockResult.reason === 'insufficient_credits'
+                ? 'Not enough Magic City credits are available for this run.'
+                : 'The existing credit reservation cannot be reused for this session.',
               requiredCredits: paymentOrchestration.requiredCredits,
               creditValueUsd: 1 / CREDITS_PER_USD,
               shortfallCredits: Math.max(0, Number(paymentOrchestration.requiredCredits || 0) - fromUnits(lockResult.account?.available || 0)),
@@ -19744,6 +19972,10 @@ const server = http.createServer(async (req, res) => {
             requiredCredits: paymentOrchestration.requiredCredits,
             amountUnits,
             reservedAt: lockResult.lock.createdAt,
+            ...(lockResult.restored ? {
+              restoredAt: lockResult.lock.restoredAt,
+              restorationReason: lockResult.lock.restoredFromReason
+            } : {}),
             account: formatUserAccountForApi(lockResult.account)
           };
         }
@@ -19952,8 +20184,10 @@ const server = http.createServer(async (req, res) => {
       // Do not hold the browser launch on an on-chain transaction. The runner
       // receives this same session field at each signed checkpoint and checks
       // it only at the one irreversible final-submit action.
-      if (freshAutoSubmitAuthorized && FINAL_SUBMIT_CHAIN_GATE_ENABLED) {
-        void beginFinalSubmitChainAuthorization(sessionId);
+      if (freshAutoSubmitAuthorized && MISSION_AUTH_ANCHOR_ENABLED) {
+        // Schedule after this request can flush its durable response. Zeko and
+        // relayer latency must never sit on the browser-launch critical path.
+        scheduleFinalSubmitChainAuthorization(sessionId, 0);
       }
 	      if (completionMode === 'agent_checkout') {
 	        const kind = String(session.handoffData?.kind || '').trim();
@@ -26621,6 +26855,7 @@ if (artifactMigration.migrated) {
 server.listen(PORT, HOST, () => {
   const seededAgents = ensureDefaultAgents();
   console.log(`[agent-verification] listening on http://${HOST}:${PORT}`);
+  recoverFinalSubmitChainAuthorizations();
   if (MAGIC_CITY_SAFE_HTTP_STARTUP) {
     console.log('[agent-verification] safe HTTP startup enabled; background startup workers are deferred');
     if (AUTO_START_SANTACLAWZ_CACHE_REFRESHER) {

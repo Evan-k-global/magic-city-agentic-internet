@@ -1,0 +1,9 @@
+{
+  "controlPlaneOrigin": "https://magic-city.ai",
+  "launchOrigins": ["https://example.com"],
+  "helperPluginId": "acme-reading-helper",
+  "helperOwnerAgentId": "acme-reading-agent",
+  "extensionName": "Acme Magic City Helper",
+  "extensionDescription": "Read-only starter for mission-scoped Magic City browser execution.",
+  "optionalMerchantOrigins": ["https://example.com/*"]
+}

@@ -2731,6 +2731,54 @@ export function lockUserCreditsForIntent(userHash, amount, intentId, metadata = 
   return { ok: true, lock: state.escrowLocks[intentId], account: acct };
 }
 
+export function restoreReleasedCreditsForIntent(userHash, amount, intentId, expectedReason = 'stale_session_lock_released') {
+  const acct = ensureUserAccount(userHash);
+  const lock = state.escrowLocks[intentId];
+  const delta = Math.max(0, Math.trunc(Number(amount ?? 0)));
+  if (lock?.status === 'locked' && lock.userHash === userHash && Number(lock.amount || 0) === delta) {
+    return { ok: true, lock, account: acct, deduped: true };
+  }
+  if (!lock || lock.status !== 'released') {
+    return { ok: false, reason: 'released_lock_required', account: acct, lock: lock || null };
+  }
+  if (lock.reason !== expectedReason) {
+    return { ok: false, reason: 'release_reason_not_restorable', account: acct, lock };
+  }
+  if (lock.userHash !== userHash) {
+    return { ok: false, reason: 'credit_lock_requester_mismatch', account: acct, lock };
+  }
+  if (Number(lock.amount || 0) !== delta) {
+    return { ok: false, reason: 'credit_lock_amount_mismatch', account: acct, lock };
+  }
+  if (acct.available < delta) {
+    return { ok: false, reason: 'insufficient_credits', account: acct, lock };
+  }
+  const restoredAt = new Date().toISOString();
+  const releaseRevision = lock.updatedAt || restoredAt;
+  const lockCycle = Math.max(0, Math.trunc(Number(lock.lockCycle || 0))) + 1;
+  acct.available -= delta;
+  acct.locked += delta;
+  acct.updatedAt = restoredAt;
+  lock.status = 'locked';
+  lock.lockCycle = lockCycle;
+  lock.restoredAt = restoredAt;
+  lock.restoredFromReason = expectedReason;
+  lock.reason = null;
+  lock.updatedAt = restoredAt;
+  appendLedger({
+    type: 'lock',
+    userHash,
+    intentId,
+    amount: delta,
+    source: 'restore_released_credit_lock',
+    eventKey: `restore_lock:${intentId}:${releaseRevision}`,
+    lockCycle,
+    restoredFromReason: expectedReason
+  });
+  persistState();
+  return { ok: true, lock, account: acct, restored: true };
+}
+
 export function settleLockedCredits(intentId, providerAgentId, feeBps = 500, settlement = null) {
   const lock = state.escrowLocks[intentId];
   if (!lock || lock.status !== 'locked') {
@@ -2738,6 +2786,7 @@ export function settleLockedCredits(intentId, providerAgentId, feeBps = 500, set
   }
   const acct = ensureUserAccount(lock.userHash);
   const treasury = ensurePlatformTreasury();
+  const lockCycle = Math.max(0, Math.trunc(Number(lock.lockCycle || 0)));
   const settlementConfig = settlement && typeof settlement === 'object' ? settlement : {};
   const merchantPayable = Math.max(0, Math.min(
     lock.amount,
@@ -2779,7 +2828,8 @@ export function settleLockedCredits(intentId, providerAgentId, feeBps = 500, set
     userHash: lock.userHash,
     intentId,
     amount: lock.amount,
-    eventKey: `settle:${intentId}`,
+    eventKey: lockCycle > 0 ? `settle:${intentId}:${lockCycle}` : `settle:${intentId}`,
+    lockCycle,
     providerAgentId,
     providerAmount: 0,
     protocolFee: 0,
@@ -2810,6 +2860,7 @@ export function refundSettledCredits(intentId, reason = 'settlement_reversed') {
 
   const acct = ensureUserAccount(lock.userHash);
   const treasury = ensurePlatformTreasury();
+  const lockCycle = Math.max(0, Math.trunc(Number(lock.lockCycle || 0)));
   const refundedAt = new Date().toISOString();
   const platformCaptured = Math.max(0, Math.trunc(Number(lock.platformCaptured ?? lock.amount)));
   const creditsBurned = Math.max(0, Math.trunc(Number(lock.creditsBurned ?? lock.amount)));
@@ -2839,7 +2890,8 @@ export function refundSettledCredits(intentId, reason = 'settlement_reversed') {
     intentId,
     amount: lock.amount,
     reason,
-    eventKey: `settlement-refund:${intentId}`,
+    eventKey: lockCycle > 0 ? `settlement-refund:${intentId}:${lockCycle}` : `settlement-refund:${intentId}`,
+    lockCycle,
     platformCaptured,
     creditsBurned,
     merchantPayable,
@@ -2855,6 +2907,7 @@ export function releaseLockedCredits(intentId, reason = 'intent_unroutable') {
     return { ok: false, reason: 'lock_not_found_or_not_locked' };
   }
   const acct = ensureUserAccount(lock.userHash);
+  const lockCycle = Math.max(0, Math.trunc(Number(lock.lockCycle || 0)));
   acct.available += lock.amount;
   acct.locked = Math.max(0, acct.locked - lock.amount);
   acct.updatedAt = new Date().toISOString();
@@ -2862,7 +2915,15 @@ export function releaseLockedCredits(intentId, reason = 'intent_unroutable') {
   lock.status = 'released';
   lock.reason = reason;
   lock.updatedAt = new Date().toISOString();
-  appendLedger({ type: 'release', userHash: lock.userHash, intentId, amount: lock.amount, reason, eventKey: `release:${intentId}` });
+  appendLedger({
+    type: 'release',
+    userHash: lock.userHash,
+    intentId,
+    amount: lock.amount,
+    reason,
+    eventKey: lockCycle > 0 ? `release:${intentId}:${lockCycle}` : `release:${intentId}`,
+    lockCycle
+  });
   persistState();
   return { ok: true, lock, account: acct };
 }

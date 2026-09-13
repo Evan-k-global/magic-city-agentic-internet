@@ -205,6 +205,64 @@ function copyTestExtension(directory, externalOrigin = '', options = {}) {
       ].join('\n')
     ));
   }
+  if (options.forceFastPathPostClickTimeout === true) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const functionMarker = 'async function amazonSearchCardAddToCart(tabId, action = {}) {\n';
+    if (!background.includes(functionMarker)) fail('test_extension_force_fast_path_timeout_marker_missing');
+    const injectedBranch = [
+      functionMarker.trimEnd(),
+      '  if (!globalThis.__magicCityTestFastPathTimedOutOnce) {',
+      '    globalThis.__magicCityTestFastPathTimedOutOnce = true;',
+      '    const testResult = await withTimeout(',
+      '      () => chrome.scripting.executeScript({',
+      '        target: { tabId },',
+      '        injectImmediately: true,',
+      '        func: async () => {',
+      "          document.querySelector('#timeout-search-add')?.click();",
+      '          await new Promise((resolve) => setTimeout(resolve, 300));',
+      '          return { completed: true };',
+      '        }',
+      '      }),',
+      '      80,',
+      "      'amazon_search_card_fast_path_timeout'",
+      '    ).catch((error) => ({',
+      '      completed: false,',
+      '      browserActionIndeterminate: true,',
+      "      reason: error?.message || String(error) || 'Amazon search-card fast path failed before returning a result.'",
+      '    }));',
+      '    if (Array.isArray(testResult)) return testResult[0]?.result || null;',
+      "    return testResult && typeof testResult === 'object' ? testResult : null;",
+      '  }'
+    ].join('\n');
+    fs.writeFileSync(backgroundPath, background.replace(functionMarker, `${injectedBranch}\n`));
+  }
+  if (options.failFirstPlanStepInjection === true) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const injectionMarker = '  await withTimeout(\n    () => chrome.scripting.executeScript({\n      target: { tabId },\n      files: [EXECUTOR_FILE],';
+    if (!background.includes(injectionMarker)) fail('test_extension_plan_step_injection_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      injectionMarker,
+      [
+        "  if (command?.type === 'MAGIC_CITY_EXECUTE_PLAN_STEP' && !globalThis.__magicCityTestPlanStepInjectionFailedOnce) {",
+        '    globalThis.__magicCityTestPlanStepInjectionFailedOnce = true;',
+        "    throw new Error('browser_script_injection_timeout');",
+        '  }',
+        injectionMarker
+      ].join('\n')
+    ));
+  }
+  if (options.disableSearchFastPath === true) {
+    const backgroundPath = path.join(destination, 'background-v0.2.js');
+    const background = fs.readFileSync(backgroundPath, 'utf8');
+    const fastPathMarker = '    if (amazonFastPathAllowed && searchSurfaceAllowed) {';
+    if (!background.includes(fastPathMarker)) fail('test_extension_disable_fast_path_marker_missing');
+    fs.writeFileSync(backgroundPath, background.replace(
+      fastPathMarker,
+      '    if (false && amazonFastPathAllowed && searchSurfaceAllowed) {'
+    ));
+  }
   return destination;
 }
 
@@ -240,6 +298,29 @@ function runtimeMessageWithTimeout(page, message, timeoutMs = 3_000) {
 }
 
 function storefront(pathname, searchParams = new URLSearchParams()) {
+  if (pathname === '/selection-timeout-search') {
+    return [
+      '<main><h1>Results for test gadget</h1>',
+      '<div data-component-type="s-search-result" data-asin="TIMEOUT-ASIN">',
+      '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+      '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span><span>FREE shipping</span>',
+      '<button id="timeout-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); document.querySelector(\'#nav-cart-count\').textContent=\'1\'">Add to cart</button>',
+      '</div>',
+      '<a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/selection-recovery-search') {
+    return [
+      '<main><h1>Results for test gadget</h1>',
+      '<div data-component-type="s-search-result" data-asin="RECOVERY-ASIN">',
+      '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+      '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span>',
+      '<button id="recovery-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); location.href=\'/post-add-confirmation\'">Add to cart</button>',
+      '</div><a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/signed-out-search') {
     return [
       '<main>',
@@ -503,6 +584,18 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '</main>'
     ].join('');
   }
+  if (pathname === '/cart-duplicated-title') {
+    const title = 'Nature Valley Granola Bar, Oats and Honey, 1.5 oz';
+    return [
+      '<main><h1>Your cart</h1>',
+      '<div id="activeCartViewForm">',
+      '<div class="sc-list-item" data-asin="NATURE-VALLEY-OATS-HONEY">',
+      `<a href="/dp/NATURE-VALLEY-OATS-HONEY"><span>${title}</span><span aria-hidden="true">${title}</span></a>`,
+      '<p>$2.97</p><label>Quantity: <select name="quantity"><option selected>1</option></select></label><button data-action="delete">Delete</button>',
+      '</div></div><p>Subtotal (1 item): $2.97</p>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/cart' || pathname === '/gp/cart/view.html') {
     if (searchParams.get('brand') === 'nature-valley-valid') brandCartItem = 'nature-valley-valid';
     if (searchParams.get('late') === 'paid') {
@@ -670,7 +763,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<label><input type="radio" name="delivery" /> Try Prime FREE one-day trial</label></div></div>',
       `<input aria-label="Billing street address" value="${confirmedPendingOrder ? '99 Billing Plaza' : '1 Wrong Billing Way'}" />`,
       `<input aria-label="Billing ZIP code" value="${confirmedPendingOrder ? '10001' : '99999'}" />`,
-      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
+      `<div id="amazon-final-order-wrapper" role="button"><span class="a-button-text">Place your order</span><input id="submitOrderButtonId" type="submit" onclick="sessionStorage.setItem('magic-city-native-final-click', String(Number(sessionStorage.getItem('magic-city-native-final-click') || 0) + 1)); ${checkoutFixture.pendingOrderContinuation ? "location.href='/checkout/duplicateOrder?pipelineType=Chewbacca&cartItemCount=1'" : "document.querySelector('#order-result').textContent='Order placed'; return false"}" /></div>`,
       `<p id="order-result">${confirmedPendingOrder ? 'Order placed' : ''}</p>`,
       confirmedPendingOrder ? '<script>document.querySelector(\'[aria-label="Street address"]\').value="1 Magic City Way"; document.querySelector(\'[aria-label="City"]\').value="San Francisco"; document.querySelector(\'[aria-label="State"]\').value="CA"; document.querySelector(\'[aria-label="ZIP code"]\').value="94107"; document.querySelector(\'#new-address-form\').hidden=true; document.querySelector(\'#address-options\').hidden=true; document.querySelector(\'#payment-options\').hidden=true;</script>' : '',
       '</main>'
@@ -748,6 +841,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
         ? 'Nature Valley Sweet & Salty Almond Granola Bars, 6 ct, 7.2 oz'
         : pendingVariant === 'almond-pack-mismatch'
           ? 'Nature Valley Sweet & Salty Almond Granola Bars, 12 ct, 14.4 oz'
+        : pendingVariant === 'single-oats'
+          ? 'Nature Valley Granola Bar, Oats and Honey, 1.5 oz'
       : liveSparseDuplicateOrder
         ? 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz'
         : 'Test Gadget';
@@ -877,6 +972,22 @@ async function main() {
       const origin = `https://${req.headers.host}`;
       const url = new URL(req.url || '/', origin);
       if (!url.pathname.startsWith('/connectors/') && !url.pathname.startsWith('/plugins/') && !url.pathname.startsWith('/native-runner/')) {
+        if (url.pathname === '/slow-loading-search') {
+          res.writeHead(200, { 'content-type': 'text/html' });
+          res.write([
+            '<!doctype html><title>Slow Test Store</title><main><h1>Results for test gadget</h1>',
+            '<div data-component-type="s-search-result" data-asin="SLOW-ASIN">',
+            '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+            '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span>',
+            '<button id="slow-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); location.href=\'/post-add-confirmation\'">Add to cart</button>',
+            '</div><a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a></main>'
+          ].join(''));
+          const finish = setTimeout(() => {
+            if (!res.writableEnded) res.end('<!-- delayed resources finished -->');
+          }, 12_000);
+          req.on('close', () => clearTimeout(finish));
+          return;
+        }
         if (url.pathname === '/search' && slowInitialSearchResponse) {
           slowInitialSearchResponse = false;
           await new Promise((resolve) => setTimeout(resolve, 3_300));
@@ -1104,7 +1215,10 @@ async function main() {
       // Test the actual MV3/browser boundary with a short copied lease rather
       // than exporting production internals or waiting forty-five seconds.
       finalSubmitLeaseMs: /^final-submit-lease-(?:renewal|expiry|lost-checkpoint)$/.test(smokeMode) ? 1_000 : null,
-      finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null
+      finalSubmitDelayMs: smokeMode === 'final-submit-lease-expiry' ? 1_250 : null,
+      forceFastPathPostClickTimeout: smokeMode === 'selection-fast-path-timeout',
+      failFirstPlanStepInjection: smokeMode === 'selection-injection-recovery',
+      disableSearchFastPath: smokeMode === 'selection-injection-recovery'
     });
     const profileDir = path.join(tmpDir, 'profile');
     const launchOptions = {
@@ -1158,6 +1272,186 @@ async function main() {
       throw error;
     });
     console.log(`native-runner browser smoke paired (${smokeMode})`);
+    const prepareSelectionOnlySession = async (pathname) => {
+      checkpoints.length = 0;
+      fulfillment = null;
+      transientRunnerStatusFailures = 0;
+      slowInitialSearchResponse = false;
+      const sessionId = `browser-smoke-${smokeMode}-session`;
+      const targetUrl = `${baseUrl}${pathname}`;
+      const generatedPlan = buildExtensionPlan({
+        id: sessionId,
+        handoffData: { kind: 'browser' },
+        selections: {
+          targetUrl,
+          goal: 'buy test gadget',
+          budget: '$4',
+          finalApprovalPolicy: 'auto_submit_after_verified_checkout'
+        },
+        extensionCheckoutProfileEnabled: false,
+        extensionPrimeRequired: true
+      });
+      const selectAction = generatedPlan.actions.find((action) => action.type === 'select_candidate');
+      if (!selectAction) fail('browser_extension_selection_focus_action_missing');
+      const selectionPlan = rehashExtensionPlan({ ...generatedPlan, actions: [selectAction] });
+      session = {
+        ...session,
+        id: sessionId,
+        status: 'queued',
+        claimedByPluginId: null,
+        fulfillment: null,
+        extensionCheckoutProfileEnabled: false,
+        missionBoundAuth: {
+          ...session.missionBoundAuth,
+          capabilityId: `browser-smoke-${smokeMode}-capability`,
+          subject: { sessionId },
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString()
+        },
+        extensionMissionPlan: selectionPlan,
+        extensionMissionPlanState: { planHash: selectionPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+        missionBoundaryLatestHash: null,
+        missionBoundaryEventCount: 0
+      };
+      const merchantPage = await context.newPage();
+      if (pathname === '/slow-loading-search') {
+        await merchantPage.goto(targetUrl, { waitUntil: 'commit' });
+        await merchantPage.locator('#slow-search-add').waitFor({ state: 'visible', timeout: 3_000 });
+      } else {
+        await merchantPage.goto(targetUrl);
+      }
+      const merchantTab = await worker.evaluate(async (url) => {
+        const tabs = await chrome.tabs.query({});
+        return tabs.find((candidate) => candidate.url === url) || null;
+      }, merchantPage.url());
+      if (!merchantTab?.id) fail(`browser_extension_selection_focus_tab_missing:${merchantPage.url()}`);
+      await worker.evaluate(async ({ sessionId: focusedSessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [focusedSessionId]: tabId }
+        });
+      }, { sessionId, tabId: merchantTab.id });
+      return { merchantPage, merchantTab, selectionPlan };
+    };
+    const runSelectionFocus = async (dispatchNonce) => {
+      const wakePage = await context.newPage();
+      await wakePage.goto(`${baseUrl}/external-wake`);
+      const startedAt = Date.now();
+      const result = await withTimeout(wakePage.evaluate(({ extensionId: targetExtensionId, sessionId, nonce }) => new Promise((resolve) => {
+        const progress = [];
+        const port = chrome.runtime.connect(targetExtensionId, { name: 'magic-city-active-run-v1' });
+        port.onMessage.addListener((payload) => {
+          if (payload?.type === 'RUNNER_PROGRESS') progress.push(payload);
+          if (payload?.type === 'RUNNER_RESULT') resolve({ payload, progress });
+        });
+        port.onDisconnect.addListener(() => resolve({ disconnected: true, progress }));
+        port.postMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: nonce
+        });
+      }), { extensionId, sessionId: session.id, nonce: dispatchNonce }), 12_000, 'browser_extension_selection_focus_wake_timeout');
+      await wakePage.close();
+      return { ...result, durationMs: Date.now() - startedAt };
+    };
+    if (smokeMode === 'selection-injection-recovery') {
+      const { merchantPage } = await prepareSelectionOnlySession('/selection-recovery-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-injection-recovery');
+      const selectionCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+        && checkpoint.planActionStatus !== 'waiting');
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-click-count') || '0'));
+      const sawReconnectingRunner = (wake.progress || []).some((entry) => entry?.activeRun?.progressState === 'reconnecting_control_plane');
+      const runnerState = await worker.evaluate(() => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun']));
+      if (!selectionCheckpoint
+        || !selectionCheckpoint.verifiedMilestones?.includes('candidate_selected')
+        || clickCount !== 1
+        || !sawReconnectingRunner
+        || wake.durationMs >= 8_000
+        || runnerState.lastExecution?.status === 'wake_failed') {
+        fail(`browser_extension_selection_injection_recovery_failed:${JSON.stringify({
+          selectionCheckpoint,
+          clickCount,
+          sawReconnectingRunner,
+          durationMs: wake.durationMs,
+          runnerState,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('A select-match executor injection timeout reconnects inline and clicks once', {
+        durationMs: wake.durationMs,
+        clickCount
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner selection injection recovery smoke passed');
+      return;
+    }
+    if (smokeMode === 'selection-delayed-page-load') {
+      const { merchantPage } = await prepareSelectionOnlySession('/slow-loading-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-delayed-page-load');
+      const selectionCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+        && checkpoint.planActionStatus !== 'waiting');
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-click-count') || '0'));
+      const runnerState = await worker.evaluate(() => chrome.storage.local.get(['lastError', 'lastExecution']));
+      if (!selectionCheckpoint
+        || clickCount !== 1
+        || wake.durationMs >= 8_000
+        || /browser_script_injection_timeout/.test(String(runnerState.lastError || ''))) {
+        fail(`browser_extension_selection_delayed_page_load_failed:${JSON.stringify({
+          selectionCheckpoint,
+          clickCount,
+          durationMs: wake.durationMs,
+          runnerState,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Selection installs before document_idle on a still-loading page', {
+        durationMs: wake.durationMs,
+        clickCount
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner delayed-page selection smoke passed');
+      return;
+    }
+    if (smokeMode === 'selection-fast-path-timeout') {
+      const { merchantPage } = await prepareSelectionOnlySession('/selection-timeout-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-fast-path-timeout');
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-click-count') || '0'));
+      const selectionCheckpoints = checkpoints.filter((checkpoint) => checkpoint.planActionId === 'select-match');
+      const outcomeUnknownCheckpoints = selectionCheckpoints.filter((checkpoint) => (
+        checkpoint.state === 'browser_action_outcome_unknown'
+      ));
+      const runnerState = await worker.evaluate(() => chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun']));
+      const stopState = fulfillment?.result?.browserExecution?.stopState || '';
+      if (clickCount !== 1
+        || stopState !== 'browser_action_outcome_unknown'
+        || outcomeUnknownCheckpoints.length !== 1
+        || outcomeUnknownCheckpoints[0]?.planActionStatus !== 'waiting'
+        || selectionCheckpoints.some((checkpoint) => checkpoint.planActionStatus !== 'waiting')
+        || selectionCheckpoints.some((checkpoint) => checkpoint.planActionStatus === 'skipped')
+        || runnerState.lastExecution?.status === 'wake_failed'
+        || runnerState.activeRun) {
+        fail(`browser_extension_selection_fast_path_timeout_handling_failed:${JSON.stringify({
+          clickCount,
+          stopState,
+          selectionCheckpoints,
+          outcomeUnknownCheckpoints,
+          runnerState,
+          fulfillment,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('A lost fast-path response stops without repeating an uncertain cart click', {
+        clickCount,
+        checkpointStatus: selectionCheckpoints[0].planActionStatus,
+        stopState
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner selection fast-path timeout smoke passed');
+      return;
+    }
     const verifyAmazonNavFlyout = async () => {
       const page = await context.newPage();
       await page.goto(`${baseUrl}/cart-preview-start`);
@@ -1524,9 +1818,40 @@ async function main() {
         || session.status !== 'queued') {
         fail(`browser_extension_claim_rejection_state_not_durable:${JSON.stringify({ runnerState, checkpoints, session })}`);
       }
-      recordPurchaseScenario('Claim rejection is reported immediately without opening a browser action', {
+      rejectPrimaryClaimError = 'extension_run_dispatch_required';
+      const directWakeResult = await popup.evaluate((sessionId) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+          type: 'RUN_PENDING_SESSIONS',
+          sessionId,
+          extensionDispatchNonce: 'rejected-direct-dispatch'
+        }, resolve);
+      }), session.id);
+      if (!directWakeResult?.ok
+        || directWakeResult.result?.requestedSessionFound !== false
+        || directWakeResult.result?.executed?.[0]?.status !== 'claim_failed'
+        || directWakeResult.result?.executed?.[0]?.error !== rejectPrimaryClaimError) {
+        fail(`browser_extension_direct_claim_rejection_not_reported:${JSON.stringify(directWakeResult)}`);
+      }
+      const directRunnerState = await popup.evaluate(() => new Promise((resolve) => {
+        chrome.storage.local.get(['lastError', 'lastExecution', 'activeSessionId', 'activeRun'], resolve);
+      }));
+      if (directRunnerState.lastError !== rejectPrimaryClaimError
+        || directRunnerState.lastExecution?.status !== 'claim_failed'
+        || directRunnerState.activeSessionId
+        || directRunnerState.activeRun
+        || checkpoints.length !== 0
+        || session.status !== 'queued') {
+        fail(`browser_extension_direct_claim_rejection_state_not_durable:${JSON.stringify({
+          runnerState: directRunnerState,
+          checkpoints,
+          session
+        })}`);
+      }
+      recordPurchaseScenario('Polling and direct-start claim rejections are reported before browser work', {
         status: runnerState.lastExecution.status,
-        error: runnerState.lastError
+        directStatus: directRunnerState.lastExecution.status,
+        error: runnerState.lastError,
+        directError: directRunnerState.lastError
       });
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner claim rejection smoke passed');
@@ -2523,7 +2848,14 @@ async function main() {
       pendingOrderConfirmationDelayMs: 65_000
     };
     dropPrepareCartCheckpointResponse = true;
-    dropCommittedCheckpointResponses = new Set(['open-site', 'inspect-review', 'confirm-pending-order']);
+    dropCommittedCheckpointResponses = new Set([
+      'open-site',
+      'inspect-cart',
+      'reconcile-payment-profile',
+      'inspect-review',
+      'submit-final-order',
+      'confirm-pending-order'
+    ]);
     committedCheckpointDroppedAtMs = new Map();
     committedCheckpointRecoveryPolledAtMs = new Map();
     await popup.close();
@@ -2656,7 +2988,14 @@ async function main() {
         sawReconnectingRunner
       })}`);
     }
-    const expandedRecoveryActions = ['open-site', 'inspect-review', 'confirm-pending-order'];
+    const expandedRecoveryActions = [
+      'open-site',
+      'inspect-cart',
+      'reconcile-payment-profile',
+      'inspect-review',
+      'submit-final-order',
+      'confirm-pending-order'
+    ];
     const expandedRecoveryTimings = Object.fromEntries(expandedRecoveryActions.map((actionId) => {
       const droppedAtMs = Number(committedCheckpointDroppedAtMs.get(actionId) || 0);
       const recoveryPolledAtMs = Number(committedCheckpointRecoveryPolledAtMs.get(actionId) || 0);
@@ -2690,18 +3029,23 @@ async function main() {
     });
     recordPurchaseScenario('Lost committed non-cart checkpoints resume inline without replay', expandedRecoveryTimings);
     const primaryStorePage = context.pages().find((page) => page.url().startsWith(baseUrl) && page.url().includes('/checkout'));
-    const pendingFinalClicks = primaryStorePage
-      ? await primaryStorePage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0))
-      : 0;
+    const finalClickEvidence = primaryStorePage
+      ? await primaryStorePage.evaluate(() => ({
+          firstSubmitClicks: Number(sessionStorage.getItem('magic-city-native-final-click') || 0),
+          pendingFinalClicks: Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0)
+        }))
+      : { firstSubmitClicks: 0, pendingFinalClicks: 0 };
+    const { firstSubmitClicks, pendingFinalClicks } = finalClickEvidence;
     const pendingDiagnosticPage = await context.newPage();
     await pendingDiagnosticPage.goto(`chrome-extension://${extensionId}/popup.html`);
     const pendingRunnerState = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
       chrome.storage.local.get(['activeRun'], resolve);
     }));
-    if (pendingFinalClicks !== 1
+    if (firstSubmitClicks !== 1
+      || pendingFinalClicks !== 1
       || !checkpoints.some((checkpoint) => checkpoint.planActionId === 'confirm-pending-order'
         && checkpoint.planActionStatus === 'completed')) {
-      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ pendingFinalClicks, activeRun: pendingRunnerState.activeRun, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus, url: checkpoint.browser?.url, reason: checkpoint.browser?.runnerStep?.reason, evidence: checkpoint.browser?.runnerStep?.pendingOrderMatchEvidence, cartItems: checkpoint.browser?.checkoutSummary?.cartItems })) })}`);
+      fail(`browser_extension_pending_order_continuation_not_exactly_once:${JSON.stringify({ firstSubmitClicks, pendingFinalClicks, activeRun: pendingRunnerState.activeRun, steps: checkpoints.map((checkpoint) => ({ id: checkpoint.planActionId, status: checkpoint.planActionStatus, url: checkpoint.browser?.url, reason: checkpoint.browser?.runnerStep?.reason, evidence: checkpoint.browser?.runnerStep?.pendingOrderMatchEvidence, cartItems: checkpoint.browser?.checkoutSummary?.cartItems })) })}`);
     }
     const durableDispatches = await pendingDiagnosticPage.evaluate(() => new Promise((resolve) => {
       chrome.storage.local.get(['finalOrderDispatches'], resolve);
@@ -2712,7 +3056,10 @@ async function main() {
       || !durableScopes.includes(`${plan.planHash}:confirm-pending-order`)) {
       fail(`browser_extension_pending_order_dispatch_receipts_not_both_durable:${JSON.stringify(durableDispatches)}`);
     }
-    recordPurchaseScenario('Sparse Amazon duplicateOrder page is continued exactly once', { pendingFinalClicks });
+    recordPurchaseScenario('Lost first-submit response advances to pending-order continuation without replay', {
+      firstSubmitClicks,
+      pendingFinalClicks
+    });
 
     const replayPage = await context.newPage();
     await replayPage.goto(`${baseUrl}/checkout/pending-order?stay=1`);
@@ -2809,6 +3156,55 @@ async function main() {
       clickCount: accessibilityPendingClickCount
     });
     await accessibilityPendingPage.close();
+
+    const duplicatedTitleCartPage = await context.newPage();
+    await duplicatedTitleCartPage.goto(`${baseUrl}/cart-duplicated-title`);
+    const duplicatedTitleCartTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), duplicatedTitleCartPage.url());
+    const duplicatedTitleCartState = await pendingDiagnosticPage.evaluate(async (tabId) => {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['executor.js'] });
+      return chrome.tabs.sendMessage(tabId, { type: 'MAGIC_CITY_BROWSER_STATE', checkoutProfile: {} });
+    }, duplicatedTitleCartTab.id);
+    const duplicatedTitleCartItem = duplicatedTitleCartState?.checkoutSummary?.cartItems?.[0] || null;
+    const cleanSingleBarTitle = 'Nature Valley Granola Bar, Oats and Honey, 1.5 oz';
+    if (duplicatedTitleCartItem?.asin !== 'NATURE-VALLEY-OATS-HONEY'
+      || duplicatedTitleCartItem?.title !== cleanSingleBarTitle
+      || Number(duplicatedTitleCartItem?.price) !== 2.97
+      || Number(duplicatedTitleCartItem?.quantity) !== 1) {
+      fail(`browser_extension_cart_duplicated_title_not_clean:${JSON.stringify(duplicatedTitleCartState)}`);
+    }
+    await duplicatedTitleCartPage.close();
+
+    const duplicatedTitlePendingPage = await context.newPage();
+    await duplicatedTitlePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&variant=single-oats&unitPrice=2.97`);
+    const duplicatedTitlePendingTab = await pendingDiagnosticPage.evaluate((url) => chrome.tabs.query({}).then((tabs) => tabs.find((tab) => tab.url === url) || null), duplicatedTitlePendingPage.url());
+    const duplicatedTitlePendingOutcome = await invokePendingAction(duplicatedTitlePendingTab.id, {
+      ...replayAction,
+      receiptScope: 'pending-duplicated-title-plan:confirm-pending-order',
+      sessionId: 'pending-duplicated-title-session',
+      planHash: 'pending-duplicated-title-plan',
+      boundCandidate: { asin: 'NATURE-VALLEY-OATS-HONEY', title: cleanSingleBarTitle, price: 2.97 },
+      boundCartEvidence: {
+        ...duplicatedTitleCartItem,
+        sessionId: 'pending-duplicated-title-session',
+        planHash: 'pending-duplicated-title-plan'
+      }
+    });
+    await duplicatedTitlePendingPage.waitForTimeout(300);
+    const duplicatedTitlePendingClickCount = await duplicatedTitlePendingPage.evaluate(() => Number(sessionStorage.getItem('magic-city-pending-final-clicks') || 0));
+    if (!duplicatedTitlePendingOutcome?.completed
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.identityMatches !== true
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.identitySource !== 'exact_title'
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.priceMatches !== true
+      || duplicatedTitlePendingOutcome?.pendingOrderMatchEvidence?.quantityMatches !== true
+      || duplicatedTitlePendingClickCount !== 1) {
+      fail(`browser_extension_duplicated_title_pending_order_not_confirmed:${JSON.stringify({ duplicatedTitlePendingOutcome, duplicatedTitlePendingClickCount })}`);
+    }
+    recordPurchaseScenario('Duplicated cart title is canonicalized before strict pending-order matching', {
+      title: duplicatedTitleCartItem.title,
+      identitySource: duplicatedTitlePendingOutcome.pendingOrderMatchEvidence.identitySource,
+      clickCount: duplicatedTitlePendingClickCount
+    });
+    await duplicatedTitlePendingPage.close();
 
     const livePendingPage = await context.newPage();
     await livePendingPage.goto(`${baseUrl}/checkout/duplicateOrder?stay=1&live=1&unitPrice=2.97`);

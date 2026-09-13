@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { validateSantaClawzCompletedReturn } from '../src/santaclawzReturnPolicy.js';
+import {
+  validateSantaClawzCompletedReturn,
+  verifySantaClawzCompletedReturn
+} from '../src/santaclawzReturnPolicy.js';
 
 const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+const restrictStart = server.indexOf('function restrictSantaClawzDeliveryToVerifiedOutputs(');
+const restrictEnd = server.indexOf('\nfunction santaClawzSourceDeliveryDigest', restrictStart);
+assert.ok(restrictStart >= 0 && restrictEnd > restrictStart, 'delivery restriction function not found');
+const restrictDelivery = new Function(
+  `${server.slice(restrictStart, restrictEnd)}\nreturn restrictSantaClawzDeliveryToVerifiedOutputs;`
+)();
 const start = server.indexOf('function summarizeSantaClawzPaidExecution(');
 const end = server.indexOf('\nfunction returnSantaClawzCreditsForTerminalFailure', start);
 assert.ok(start >= 0 && end > start, 'summary function not found');
@@ -128,6 +137,211 @@ const completed = summarize(true, {
 }, { expectedRequestId: 'hire_terminal_complete' });
 assert.equal(completed.completed, true);
 assert.equal(completed.returnValidation.ok, true);
+
+const directMarkdown = '# Audit summary\n\nComplete.\n';
+const directJson = `${JSON.stringify({ findings: Array.from({ length: 700 }, (_, index) => ({ id: index, detail: 'verified finding' })) })}\n`;
+assert.ok(directJson.length > 8000);
+const directOutputs = [
+  { name: 'code-audit-summary.md', contentType: 'text/markdown', text: directMarkdown },
+  { name: 'code-audit-result.json', contentType: 'application/json', text: directJson }
+].map((entry) => ({
+  ...entry,
+  sha256: crypto.createHash('sha256').update(entry.text).digest('hex')
+}));
+const directOutputHashes = Object.fromEntries(
+  directOutputs.map((entry) => [entry.name, entry.sha256]).sort(([left], [right]) => left.localeCompare(right))
+);
+const directOutputBundleDigestSha256 = crypto.createHash('sha256')
+  .update(JSON.stringify(directOutputHashes))
+  .digest('hex');
+const directPayload = {
+  executionState: {
+    requestId: 'hire_direct_complete',
+    stateAccess: { mode: 'payment_digest_recovery' },
+    currentPhase: 'return_verified',
+    protocolState: 'DELIVERED_SETTLED',
+    lifecycle: { proofStatus: 'return_validated' },
+    delivery: {
+      protocolVerifiedOutput: {
+        packageHash: 'c'.repeat(64),
+        inputDigestSha256: 'd'.repeat(64),
+        packageHashVerified: true,
+        buyerOutputBundleDigestSha256: directOutputBundleDigestSha256,
+        buyerVisibleOutputs: directOutputs
+      }
+    }
+  }
+};
+// Magic City hashes the complete paid request; SantaClawz hashes normalized audit input.
+// Authenticated state and request-id binding remain authoritative across those digest domains.
+const directVerified = await verifySantaClawzCompletedReturn(directPayload, {
+  expectedRequestId: 'hire_direct_complete'
+});
+assert.equal(directVerified.ok, true);
+assert.equal(directVerified.mode, 'authenticated_direct_output');
+assert.equal(directVerified.verifiedDeliverableCount, 2);
+assert.equal(JSON.parse(directOutputs[1].text).findings.length, 700);
+const directCompleted = summarize(true, {
+  ...directPayload,
+  paymentStatus: 'settled',
+  settlementStatus: 'settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: {
+    protocolState: 'DELIVERED_SETTLED',
+    paymentFinality: 'settled',
+    terminal: true,
+    sellerOutcome: 'completed'
+  }
+}, {
+  expectedRequestId: 'hire_direct_complete',
+  verifiedReturn: directVerified
+});
+assert.equal(directCompleted.completed, true);
+assert.equal(directCompleted.returnValidation.ok, true);
+
+const truncatedDirectPayload = structuredClone(directPayload);
+truncatedDirectPayload.executionState.delivery.protocolVerifiedOutput.buyerVisibleOutputs[1].text = directJson.slice(0, 8000);
+const truncatedDirect = await verifySantaClawzCompletedReturn(truncatedDirectPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(truncatedDirect.ok, false);
+assert.equal(truncatedDirect.reason, 'santaclawz_inline_output_hash_mismatch');
+
+const settledTruncatedPayload = structuredClone(truncatedDirectPayload);
+settledTruncatedPayload.executionState.protocolLifecycle = {
+  protocolState: 'DELIVERED_SETTLED',
+  paymentFinality: 'settled',
+  terminal: true,
+  sellerOutcome: 'completed'
+};
+settledTruncatedPayload.executionState.lifecycleChecks = { terminal: true };
+const settledTruncated = await verifySantaClawzCompletedReturn(settledTruncatedPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(settledTruncated.ok, true);
+assert.equal(settledTruncated.mode, 'authenticated_terminal_lifecycle');
+assert.equal(settledTruncated.upstreamLifecycleVerified, true);
+assert.equal(settledTruncated.partialDelivery, true);
+assert.deepEqual(settledTruncated.verifiedBuyerOutputs.map((entry) => entry.name), ['code-audit-summary.md']);
+assert.deepEqual(settledTruncated.suppressedBuyerOutputs, [{
+  name: 'code-audit-result.json',
+  reason: 'received_bytes_hash_mismatch'
+}]);
+
+const settledTruncatedSummary = summarize(true, {
+  ...settledTruncatedPayload,
+  paymentStatus: 'settled',
+  settlementStatus: 'settled',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: settledTruncatedPayload.executionState.protocolLifecycle
+}, {
+  expectedRequestId: 'hire_direct_complete',
+  verifiedReturn: settledTruncated
+});
+assert.equal(settledTruncatedSummary.completed, true);
+assert.equal(settledTruncatedSummary.returnValidation.verificationSource, 'santaclawz_authenticated_lifecycle');
+
+const awaitingSettlementPayload = structuredClone(truncatedDirectPayload);
+awaitingSettlementPayload.executionState.protocolLifecycle = {
+  protocolState: 'DELIVERED_AWAITING_SETTLEMENT',
+  paymentFinality: 'pending',
+  terminal: false,
+  sellerOutcome: 'completed'
+};
+awaitingSettlementPayload.executionState.lifecycleChecks = { terminal: false };
+const awaitingSettlement = await verifySantaClawzCompletedReturn(awaitingSettlementPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(awaitingSettlement.ok, false);
+assert.equal(awaitingSettlement.pending, true);
+assert.equal(awaitingSettlement.retryable, true);
+assert.equal(awaitingSettlement.reason, 'santaclawz_settlement_pending');
+assert.equal(awaitingSettlement.mode, 'authenticated_pending_lifecycle');
+assert.deepEqual(awaitingSettlement.verifiedBuyerOutputs.map((entry) => entry.name), ['code-audit-summary.md']);
+assert.deepEqual(awaitingSettlement.suppressedBuyerOutputs, [{
+  name: 'code-audit-result.json',
+  reason: 'received_bytes_hash_mismatch'
+}]);
+
+const awaitingSettlementSummary = summarize(true, {
+  ...awaitingSettlementPayload,
+  paymentStatus: 'unknown',
+  settlementStatus: 'pending',
+  relayDeliveryStatus: 'forwarded',
+  agentExecutionStatus: 'completed',
+  protocolLifecycle: awaitingSettlementPayload.executionState.protocolLifecycle
+}, {
+  expectedRequestId: 'hire_direct_complete',
+  verifiedReturn: awaitingSettlement
+});
+assert.equal(awaitingSettlementSummary.completed, false);
+assert.equal(awaitingSettlementSummary.paymentAccepted, true);
+assert.equal(awaitingSettlementSummary.terminalFailure, false);
+assert.equal(awaitingSettlementSummary.returnRejected, false);
+assert.equal(awaitingSettlementSummary.returnVerificationPending, true);
+assert.equal(awaitingSettlementSummary.safeToCreateFreshPayment, false);
+assert.equal(awaitingSettlementSummary.nextAction, 'retry_return_verification');
+const awaitingSettlementDelivery = restrictDelivery({
+  summary: null,
+  inlineOutputs: directOutputs.flatMap((output) => [output.name, output.text]),
+  artifacts: []
+}, awaitingSettlement);
+assert.equal(awaitingSettlementDelivery.summary, directMarkdown);
+assert.deepEqual(awaitingSettlementDelivery.inlineOutputs, [
+  'code-audit-summary.md',
+  directMarkdown
+]);
+assert.equal(awaitingSettlementDelivery.verification.partialDelivery, true);
+assert.deepEqual(awaitingSettlementDelivery.verification.suppressedOutputs, [{
+  name: 'code-audit-result.json',
+  reason: 'received_bytes_hash_mismatch'
+}]);
+
+const invalidAwaitingSettlementPayload = structuredClone(awaitingSettlementPayload);
+invalidAwaitingSettlementPayload.executionState.protocolLifecycle.terminal = true;
+const invalidAwaitingSettlement = await verifySantaClawzCompletedReturn(invalidAwaitingSettlementPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(invalidAwaitingSettlement.ok, false);
+assert.equal(invalidAwaitingSettlement.pending, undefined);
+
+const wrongSettledRequest = await verifySantaClawzCompletedReturn(settledTruncatedPayload, {
+  expectedRequestId: 'hire_different',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(wrongSettledRequest.ok, false);
+assert.equal(wrongSettledRequest.reason, 'santaclawz_return_request_mismatch');
+
+const wrongSettledInput = structuredClone(settledTruncatedPayload);
+wrongSettledInput.executionState.delivery.protocolVerifiedOutput.inputDigestSha256 = 'e'.repeat(64);
+const wrongSettledInputResult = await verifySantaClawzCompletedReturn(wrongSettledInput, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(wrongSettledInputResult.ok, false);
+assert.equal(wrongSettledInputResult.reason, 'santaclawz_return_input_mismatch');
+
+const missingJsonPayload = structuredClone(directPayload);
+missingJsonPayload.executionState.delivery.protocolVerifiedOutput.buyerVisibleOutputs.pop();
+const missingJsonDirect = await verifySantaClawzCompletedReturn(missingJsonPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'd'.repeat(64)
+});
+assert.equal(missingJsonDirect.ok, false);
+assert.equal(missingJsonDirect.reason, 'santaclawz_buyer_delivery_missing');
+
+const wrongInputDirect = await verifySantaClawzCompletedReturn(directPayload, {
+  expectedRequestId: 'hire_direct_complete',
+  expectedInputDigestSha256: 'e'.repeat(64)
+});
+assert.equal(wrongInputDirect.ok, false);
+assert.equal(wrongInputDirect.reason, 'santaclawz_return_input_mismatch');
 
 const pendingReturnVerification = summarize(true, {
   paymentStatus: 'seller_settled',

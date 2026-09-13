@@ -3129,11 +3129,6 @@
         font-size: 0;
       }
 
-      #sendBtn::after {
-        font-size: 26px;
-        transform: translate(-0.25px, 0.5px);
-      }
-
       .sidebar .row {
         gap: 6px;
       }

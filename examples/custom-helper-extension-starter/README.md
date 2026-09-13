@@ -1,8 +1,8 @@
 # Custom Magic City Helper Extension Starter
 
-This is a minimal Chrome MV3 starter for a custom Magic City browser helper.
-It is not Magic City's default runner. It shows the protocol pieces a custom
-helper must keep:
+This is a minimal Chrome MV3 starter for a partner-owned Magic City browser
+helper. It is not Magic City's default Runner. It shows the protocol pieces a
+custom helper must keep:
 
 - Pair with Magic City using a short-lived code.
 - Store only the device-scoped runner token locally.
@@ -11,25 +11,45 @@ helper must keep:
 - Poll explicitly dispatched sessions, claim with the session-scoped dispatch
   nonce, checkpoint, and fulfill Magic Internet Agent sessions.
 - Send redacted summaries and holder-signed boundary events.
+- Open and summarize one explicitly configured page without cart, checkout, or
+  payment authority.
 
 ## Setup
 
-1. Pick stable IDs in `background.js`:
+1. Copy `partner.config.example.json` outside the starter and set stable IDs,
+   the partner control plane, and exact page origins:
 
-   ```js
-   const HELPER_PLUGIN_ID = 'acme-shopping-helper';
-   const HELPER_OWNER_AGENT_ID = 'acme-shopping-agent';
+   ```json
+   {
+     "controlPlaneOrigin": "https://agents.example.com",
+     "launchOrigins": ["https://shop.example.com"],
+     "helperPluginId": "example-reading-helper",
+     "helperOwnerAgentId": "example-reading-agent",
+     "extensionName": "Example Browser Helper",
+     "extensionDescription": "Read-only mission helper for Example.",
+     "optionalMerchantOrigins": ["https://shop.example.com/*"]
+   }
    ```
 
-2. In Magic City, call:
+2. Build a separate release artifact:
+
+   ```bash
+   node scripts/package-custom-helper-extension.mjs \
+     --config path/to/partner.config.json \
+     --profile release
+   ```
+
+3. In the configured Magic City-compatible control plane, call:
 
    `POST /native-runner/helper/pairing/start`
 
    with those IDs. Paste the returned code into the extension popup.
 
-3. Load this folder as an unpacked Chrome extension during development.
+4. Load the generated `package/` directory as an unpacked Chrome extension
+   during development, or publish the generated ZIP through the partner's own
+   Chrome Web Store process.
 
-4. Register and poll from the popup.
+5. Pair, grant the configured page access, register, and poll from the popup.
 
 Polling is a recovery/discovery mechanism, not purchase authorization. A user
 must start the mission in Magic City first. The returned session contains a
@@ -46,10 +66,11 @@ npm run package:custom-helper-extension
 npm run smoke:custom-helper-extension-package
 ```
 
-The smoke test loads the packaged zip in Chromium, pairs it with a local Magic
-City server, starts a helper-assigned browser mission, and verifies a
-holder-signed checkpoint. Treat this as the minimum release gate before a Chrome
-Store upload.
+The smoke test builds a development-only package, loads that ZIP in Chromium,
+pairs it with a local Magic City server, opens an intercepted harmless partner
+page, and verifies the redacted page result plus holder-signed boundary events.
+The example then stops before the next unsupported shopping action. Treat this
+as a protocol and packaging gate, not proof of completed merchant automation.
 
 Release docs:
 
@@ -62,8 +83,10 @@ Release docs:
 - Bundle all code. Do not import remote JavaScript in a Chrome Web Store
   extension.
 - Keep host permissions optional and mission-scoped.
-- Replace `executeSession` with your own local browser logic, but keep the plan,
-  policy, checkpoint, and proof boundaries intact.
+- Extend `executeSession` with the partner's own browser logic, but keep the
+  plan, policy, checkpoint, and proof boundaries intact.
+- Advertise only implemented capabilities. The checked-in example intentionally
+  has no cart, checkout, credential, or purchase capability.
 - Test the final zip artifact before submission.
 
 ## License

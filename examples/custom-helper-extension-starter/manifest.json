@@ -1,14 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Custom Magic City Helper Starter",
-  "version": "0.2.1",
-  "description": "Starter helper for mission-scoped Magic City browser execution.",
-  "permissions": ["alarms", "storage", "tabs", "scripting"],
-  "optional_host_permissions": ["https://*/*"],
-  "host_permissions": [
-    "https://magic-city.ai/*",
-    "https://magic-city-staging.fly.dev/*"
-  ],
+  "name": "Acme Magic City Helper",
+  "version": "0.3.0",
+  "description": "Read-only starter for mission-scoped Magic City browser execution.",
+  "permissions": ["storage", "tabs", "scripting"],
+  "optional_host_permissions": ["https://example.com/*"],
+  "host_permissions": ["https://magic-city.ai/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

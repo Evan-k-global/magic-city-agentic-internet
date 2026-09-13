@@ -171,8 +171,14 @@ if (!/ACTIVE_MISSION_RECOVERY_DELAY_MS\s*=\s*30_000/.test(packagedBackground)
   fail('lean gateway must keep an active mission recoverable across MV3 suspension');
 }
 if (!/async function reconcileCommittedCheckpoint\(result\)/.test(packagedBackground)
-  || !/open-site\|\(\?:prepare\|open\)-cart\|continue-checkout\|inspect-review\|confirm-pending-order\|confirm-merchant-order/.test(packagedBackground)) {
+  || !/open-site\|\(\?:prepare\|open\|inspect\)-cart\|continue-checkout\|reconcile-payment-profile\|inspect-review\|submit-final-order\|confirm-pending-order\|confirm-merchant-order/.test(packagedBackground)
+  || !/MAX_INLINE_CHECKPOINT_RECONCILIATIONS\s*=\s*8/.test(packagedBackground)) {
   fail('committed checkout checkpoints must reconcile inline only for the reviewed action allowlist');
+}
+if (!/let finalSubmitAuthorityLease = normalizeFinalSubmitAuthorityLease/.test(packagedLegacyBackground)
+  || !/const leaseScopeChangedAfterCheckpoint =/.test(packagedLegacyBackground)
+  || !/recoverMissingFinalSubmitAuthorityLease\(session, plan, action\)/.test(packagedLegacyBackground)) {
+  fail('a recovered final-submit cursor must obtain authority scoped to its current signed action');
 }
 if (!/if \(hasConfirmedMerchantOrder\(report\)\) \{[\s\S]{0,240}return reportAndStop\(/.test(packagedLegacyBackground)) {
   fail('durably checkpointed merchant confirmation must terminate before later tab-dependent actions');
@@ -209,6 +215,25 @@ if (!/outcome\.alreadyInCart === true[\s\S]{0,500}amazon cart was already open/i
 if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackground)
   || !/const navigation = waitForTabNavigation\(tabId, beforeUrl, timeoutMs\);[\s\S]*const updatedTab = await withTimeout/.test(packagedLegacyBackground)) {
   fail('navigation readiness must be idempotent and subscribe before the tab update');
+}
+if ((packagedLegacyBackground.match(/injectImmediately:\s*true/g) || []).length < 2
+  || !/browser_\(\?:navigation\|script_injection\|content_script/.test(packagedLegacyBackground)) {
+  fail('page executor installation must start before document_idle and treat injection timeouts as recoverable browser interruptions');
+}
+if (!/browserActionIndeterminate:\s*true/.test(packagedLegacyBackground)
+  || !/if \(Array\.isArray\(result\)\) return result\[0\]\?\.result \|\| null;/.test(packagedLegacyBackground)
+  || !/planActionStatus:\s*'waiting'[\s\S]{0,900}browser_action_outcome_unknown/.test(packagedLegacyBackground)) {
+  fail('a timed-out selection fast path must preserve the unknown outcome and stop without advancing its milestone');
+}
+if (!/retryingRecoverableExecution/.test(packagedBackground)
+  || !/retrying_browser_step/.test(packagedBackground)
+  || !/\^select-match/.test(packagedBackground)) {
+  fail('select-match executor injection recovery must remain inside the active mission connection');
+}
+if (!/onClaimAccepted/.test(packagedLegacyBackground)
+  || !/directClaimAccepted/.test(packagedLegacyBackground)
+  || !/const status = claimRejected[\s\S]{0,180}\? 'claim_failed'/.test(packagedLegacyBackground)) {
+  fail('direct-start failures must distinguish a rejected claim from an accepted mission execution');
 }
 
   const smoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
@@ -257,6 +282,25 @@ if (!/navigationTargetMatches\(beforeUrl, targetUrl\)/.test(packagedLegacyBackgr
   });
   if (confirmedOrderTerminalSmoke.error) fail(confirmedOrderTerminalSmoke.error.message);
   if (confirmedOrderTerminalSmoke.status !== 0) fail(`confirmed order terminal smoke exited with ${confirmedOrderTerminalSmoke.status}`);
+
+  for (const focus of [
+    'claim-rejection',
+    'selection-injection-recovery',
+    'selection-delayed-page-load',
+    'selection-fast-path-timeout'
+  ]) {
+    const selectionSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
+      cwd: rootDir,
+      env: {
+        ...process.env,
+        MAGIC_CITY_EXTENSION_SOURCE: unpackedDir,
+        MAGIC_CITY_BROWSER_SMOKE_FOCUS: focus
+      },
+      stdio: 'inherit'
+    });
+    if (selectionSmoke.error) fail(selectionSmoke.error.message);
+    if (selectionSmoke.status !== 0) fail(`${focus} smoke exited with ${selectionSmoke.status}`);
+  }
 
   console.log(`native-runner extension release package smoke passed: ${zipPath}`);
 } finally {

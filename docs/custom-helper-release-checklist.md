@@ -9,7 +9,10 @@ mission-bound receipts Magic City can verify and anchor.
 Run these from the Magic City repo root:
 
 ```bash
-npm run package:custom-helper-extension
+node scripts/package-custom-helper-extension.mjs \
+  --config path/to/partner.config.json \
+  --profile release
+npm run test:custom-helper-extension-packaging
 npm run smoke:custom-helper-extension-package
 ```
 
@@ -25,10 +28,14 @@ emits a holder-signed checkpoint, and fulfills the session with a proof trail.
 - `permissions` are limited to `storage`, `tabs`, `scripting`, and any small
   extension-only utilities you truly need.
 - No `debugger`, `webRequest`, or `<all_urls>`.
-- Site access uses `optional_host_permissions`, preferably `https://*/*`, and is
-  requested only for the current mission domain.
-- Magic City API origins are the only required `host_permissions`.
+- Site access uses exact `optional_host_permissions` generated from the partner
+  config and is requested from the popup under a user gesture.
+- The configured control-plane origin is the only required `host_permissions`
+  entry.
 - No `http://localhost` or `http://127.0.0.1` permissions in the Web Store zip.
+- Development and release artifacts use separate output directories; never
+  submit a development-profile ZIP.
+- Rebuilding for another control-plane origin requires pairing that build again.
 - All JavaScript is bundled with the extension. No remote code, remote scripts,
   `eval`, `new Function`, or model-supplied JavaScript programs.
 
@@ -44,6 +51,8 @@ emits a holder-signed checkpoint, and fulfills the session with a proof trail.
   - `metadata.executionBackend: "extension_dom_executor"`
   - `metadata.runnerProtocol: "declarative-v1"`
   - `metadata.proofMode: "mission-bound-auth-holder-signatures"`
+- Advertise only action families the helper actually implements. The starter
+  advertises read-only open/inspect capabilities, not cart or checkout.
 - Poll sessions with the device token and extension headers:
   - `x-magic-city-runner-surface: chrome-extension`
   - `x-magic-city-runner-protocol: declarative-v1`

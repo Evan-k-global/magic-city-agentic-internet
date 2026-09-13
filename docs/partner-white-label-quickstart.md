@@ -11,15 +11,15 @@ will keep Magic City's control plane, mission authorization, policy checks and
 receipts.
 
 Start from `examples/custom-helper-extension-starter/`, which is separately
-licensed under Apache-2.0. Configure these constants and files:
+licensed under Apache-2.0. Copy its example build configuration and set:
 
 | Setting | Location | Partner value |
 | --- | --- | --- |
-| Control-plane URL | `DEFAULT_BASE_URL` in `background.js` and popup input | Partner or Magic City HTTPS origin |
-| Helper identity | `HELPER_PLUGIN_ID` and `HELPER_OWNER_AGENT_ID` | Stable, unique, non-reserved IDs |
-| Extension identity | `manifest.json` name, description and icons | Partner branding |
-| Control-plane access | `manifest.json` `host_permissions` | Exact partner HTTPS origin |
-| Merchant access | Optional host permissions requested at runtime | Only sites the user authorizes |
+| Control-plane URL | `controlPlaneOrigin` | Partner or Magic City HTTPS origin |
+| Helper identity | `helperPluginId`, `helperOwnerAgentId` | Stable, unique, non-reserved IDs |
+| Extension identity | `extensionName`, `extensionDescription` | Partner branding |
+| Approved page targets | `launchOrigins` | Exact origins this helper implementation accepts |
+| Page access | `optionalMerchantOrigins` | Matching exact patterns granted by the user |
 
 The existing handshake is:
 
@@ -36,21 +36,26 @@ The existing handshake is:
 6. The helper follows the signed declarative plan, emits holder-signed
    checkpoints and fulfills or pauses the existing session.
 
-The starter deliberately ends with `starter_not_implemented`. Replace only
-`executeSession()` with partner browser behavior. Keep the dispatch nonce,
-plan hash, ordered action IDs, holder signatures, cancellation checks,
-single-submit receipts and sensitive-data boundaries.
+The starter implements one harmless action: it opens the first signed
+`browser_open` action on an allow-listed origin and returns a compact page
+summary in a signed checkpoint. It then stops before the next unsupported
+shopping action. Extend only the local execution behavior while keeping the
+dispatch nonce, plan hash, ordered action IDs, holder signatures, cancellation
+checks, single-submit receipts and sensitive-data boundaries.
 
 Package and test the actual artifact:
 
 ```bash
-npm run package:custom-helper-extension
+node scripts/package-custom-helper-extension.mjs \
+  --config path/to/partner.config.json \
+  --profile release
+npm run test:custom-helper-extension-packaging
 npm run smoke:custom-helper-extension-package
 ```
 
-Passing this test proves pairing, explicit dispatch, claim, signed checkpoint
-and terminal handoff. It does not prove that custom merchant automation is
-complete.
+Passing these tests proves config isolation, pairing, explicit dispatch, claim,
+an actual allow-listed page read, signed result and terminal handoff. It does
+not prove that custom merchant automation is complete.
 
 ### Production Runner reference map
 
@@ -110,7 +115,10 @@ missing or contradictory.
 
 Use this when the partner needs its own domain, database, users, signing keys,
 branding and deployment. This is possible today, but it is an advanced source
-deployment rather than a one-command white-label product.
+deployment rather than a one-command white-label product. The partner website
+talks to its own authenticated backend/control plane, while its extension polls
+and executes sessions from that same origin. No dependency on the
+`magic-city.ai` hostname is required.
 
 Create new infrastructure and credentials. Never copy production users,
 database contents, pairing tokens, extension tokens or private keys.
@@ -176,6 +184,7 @@ does not extend to the rest of the repository.
 
 ## Related Documentation
 
+- `docs/custom-helper-partner-deployment.md`
 - `docs/bring-your-own-helper-agent.md`
 - `docs/custom-helper-hello-walkthrough.md`
 - `docs/custom-helper-release-checklist.md`
