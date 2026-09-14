@@ -57,8 +57,15 @@ if (!/export function selectAmazonSearchCard/.test(packagedAmazonSelection)
   || !/bestExact \? 'exact' : 'size_alternative'/.test(packagedAmazonSelection)
   || !/amazon_search_card_closest_size/.test(packagedAmazonSelection)
   || !/rawAction\.allowSizeSubstitution === true/.test(packagedAmazonSelection)
+  || !/requiresProductPageVerification: true/.test(packagedAmazonSelection)
+  || !/exact_product_page_verification/.test(packagedAmazonSelection)
   || !/requiresApproval: true/.test(packagedAmazonSelection)) {
   fail('Amazon selection must remain exact-first and bounded, with signed opt-in required for automatic closest-size fallbacks');
+}
+if (!/quickOutcome\.requiresProductPageVerification === true/.test(packagedLegacyBackground)
+  || !/summary\.productShippingKnown === true/.test(packagedLegacyBackground)
+  || !/selectionKind: 'no_verified_candidate'/.test(packagedLegacyBackground)) {
+  fail('Amazon selection must verify inconclusive matching offers on one product page before continuing');
 }
 if (!/export\s*\{[^}]*pollOnly/.test(packagedLegacyBackground)) {
   fail('legacy controller must expose pollOnly for the lean heartbeat');
@@ -132,6 +139,11 @@ if (!/runnerTiming:\s*\{[\s\S]{0,300}workerStartedAt:[\s\S]{0,300}checkpointRequ
 const packagedExecutorPath = path.join(unpackedDir, 'executor.js');
 if (!fs.existsSync(packagedExecutorPath)) fail('package is missing executor.js');
 const packagedExecutor = fs.readFileSync(packagedExecutorPath, 'utf8');
+if (!/function isAmazonPostAddCartConfirmationPath\(path = ''\)/.test(packagedExecutor)
+  || !/\/cart\\\/smart-wagon/.test(packagedExecutor)
+  || !/'post_add_confirmation'/.test(packagedExecutor)) {
+  fail('Amazon smart-wagon must remain a non-authoritative post-add confirmation surface');
+}
 if (!/function scheduleFinalOrderClick\(control\)/.test(packagedExecutor)
   || !/function currentBrowserActionReceipts\(\)/.test(packagedExecutor)
   || !/validatedLabel/.test(packagedExecutor)
@@ -141,6 +153,13 @@ if (!/function scheduleFinalOrderClick\(control\)/.test(packagedExecutor)
   || !/EXECUTOR_MESSAGE_LISTENER_KEY/.test(packagedExecutor)
   || !/function priorFinalOrderReceipt/.test(packagedExecutor)) {
   fail('final order dispatch must retain wrapper validation, durable receipts, and a single current executor listener');
+}
+if (!/function visibleProductPrice\(\)/.test(packagedExecutor)
+  || !/oneTime:/.test(packagedExecutor)
+  || !/subscription:/.test(packagedExecutor)
+  || !/visibleLegacyCorePrice/.test(packagedExecutor)
+  || !/if \(!visible\(container\) && !visibleLegacyCorePrice\(container\)\) return null/.test(packagedExecutor)) {
+  fail('product-page verification must bind the one-time price through a visible offer container');
 }
 if (!/function activeCartItemEvidence\(\)/.test(packagedExecutor)
   || !/function pendingOrderMatchEvidence\(action/.test(packagedExecutor)
@@ -298,7 +317,8 @@ if (!/onClaimAccepted/.test(packagedLegacyBackground)
     'claim-rejection',
     'selection-injection-recovery',
     'selection-delayed-page-load',
-    'selection-fast-path-timeout'
+    'selection-fast-path-timeout',
+    'selection-product-verification-failure'
   ]) {
     const selectionSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
       cwd: rootDir,

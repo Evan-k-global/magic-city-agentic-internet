@@ -1,8 +1,8 @@
 # Production Candidate Selection Replay
 
-Source SHA-256: `eb76ba2c2041b0dcf42c8ef47315a1f68ebd4a80f8ef1ed9d70b87899581a5f3`
+Source SHA-256: `85fea98ed275c038dd7975215a9336636d326ef52b1a10800826ad261637158e`
 
-Result: 43 exact, 38 review-only closest-size alternatives, 19 abstentions.
+Result: 43 exact, 34 review-only closest-size alternatives, 19 abstentions.
 
 | # | Request | Prior review | Candidate result | ASIN |
 |---:|---|---|---|---|
@@ -26,7 +26,7 @@ Result: 43 exact, 38 review-only closest-size alternatives, 19 abstentions.
 | 18 | Puffs Plus Lotion Facial Tissues, 8 family boxes | preserved_search_exact | exact | `B09YKRZR22` |
 | 19 | Clorox Disinfecting Wipes Crisp Lemon/Fresh, 3-pack, ~75 ct ea. | abstain | abstain | - |
 | 20 | Lysol Disinfectant Spray Crisp Linen, 2 × 19 oz | preserved_search_exact | exact | `B01DCG0GPC` |
-| 21 | Mr. Clean Magic Eraser Extra Durable, 10 ct | plausible_size_alternative | closest size (review) | `B0FX5MW275` |
+| 21 | Mr. Clean Magic Eraser Extra Durable, 10 ct | plausible_size_alternative | abstain | `B08QTXPR9G` |
 | 22 | Swiffer Sweeper Dry Cloth Refills, 52 ct | plausible_size_alternative | closest size (review) | `B00I7L6JC2` |
 | 23 | Swiffer WetJet Multi-Surface Pads, 24 ct | preserved_search_exact | exact | `B001F0RBT2` |
 | 24 | Windex Original Glass Cleaner, 2 × 26 oz | abstain | closest size (review) | `B0CF3BDBL2` |
@@ -41,7 +41,7 @@ Result: 43 exact, 38 review-only closest-size alternatives, 19 abstentions.
 | 33 | Reynolds Kitchens Parchment Paper, 90 sq ft | plausible_size_alternative | closest size (review) | `B07PFYT8MC` |
 | 34 | Dixie Ultra 10-inch Paper Plates, 44 ct | preserved_search_exact | exact | `B00J3IPS5W` |
 | 35 | Amazon Basics Everyday Paper Plates 8.5", 200 ct | abstain | abstain | - |
-| 36 | Glad Press'n Seal, 2 × 70 sq ft | plausible_size_alternative | closest size (review) | `B0009P684S` |
+| 36 | Glad Press'n Seal, 2 × 70 sq ft | plausible_size_alternative | abstain | `B0D14X35L9` |
 | 37 | Rubbermaid Brilliance Food Storage, 10-piece set | preserved_search_exact | exact | `B01JCNEIC6` |
 | 38 | Scotch-Brite Heavy Duty Scrub Sponges, 9 ct | preserved_search_exact | exact | `B0043P0E2M` |
 | 39 | OXO Good Grips POP Container, 2.8 qt | abstain | abstain | - |
@@ -78,7 +78,7 @@ Result: 43 exact, 38 review-only closest-size alternatives, 19 abstentions.
 | 70 | Oreo Original Cookies, family size ~18 oz | abstain | abstain | - |
 | 71 | Nature Valley Crunchy Oats 'n Honey Bars, 24 two-bar packs | abstain | abstain | - |
 | 72 | KIND Dark Chocolate Nuts & Sea Salt, 12 bars | preserved_search_exact | exact | `B007PE7ANY` |
-| 73 | CLIF Bar Chocolate Chip, 12 bars | plausible_size_alternative | closest size (review) | `B0CXQ5ZHWH` |
+| 73 | CLIF Bar Chocolate Chip, 12 bars | plausible_size_alternative | abstain | `B08QJPY467` |
 | 74 | Quaker Instant Oatmeal Variety Pack, 48 packets | plausible_size_alternative | closest size (review) | `B09DRLD79T` |
 | 75 | Welch's Fruit Snacks Mixed Fruit, 40 packs | preserved_search_exact | exact | `B0BWSKYV63` |
 | 76 | SkinnyPop Original Popcorn, 18 × 0.65 oz | format_review | closest size (review) | `B0DD4JBNVC` |
@@ -93,7 +93,7 @@ Result: 43 exact, 38 review-only closest-size alternatives, 19 abstentions.
 | 85 | Gatorade Thirst Quencher Variety Pack, 24 × 20 oz | abstain | closest size (review) | `B00HC767P6` |
 | 86 | Duracell Coppertop AA Batteries, 24 ct | plausible_size_alternative | closest size (review) | `B002UXRXEG` |
 | 87 | Duracell Coppertop AAA Batteries, 24 ct | plausible_size_alternative | closest size (review) | `B002UXRXE6` |
-| 88 | Energizer MAX AA Batteries, 24 ct | plausible_size_alternative | closest size (review) | `B005GIQXCU` |
+| 88 | Energizer MAX AA Batteries, 24 ct | plausible_size_alternative | abstain | `B07TXNX6S2` |
 | 89 | Amazon Basics AA Alkaline Batteries, 36 ct | preserved_search_exact | exact | `B094D541XW` |
 | 90 | Sharpie Permanent Markers Fine Point Black, 12 ct | preserved_search_exact | exact | `B002764UJW` |
 | 91 | Paper Mate InkJoy Gel Pens 0.7 mm, 14 ct | preserved_search_exact | exact | `B019QBOG3U` |

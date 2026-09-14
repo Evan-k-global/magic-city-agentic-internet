@@ -139,6 +139,13 @@ assert.ok(sheetClearIndex > sheetStartRequestIndex, 'sheet start must clear its 
     }),
     /payment contract in time.*No payment was submitted/i
   );
+  assert.equal(
+    errorContext.normalizeExecutionErrorMessage({
+      message: 'auth_required_for_credits',
+      data: { error: 'auth_required_for_credits' }
+    }),
+    'Please sign in and ensure your credit balance is sufficient.'
+  );
 }
 
 console.log('santaclawz start recovery UI regression passed');

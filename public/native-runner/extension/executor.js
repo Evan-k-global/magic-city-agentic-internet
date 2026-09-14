@@ -1182,9 +1182,10 @@
 
   function amazonCandidateFulfillment(context = '') {
     const text = compactText(context, 1600);
-    const amazonFulfilled = /\b(?:ships from|sold by|fulfilled by)\s+amazon(?:\.com)?\b/i.test(text);
+    const merchantLabel = '(?:ships from|sold by|fulfilled by|shipper\\s*\\/\\s*seller)';
+    const amazonFulfilled = new RegExp(`\\b${merchantLabel}\\s*:?\\s*amazon(?:\\.com)?\\b`, 'i').test(text);
     const localMarket = /\b(?:amazon fresh|whole foods(?: market)?|lucky(?: market| supermarket)?|local market|grocery delivery)\b/i.test(text);
-    const merchantMentions = Array.from(text.matchAll(/\b(?:ships from|sold by|fulfilled by)\s+([^\n|.]{2,80})/gi))
+    const merchantMentions = Array.from(text.matchAll(new RegExp(`\\b${merchantLabel}\\s*:?\\s*([^\\n|.]{2,80})`, 'gi')))
       .map((match) => String(match[1] || '').trim())
       .filter(Boolean);
     const thirdPartySeller = merchantMentions.some((merchant) => !/\bamazon(?:\.com)?\b/i.test(merchant));
@@ -1500,16 +1501,23 @@
     };
   }
 
+  function isAmazonPostAddCartConfirmationPath(path = '') {
+    return /^\/cart\/smart-wagon(?:\/|$)/i.test(String(path || ''));
+  }
+
   function isCartPath(path = '') {
+    if (isAmazonPostAddCartConfirmationPath(path)) return false;
     return /(?:^|\/)(?:cart|basket)(?:\/|$)|\/gp\/cart(?:\/|$)/i.test(String(path || ''));
   }
 
   function isAmazonShoppingCartPath(path = '') {
+    if (isAmazonPostAddCartConfirmationPath(path)) return false;
     return /^(?:\/cart(?:\/|$)|\/basket(?:\/|$)|\/gp\/cart(?:\/|$))/i.test(String(path || ''));
   }
 
   function isCartSurface(rawPageText = '', controlText = '') {
     const path = String(location.pathname || '');
+    if (isAmazonPostAddCartConfirmationPath(path)) return false;
     if (isCartPath(path)) return true;
     if (/\/checkout|\/buy|\/gp\/buy/i.test(path)) return false;
     // Amazon renders cart previews on search and product pages. Those overlays
@@ -1571,8 +1579,12 @@
   function classifyBrowserState({ rawPageText = '', controlText = '', addToCartAvailable = false, sensitiveField = false, resultCandidates = null } = {}) {
     const pageText = normalized(rawPageText);
     const urlText = `${location.pathname || ''}${location.search || ''}`;
+    const postAddConfirmation = isAmazonPostAddCartConfirmationPath(location.pathname || '');
     const cartLike = isCartSurface(rawPageText, controlText);
-    const checkoutLike = /checkout|review your order|shipping address|delivery address|payment|place your order/.test(pageText) || /\/checkout|\/buy|\/gp\/buy|\/alm\/(?:byg|substitution)/i.test(urlText);
+    const checkoutLike = !postAddConfirmation && (
+      /checkout|review your order|shipping address|delivery address|payment|place your order/.test(pageText)
+      || /\/checkout|\/buy|\/gp\/buy|\/alm\/(?:byg|substitution)/i.test(urlText)
+    );
     const productPath = /\/(?:dp|gp\/product|product|products|item)\b/i.test(location.pathname);
     const candidates = Array.isArray(resultCandidates) ? resultCandidates : candidateRows(2);
     const searchResultsLike = candidates.length > 0 && (
@@ -1611,6 +1623,12 @@
     if (providerChallenge) return withEvidence('challenge', 0.99, 'provider challenge visible', primarySurface);
     if (loginRequired) return withEvidence('login', 0.96, 'login or verification visible', primarySurface);
     if (paymentRequired) return withEvidence('payment', 0.94, 'sensitive payment field visible', primarySurface);
+    if (postAddConfirmation) return withEvidence(
+      'browse',
+      0.98,
+      'Amazon post-add confirmation requires navigation to the full cart before cart verification.',
+      'post_add_confirmation'
+    );
     if (optionalOfferVisible) return withEvidence('offer', /\/checkout\/p\/.*\/pip\b/i.test(location.pathname) ? 0.96 : 0.82, 'optional offer or upsell visible', 'checkout');
     if (finalApprovalVisible) return withEvidence('final_review', 0.98, 'final purchase control visible', 'checkout');
     if (cartLike) return withEvidence('cart', isCartPath(location.pathname) ? 0.94 : 0.86, 'cart surface visible');
@@ -1623,21 +1641,77 @@
 
   function visibleProductPrice() {
     const selectors = [
-      '#corePrice_feature_div .a-offscreen',
-      '#corePriceDisplay_desktop_feature_div .a-offscreen',
+      '#newAccordionRow .a-price',
+      '[id*="oneTimePurchase" i] .a-price',
+      '[data-testid*="one-time" i] .a-price',
+      '#corePrice_feature_div',
+      '#corePrice_feature_div .a-price',
+      '#corePriceDisplay_desktop_feature_div',
+      '#corePriceDisplay_desktop_feature_div .a-price',
+      '#desktop_buybox .a-price',
+      '#buybox .a-price',
       '#price_inside_buybox',
       '#priceblock_ourprice',
       '#priceblock_dealprice',
-      '.apexPriceToPay .a-offscreen',
+      '.apexPriceToPay',
       '[data-testid="product-price"]'
     ];
-    for (const selector of selectors) {
-      const node = document.querySelector(selector);
-      if (!node || !visible(node)) continue;
-      const amount = priceFromText(node.textContent || node.getAttribute('aria-label') || '');
-      if (Number.isFinite(amount) && amount > 0) return amount;
-    }
-    return null;
+    const nodes = [...new Set(selectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))))];
+    const visibleLegacyCorePrice = (element) => {
+      if (!/^(?:corePrice_feature_div|corePriceDisplay_desktop_feature_div)$/.test(element?.id || '')) return false;
+      for (let current = element; current && current.nodeType === Node.ELEMENT_NODE; current = current.parentElement) {
+        if (current.hidden || current.getAttribute?.('aria-hidden') === 'true') return false;
+        const style = window.getComputedStyle(current);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (current === document.body) break;
+      }
+      return true;
+    };
+    const candidates = nodes.map((node) => {
+      const container = node.matches?.('.a-price') ? node : node.closest?.('.a-price') || node;
+      if (!visible(container) && !visibleLegacyCorePrice(container)) return null;
+      const activeOfferScope = container.closest?.('[data-csa-c-is-in-initial-active-row]');
+      if (activeOfferScope?.getAttribute('data-csa-c-is-in-initial-active-row') === 'false') return null;
+      const accessiblePrices = Array.from(container.querySelectorAll?.('.a-offscreen, [aria-label*="$"], [title*="$"]') || [])
+        .map((priceNode) => priceFromText(priceNode.textContent || priceNode.getAttribute('aria-label') || priceNode.getAttribute('title') || ''))
+        .filter((amount) => Number.isFinite(amount) && amount > 0);
+      const directPrice = priceFromText(container.getAttribute?.('aria-label') || container.textContent || '');
+      const amounts = [...new Set([...accessiblePrices, directPrice].filter((amount) => Number.isFinite(amount) && amount > 0))];
+      if (amounts.length !== 1) return null;
+      let scope = container;
+      for (let depth = 0; depth < 4; depth += 1) {
+        const parent = scope.parentElement;
+        if (!parent || parent === document.body || parent === document.documentElement) break;
+        const siblingPrices = parent.querySelectorAll('.a-price, #price_inside_buybox, #priceblock_ourprice, #priceblock_dealprice, [data-testid="product-price"]');
+        if (siblingPrices.length > 1) break;
+        scope = parent;
+      }
+      const namedOfferScope = container.closest?.([
+        '[data-csa-c-slot-id]',
+        '[id*="AccordionRow" i]',
+        '[id*="oneTimePurchase" i]',
+        '[data-testid*="one-time" i]',
+        '[id*="subscribe" i]',
+        '[id*="sns" i]'
+      ].join(','));
+      const offerText = compactText([
+        namedOfferScope?.id,
+        namedOfferScope?.getAttribute?.('data-csa-c-slot-id'),
+        namedOfferScope?.getAttribute?.('data-feature-name'),
+        namedOfferScope?.innerText || namedOfferScope?.textContent,
+        scope.innerText || scope.textContent
+      ].filter(Boolean).join(' '), 1000);
+      return {
+        amount: amounts[0],
+        oneTime: /\bone[- ]time(?: purchase)?\b|\bbuy new\b|\bnewaccordionrow\b/i.test(offerText),
+        subscription: /\bsubscribe(?:\s*&\s*save)?\b|\bsubscription\b|\bsns(?:[-_a-z0-9]*)?\b/i.test(offerText)
+      };
+    }).filter(Boolean);
+    const oneTime = candidates.filter((candidate) => candidate.oneTime);
+    const neutral = candidates.filter((candidate) => !candidate.subscription);
+    const accepted = oneTime.length ? oneTime : neutral;
+    const amounts = [...new Set(accepted.map((candidate) => candidate.amount))];
+    return amounts.length === 1 ? amounts[0] : null;
   }
 
   function deliveryCostEvidenceFromText(value = '') {
@@ -1689,7 +1763,45 @@
       'main'
     ].map((selector) => document.querySelector(selector)).filter(Boolean);
     const scopedText = compactText(scopedRoots.map((root) => root.innerText || root.textContent || '').join('\n'), 12000);
-    const seller = amazonCandidateFulfillment(scopedText);
+    const sellerSelectors = [
+      '#shipsFromSoldByInsideBuyBox_feature_div',
+      '#merchant-info',
+      '#tabular-buybox',
+      '#tabular_feature_div',
+      '#desktop_buybox [data-feature-name="shipsFromSoldBy"]',
+      '#buybox [data-feature-name="shipsFromSoldBy"]',
+      '#desktop_buybox [data-feature-name="merchantInfoFeature"][data-csa-c-is-in-initial-active-row="true"]',
+      '#buybox [data-feature-name="merchantInfoFeature"][data-csa-c-is-in-initial-active-row="true"]',
+      '#desktop_buybox [data-csa-c-slot-id^="newAccordionRow"][data-feature-name="merchantInfoFeature"]',
+      '#buybox [data-csa-c-slot-id^="newAccordionRow"][data-feature-name="merchantInfoFeature"]'
+    ];
+    const sellerRoots = [...new Set(sellerSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector))))]
+      .filter((node) => {
+        const activeOfferScope = node.closest?.('[data-csa-c-is-in-initial-active-row]');
+        if (activeOfferScope?.getAttribute('data-csa-c-is-in-initial-active-row') === 'false') return false;
+        if (visible(node) || Array.from(node.querySelectorAll?.('*') || []).some(visible)) return true;
+        if (node.getAttribute?.('data-csa-c-is-in-initial-active-row') !== 'true') return false;
+        for (let current = node; current && current.nodeType === Node.ELEMENT_NODE; current = current.parentElement) {
+          if (current.hidden || current.getAttribute?.('aria-hidden') === 'true') return false;
+          const style = window.getComputedStyle(current);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+          if (current === document.body) break;
+        }
+        return true;
+      });
+    const fallbackSellerStatements = sellerRoots.length
+      ? []
+      : Array.from(document.querySelectorAll('p, span, div'))
+          .filter(visible)
+          .map((node) => compactText(node.innerText || node.textContent || '', 320))
+          .filter((text) => /^(?:ships from|sold by|fulfilled by)\b/i.test(text));
+    const sellerText = compactText(
+      sellerRoots.length
+        ? sellerRoots.map((root) => root.innerText || root.textContent || '').join('\n')
+        : [...new Set(fallbackSellerStatements)].join('\n'),
+      4000
+    );
+    const seller = amazonCandidateFulfillment(sellerText);
     const primeEligible = scopedRoots.some((root) => primeBadgePresent(root))
       || /\bprime (?:delivery|eligible)\b/i.test(scopedText);
     const explicitlyPaid = delivery.known && Number(delivery.price) > 0;

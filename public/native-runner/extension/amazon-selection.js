@@ -1,3 +1,19 @@
+export function amazonProductAsin(value = '') {
+  let url = null;
+  try {
+    url = new URL(String(value || ''));
+  } catch {
+    return '';
+  }
+  if (!/(^|\.)amazon\.com$/i.test(String(url.hostname || ''))) return '';
+  return String(url.pathname || '').match(/(?:^|\/)(?:dp|gp\/product)\/([a-z0-9]{10})(?:\/|$)/i)?.[1]?.toUpperCase() || '';
+}
+
+export function amazonProductUrlMatches(expectedUrl = '', observedUrl = '') {
+  const expectedAsin = amazonProductAsin(expectedUrl);
+  return Boolean(expectedAsin && amazonProductAsin(observedUrl) === expectedAsin);
+}
+
 // This function is passed to chrome.scripting.executeScript, so every helper
 // intentionally lives inside its body and the card scan stays self-contained.
 export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
@@ -319,9 +335,25 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     const identityEvidence = text.split(/Price, product page|\bOptions:|\d\.\d out of 5 stars/)[0].slice(0, 1300);
     const prime = Boolean(card.querySelector('.a-icon-prime, img[alt="Prime"], [aria-label*="Prime" i]'))
       || /\bprime (?:delivery|eligible)\b/i.test(text);
-    const freeShipping = /\bfree (?:delivery|shipping)\b/i.test(text)
-      || Array.from(card.querySelectorAll('span, p, div')).some((node) => /\bfree (?:delivery|shipping)\b/i.test(clean(node.textContent, 240)));
-    const conditionalShipping = /\b(?:on|over)\s+\$\s*\d|\$\s*\d+\s+(?:of|more)|qualifying items?|minimum order/i.test(text);
+    const conditionalShippingPattern = /\b(?:on|over)\s+\$\s*\d|\$\s*\d+\s+(?:of|more)|qualifying items?|minimum order/i;
+    const completeDeliveryMessage = (node) => {
+      const block = node.closest('p, [data-csa-c-delivery-price], [data-cy*="delivery" i], [class*="delivery" i], [class*="shipping" i]');
+      if (block && card.contains(block)) return clean(block.textContent, 500);
+      if (node.tagName === 'SPAN' && node.parentElement) {
+        const inlineText = Array.from(node.parentElement.childNodes)
+          .filter((sibling) => sibling.nodeType === Node.TEXT_NODE
+            || sibling.nodeType === Node.ELEMENT_NODE && /^(?:SPAN|BR|STRONG|EM|B|I)$/.test(sibling.tagName))
+          .map((sibling) => sibling.textContent || '')
+          .join(' ');
+        if (/\bfree (?:delivery|shipping)\b/i.test(inlineText)) return clean(inlineText, 500);
+      }
+      return clean(node.textContent, 500);
+    };
+    const deliveryEvidence = [...new Set(Array.from(card.querySelectorAll('span, p, div'))
+      .map(completeDeliveryMessage)
+      .filter((value) => /\bfree (?:delivery|shipping)\b/i.test(value)))];
+    const freeShipping = deliveryEvidence.some((value) => !conditionalShippingPattern.test(value));
+    const conditionalShipping = deliveryEvidence.some((value) => conditionalShippingPattern.test(value));
     seen.add(asin);
     cards.push({
       card,
@@ -344,6 +376,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
   const requiresFulfillment = rawAction.primeRequired === true;
   let bestExact = null;
   let bestAlternative = null;
+  let bestVerificationCandidate = null;
   const rejected = { price: 0, budget: 0, fulfillment: 0, prime: 0, freeShipping: 0, conditionalShipping: 0, identity: 0, package: 0 };
   const summarize = (candidate, pack = null) => ({
     id: `candidate-${candidate.index + 1}`,
@@ -366,59 +399,93 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     if (candidate.price !== current.price) return candidate.price < current.price;
     return candidate.index < current.index;
   };
-  for (const candidate of cards) {
-    if (candidate.priceConflict || !Number.isFinite(candidate.price) || candidate.price <= 0) { rejected.price += 1; continue; }
-    if (Number.isFinite(maxPrice) && candidate.price > maxPrice + 0.005) { rejected.budget += 1; continue; }
-    if (requiresFulfillment && !(candidate.prime && candidate.freeShipping && !candidate.conditionalShipping)) {
-      rejected.fulfillment += 1;
-      if (!candidate.prime) rejected.prime += 1;
-      if (!candidate.freeShipping) rejected.freeShipping += 1;
-      if (candidate.conditionalShipping) rejected.conditionalShipping += 1;
-      continue;
-    }
-    if (!titleHasIdentity(candidate.title, candidate.brand) || incompatibleRole(candidate.title) || functionalMismatch(candidate.title)) { rejected.identity += 1; continue; }
+  const packageMatchFor = (candidate) => {
     let pack = offeredPack(candidate.title);
     if (pack.status === 'unknown') pack = offeredPack(candidate.identityEvidence || candidate.title);
-    if (!requestedPack) {
-      if (betterExact(candidate, bestExact)) bestExact = candidate;
-      continue;
-    }
-    if (pack.status !== 'known' || pack.unit !== requestedPack.unit) { rejected.package += 1; continue; }
+    if (!requestedPack) return { kind: 'exact', pack };
+    if (pack.status !== 'known' || pack.unit !== requestedPack.unit) return { kind: 'reject', pack };
     const offeredCountValues = requestedCount == null
       ? []
       : numbersFor(candidate.identityEvidence || candidate.title, countUnitPattern);
     if (Number.isNaN(requestedCount) || (requestedCount != null && offeredCountValues.length !== 1)) {
-      rejected.package += 1;
-      continue;
+      return { kind: 'reject', pack };
     }
     const offeredCount = requestedCount == null ? null : offeredCountValues[0];
     const requiresMatchingPortion = requestedPack.configuration === 'nested'
       && (requestedPack.outer >= 6 || /\b(?:snack packs?|individual|on[- ]the[- ]go)\b/i.test(productText));
-    if (requiresMatchingPortion && pack.per !== requestedPack.per) {
-      rejected.package += 1;
-      continue;
-    }
+    if (requiresMatchingPortion && pack.per !== requestedPack.per) return { kind: 'reject', pack, offeredCount };
     const primaryPackExact = requestedPack.configuration === 'range'
       ? pack.total >= requestedPack.min && pack.total <= requestedPack.max
       : pack.total === requestedPack.total;
-    const exactPack = primaryPackExact && (requestedCount == null || offeredCount === requestedCount);
-    if (exactPack) {
+    const exact = primaryPackExact && (requestedCount == null || offeredCount === requestedCount);
+    if (exact) return { kind: 'exact', pack, offeredCount };
+    return {
+      kind: 'alternative',
+      pack,
+      offeredCount,
+      distance: Math.max(
+        primaryPackExact ? 0 : Math.abs(Math.log(pack.total / requestedPack.total)),
+        requestedCount == null ? 0 : Math.abs(Math.log(offeredCount / requestedCount))
+      )
+    };
+  };
+  for (const candidate of cards) {
+    if (!titleHasIdentity(candidate.title, candidate.brand) || incompatibleRole(candidate.title) || functionalMismatch(candidate.title)) { rejected.identity += 1; continue; }
+    const packageMatch = packageMatchFor(candidate);
+    if (packageMatch.kind === 'reject') { rejected.package += 1; continue; }
+    const priceInconclusive = candidate.priceConflict || !Number.isFinite(candidate.price) || candidate.price <= 0;
+    if (!priceInconclusive && Number.isFinite(maxPrice) && candidate.price > maxPrice + 0.005) { rejected.budget += 1; continue; }
+    const fulfillmentInconclusive = requiresFulfillment && !(candidate.prime && candidate.freeShipping);
+    if (priceInconclusive) rejected.price += 1;
+    if (fulfillmentInconclusive) {
+      rejected.fulfillment += 1;
+      if (!candidate.prime) rejected.prime += 1;
+      if (!candidate.freeShipping) rejected.freeShipping += 1;
+      if (candidate.conditionalShipping) rejected.conditionalShipping += 1;
+    }
+    if (priceInconclusive || fulfillmentInconclusive) {
+      if (packageMatch.kind === 'exact' && (!bestVerificationCandidate || betterExact(candidate, bestVerificationCandidate.candidate))) {
+        bestVerificationCandidate = {
+          candidate,
+          pack: packageMatch.pack,
+          priceInconclusive,
+          fulfillmentInconclusive
+        };
+      }
+      continue;
+    }
+    if (packageMatch.kind === 'exact') {
       if (betterExact(candidate, bestExact)) bestExact = candidate;
       continue;
     }
-    const distance = Math.max(
-      primaryPackExact ? 0 : Math.abs(Math.log(pack.total / requestedPack.total)),
-      requestedCount == null ? 0 : Math.abs(Math.log(offeredCount / requestedCount))
-    );
     if (!bestAlternative
-      || distance < bestAlternative.distance
-      || (distance === bestAlternative.distance && candidate.price < bestAlternative.candidate.price)
-      || (distance === bestAlternative.distance && candidate.price === bestAlternative.candidate.price && candidate.index < bestAlternative.candidate.index)) {
-      bestAlternative = { candidate, pack, offeredCount, distance };
+      || packageMatch.distance < bestAlternative.distance
+      || (packageMatch.distance === bestAlternative.distance && candidate.price < bestAlternative.candidate.price)
+      || (packageMatch.distance === bestAlternative.distance && candidate.price === bestAlternative.candidate.price && candidate.index < bestAlternative.candidate.index)) {
+      bestAlternative = {
+        candidate,
+        pack: packageMatch.pack,
+        offeredCount: packageMatch.offeredCount,
+        distance: packageMatch.distance
+      };
     }
   }
 
   const sizeSubstitutionAuthorized = rawAction.allowSizeSubstitution === true;
+  if (!bestExact && bestVerificationCandidate) {
+    const selected = summarize(bestVerificationCandidate.candidate, bestVerificationCandidate.pack);
+    return {
+      completed: true,
+      selectionDecisionMade: true,
+      selectionKind: 'exact_product_page_verification',
+      requiresProductPageVerification: true,
+      navigationRequested: Boolean(performClick),
+      navigationUrl: performClick ? bestVerificationCandidate.candidate.href : '',
+      selected,
+      reason: 'A matching Amazon result needs one product-page check for its purchase price and delivery terms before it can be added to cart.',
+      scan: { rawScanned: Math.min(rawScanned, 96), distinctCards: cards.length, rejected, selectionDurationMs: elapsed() }
+    };
+  }
   if (!bestExact && bestAlternative && !sizeSubstitutionAuthorized) {
     const proposed = summarize(bestAlternative.candidate, bestAlternative.pack);
     const requestedDescription = [
