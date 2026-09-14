@@ -49,6 +49,16 @@ if (/onInstalled[\s\S]*pollAndExecute\(\)/.test(packagedBackground)) {
 const packagedLegacyBackgroundPath = path.join(unpackedDir, 'background-v0.2.js');
 if (!fs.existsSync(packagedLegacyBackgroundPath)) fail('package is missing the local 0.2.x compatibility controller');
 const packagedLegacyBackground = fs.readFileSync(packagedLegacyBackgroundPath, 'utf8');
+const packagedAmazonSelectionPath = path.join(unpackedDir, 'amazon-selection.js');
+if (!fs.existsSync(packagedAmazonSelectionPath)) fail('package is missing the bounded Amazon selection policy');
+const packagedAmazonSelection = fs.readFileSync(packagedAmazonSelectionPath, 'utf8');
+if (!/export function selectAmazonSearchCard/.test(packagedAmazonSelection)
+  || !/rawScanned > 96 \|\| cards\.length >= 48/.test(packagedAmazonSelection)
+  || !/bestExact \? 'exact' : 'size_alternative'/.test(packagedAmazonSelection)
+  || !/amazon_search_card_closest_size/.test(packagedAmazonSelection)
+  || /requiresApproval: true/.test(packagedAmazonSelection)) {
+  fail('Amazon selection must remain exact-first and bounded, with only verified closest-size fallbacks');
+}
 if (!/export\s*\{[^}]*pollOnly/.test(packagedLegacyBackground)) {
   fail('legacy controller must expose pollOnly for the lean heartbeat');
 }

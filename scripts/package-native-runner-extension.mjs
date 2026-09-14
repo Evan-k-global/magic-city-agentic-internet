@@ -11,6 +11,7 @@ const requiredFiles = [
   'manifest.json',
   'background.js',
   'background-v0.2.js',
+  'amazon-selection.js',
   'executor.js',
   'popup.html',
   'popup.js',
