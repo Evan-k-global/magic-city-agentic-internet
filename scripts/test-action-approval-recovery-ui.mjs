@@ -18,12 +18,12 @@ function loadHelpers(api) {
 
 {
   const helpers = loadHelpers(async () => ({}));
-  assert.match(helpers.describeMagicInternetSetupError(new Error('auth_required')), /^Sign in to Magic City first\./);
-  assert.match(helpers.describeMagicInternetSetupError(new Error('local_checkout_profile_missing')), /^Enter your shipping address and payment-card cue in Local Data Vault\./);
-  assert.match(helpers.describeMagicInternetSetupError(new Error('insufficient_credits')), /^Claim your daily free credits/);
-  assert.match(helpers.describeMagicInternetSetupError(new Error('native_runner_not_ready')), /^Install and pair the Magic City Runner Chrome extension\./);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('auth_required')), /^Account Setup Step Needed\n\nSign in to Magic City first\./);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('local_checkout_profile_missing')), /^Account Setup Step Needed\n\nEnter your shipping address and payment-card cue in Local Data Vault\./);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('insufficient_credits')), /^Account Setup Step Needed\n\nClaim your daily free credits/);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('native_runner_not_ready')), /^Account Setup Step Needed\n\nInstall and pair the Magic City Runner Chrome extension\./);
   for (const code of ['auth_required', 'local_checkout_profile_missing', 'insufficient_credits', 'native_runner_not_ready']) {
-    assert.match(helpers.describeMagicInternetSetupError(new Error(code)), /Setup checklist: Sign in · Complete Local Data Vault · Claim daily free credits · Install and pair the Chrome extension\./);
+    assert.match(helpers.describeMagicInternetSetupError(new Error(code)), /Check these steps:\n1\. Log in to Magic City\.\n2\. Enter your Local Data Vault information\.\n3\. Claim your daily free credits\.\n4\. Install and pair the Magic City Runner Chrome extension\./);
   }
 }
 

@@ -21593,7 +21593,7 @@
             : /native_runner|extension|pairing|runner_not_ready/.test(raw)
               ? 'Install and pair the Magic City Runner Chrome extension.'
               : 'Finish the Magic Internet Agent setup before starting this run.';
-      return `${missingStep}\n\nSetup checklist: Sign in · Complete Local Data Vault · Claim daily free credits · Install and pair the Chrome extension.`;
+      return `Account Setup Step Needed\n\n${missingStep}\n\nCheck these steps:\n1. Log in to Magic City.\n2. Enter your Local Data Vault information.\n3. Claim your daily free credits.\n4. Install and pair the Magic City Runner Chrome extension.`;
     }
 
     async function approveActionWithRecovery(actionRunId) {
