@@ -182,7 +182,12 @@ assert.match(
 assert.match(
   html,
   /setExecutionRunControlsBusy\(true, isBrowserRun \? 'Connecting\.\.\.' : 'Starting'\)/,
-  'Magic Internet must label the pressed run control as connecting immediately'
+  'Magic Internet must enter connecting state immediately'
+);
+assert.match(
+  html,
+  /kind \|\| ''\) === 'browser'\) \{[\s\S]{0,120}button\.hidden = true/,
+  'Magic Internet must replace the large startup control with its compact claiming badge'
 );
 assert.match(
   html,

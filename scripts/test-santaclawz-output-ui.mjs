@@ -101,6 +101,7 @@ const context = {
   executionDismissedSessions: new Set(),
   executionCancellingSessions: new Set(),
   executionLocalErrors: new Map(),
+  getMissingAgentInputLabels: (candidate) => candidate?.missingAgentInputs || [],
   isTerminalExecutionStatus: (status) => ['fulfilled', 'failed'].includes(String(status || '').toLowerCase()),
   isAwaitingExecutionConfirmation: () => false,
   reconcileExecutionWakeError: () => {},
@@ -125,6 +126,7 @@ vm.runInContext([
   extractFunctionSource('compactExecutionSentence'),
   extractFunctionSource('escapeExecutionValue'),
   extractFunctionSource('isSantaClawzExecutionSession'),
+  extractFunctionSource('shouldShowManualAgentRunControl'),
   extractFunctionSource('markExecutionStartButtonStarting'),
   extractFunctionSource('normalizeSantaClawzDeliveryItem'),
   extractFunctionSource('collectSantaClawzDeliveryItemsFromValue'),
@@ -168,6 +170,7 @@ const helpers = vm.runInContext(`({
   refreshExecutionSessionForPolling,
   renderSantaClawzCodeAuditPanel,
   getSantaClawzExecutionProgress,
+  shouldShowManualAgentRunControl,
   markExecutionStartButtonStarting,
   openSantaClawzAuditOutput,
   renderExecutionResult
@@ -196,6 +199,13 @@ const pendingRunState = helpers.describeExecutionRunState(pendingAuditSession, p
 assert.equal(pendingRunState.title, 'Preparing audit');
 assert.equal(pendingRunState.detail, 'Checking SantaClawz readiness and payment terms.');
 assert.equal(pendingRunState.badgeLabel, 'Connecting');
+assert.equal(helpers.shouldShowManualAgentRunControl(pendingAuditSession), false, 'a complete SantaClawz intake should auto-start without a visible run button');
+const incompleteAuditSession = structuredClone(pendingAuditSession);
+incompleteAuditSession.missingAgentInputs = ['GitHub repository'];
+assert.equal(helpers.shouldShowManualAgentRunControl(incompleteAuditSession), true, 'missing required input must preserve the manual run control');
+const failedAuditSession = structuredClone(pendingAuditSession);
+failedAuditSession.status = 'failed';
+assert.equal(helpers.shouldShowManualAgentRunControl(failedAuditSession), true, 'a failed start must preserve a visible retry control');
 assert.equal(helpers.shouldShowExecutionActivityBar(session, status), false);
 assert.equal(helpers.describeExecutionRunState(session, status).title, 'Report available');
 
@@ -354,6 +364,7 @@ assert.doesNotMatch(activeExecutionResult, /Polling delivery|Preparing delivery 
 assert.match(html, /const canCancelExecution = !isTerminalExecutionStatus\(session\.status\) && !santaClawzDeliveryReady/);
 assert.match(html, /showSantaClawzCreditBackedRun = santaClawzCreditBackedActive && !santaClawzDeliveryReady/);
 assert.match(html, /setExecutionHtml\('executionActions',[\s\S]{0,100}santaClawzDeliveryReady[\s\S]{0,40}\? ''/);
+assert.match(html, /santaClawzAutoStartControl[\s\S]{0,240}<button type="button" hidden[^>]+data-execution-run-agent="true"/);
 
 const css = html.match(/<style>([\s\S]*?)<\/style>/)?.[1] || '';
 const browser = await chromium.launch({ headless: true });
