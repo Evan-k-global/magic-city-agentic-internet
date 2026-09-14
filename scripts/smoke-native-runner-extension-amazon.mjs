@@ -133,6 +133,206 @@ async function main() {
       fail('amazon_unrelated_sidecart_was_treated_as_requested_item', { sideCartSelection });
     }
     stage('amazon_sidecart_identity_verified', { selectedUrl: sideCartSelection.selected?.url, directCart: false });
+    await fixture.evaluate(() => history.replaceState({}, '', '/dp/magic-city-price-fixture'));
+    const productPriceFixture = (oneTimePrice) => `
+      <!doctype html>
+      <title>Magic City Amazon product price fixture</title>
+      <style>.a-offscreen { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }</style>
+      <main>
+        <h1>Test gadget</h1>
+        <div id="desktop_buybox">
+          <div id="subscribeAndSaveOffer">Subscribe &amp; Save <span class="a-price"><span class="a-offscreen">$2.67</span><span aria-hidden="true">$2.67</span></span></div>
+          <div id="newAccordionRow">One-time purchase <span class="a-price"><span class="a-offscreen">$${oneTimePrice}</span><span aria-hidden="true">$${oneTimePrice}</span></span></div>
+          <span aria-label="Amazon Prime">Prime delivery</span>
+          <div id="deliveryBlockMessage">FREE delivery Tomorrow</div>
+          <input id="add-to-cart-button" type="submit" value="Add to Cart" />
+        </div>
+      </main>`;
+    await fixture.setContent(productPriceFixture('3.50'));
+    const verifiedOneTimePrice = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (verifiedOneTimePrice.checkoutSummary?.productPrice !== '$3.50') {
+      fail('amazon_one_time_price_not_preferred_over_subscription', verifiedOneTimePrice.checkoutSummary);
+    }
+    await fixture.setContent(productPriceFixture('4.97'));
+    const overBudgetOneTimePrice = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (overBudgetOneTimePrice.checkoutSummary?.productPrice !== '$4.97') {
+      fail('amazon_subscription_price_used_as_product_price', overBudgetOneTimePrice.checkoutSummary);
+    }
+    await fixture.setContent(`
+      <!doctype html>
+      <title>Magic City Amazon legacy core price fixture</title>
+      <style>.a-offscreen { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }</style>
+      <main>
+        <h1>Test gadget</h1>
+        <div id="corePrice_feature_div"><span class="a-offscreen">$3.50</span></div>
+        <span aria-label="Amazon Prime">Prime delivery</span>
+        <div id="deliveryBlockMessage">FREE delivery Tomorrow</div>
+        <input id="add-to-cart-button" type="submit" value="Add to Cart" />
+      </main>`);
+    const legacyCorePrice = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (legacyCorePrice.checkoutSummary?.productPrice !== '$3.50') {
+      fail('amazon_legacy_core_price_not_supported', legacyCorePrice.checkoutSummary);
+    }
+    await fixture.setContent(`
+      <!doctype html>
+      <title>Magic City Amazon hidden legacy core price fixture</title>
+      <main>
+        <h1>Test gadget</h1>
+        <div style="display:none"><div id="corePrice_feature_div"><span class="a-offscreen">$3.50</span></div></div>
+        <span aria-label="Amazon Prime">Prime delivery</span>
+        <div id="deliveryBlockMessage">FREE delivery Tomorrow</div>
+        <input id="add-to-cart-button" type="submit" value="Add to Cart" />
+      </main>`);
+    const hiddenLegacyCorePrice = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (hiddenLegacyCorePrice.checkoutSummary?.productPrice) {
+      fail('amazon_hidden_legacy_core_price_accepted', hiddenLegacyCorePrice.checkoutSummary);
+    }
+    await fixture.setContent(`
+      <!doctype html>
+      <title>Magic City Amazon live accordion fixture</title>
+      <style>.a-offscreen { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }</style>
+      <main>
+        <h1>Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz</h1>
+        <div id="desktop_buybox">
+          <section id="apex_desktop_newAccordionRow">
+            <div id="corePrice_feature_div" data-feature-name="corePrice" data-csa-c-slot-id="newAccordionRow_0" data-csa-c-is-in-initial-active-row="true">
+              <span class="a-price apex-pricetopay-value"><span class="a-offscreen">$2.97</span><span aria-hidden="true">$2.97</span></span>
+              <span class="a-price apex-priceperunit-value"><span class="a-offscreen">$0.65</span></span>
+            </div>
+            <div id="merchantInfoFeature_feature_div" data-feature-name="merchantInfoFeature" data-csa-c-slot-id="newAccordionRow_0" data-csa-c-is-in-initial-active-row="true">
+              <span>Shipper / Seller</span><span>Amazon.com</span>
+            </div>
+          </section>
+          <section id="snsAccordionRowMiddle">
+            <div id="corePrice_feature_div" data-feature-name="corePrice" data-csa-c-slot-id="snsAccordionRowMiddle" data-csa-c-is-in-initial-active-row="false">
+              <span id="subscriptionPrice"><span class="a-price apex-pricetopay-value"><span class="a-offscreen">$2.82</span><span aria-hidden="true">$2.82</span></span></span>
+            </div>
+            <div id="merchantInfoFeature_feature_div" data-feature-name="merchantInfoFeature" data-csa-c-slot-id="snsAccordionRowMiddle" data-csa-c-is-in-initial-active-row="false">
+              <span>Shipper / Seller</span><span>Example Marketplace</span>
+            </div>
+          </section>
+          <div id="deliveryBlockMessage">FREE delivery Tomorrow</div>
+          <input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="document.body.dataset.liveOfferCart='clicked'" />
+        </div>
+      </main>`);
+    const liveAccordionState = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (liveAccordionState.checkoutSummary?.productPrice !== '$2.97') {
+      fail('amazon_live_accordion_one_time_price_not_selected', liveAccordionState.checkoutSummary);
+    }
+    const liveAccordionCart = await commandForTab(fixtureTab.id, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'click_intent', intent: 'add_to_cart', fulfillmentPolicy: 'amazon_free_shipping_preferred' }
+    });
+    const liveAccordionClicked = await fixture.evaluate(() => document.body.dataset.liveOfferCart || '');
+    if (liveAccordionCart?.completed !== true || liveAccordionClicked !== 'clicked') {
+      fail('amazon_live_shipper_seller_not_accepted', { liveAccordionCart, liveAccordionClicked });
+    }
+    const smartWagonRoute = async (route) => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: `<!doctype html>
+        <title>Amazon.com Shopping Cart</title>
+        <nav>
+          <span id="nav-link-accountList-nav-line-1">Hello, Test Shopper</span>
+          <a id="nav-cart" href="/gp/cart/view.html"><span id="nav-cart-count">1</span> Cart</a>
+        </nav>
+        <main data-testid="added-to-cart-confirmation">
+          <h1>Added to cart</h1>
+          <section><p>Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar</p><p>Cart Subtotal: $2.97</p></section>
+          <div id="sw-ptc"><button onclick="sessionStorage.setItem('smart-wagon-checkout-clicks', String(Number(sessionStorage.getItem('smart-wagon-checkout-clicks') || 0) + 1))">Proceed to checkout (1 item)</button></div>
+          <div id="sw-gtc"><button onclick="sessionStorage.setItem('smart-wagon-cart-clicks', String(Number(sessionStorage.getItem('smart-wagon-cart-clicks') || 0) + 1)); location.href='/gp/cart/view.html?source=smart-wagon'">Go to Cart</button></div>
+        </main>
+        <aside class="sc-list-item" data-asin="B0F2PWJV7D" aria-label="Cart preview">
+          <span class="a-price">$2.97</span><span>Quantity is 1</span>
+        </aside>`
+    });
+    const fullCartRoute = async (route) => {
+      const nonPrimeControl = new URL(route.request().url()).searchParams.get('source') === 'non-prime-control';
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html>
+        <title>Amazon.com Shopping Cart</title>
+        <nav><span id="nav-link-accountList-nav-line-1">Hello, Test Shopper</span><span id="nav-cart-count">1</span></nav>
+        <main><h1>Your cart</h1>
+          <div id="activeCartViewForm">
+            <div class="sc-list-item" data-asin="B0F2PWJV7D">
+              <a href="/Nature-Valley-Peanut-Free-Granola-Facility/dp/B0F2PWJV7D">Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz</a>
+              ${nonPrimeControl ? '<p>Shipping: $4.99</p>' : '<span aria-label="Amazon Prime">Prime delivery</span><p>FREE delivery Tomorrow</p>'}
+              <label>Quantity: <select name="quantity"><option selected>1</option></select></label><button data-action="delete">Delete</button>
+            </div>
+          </div>
+          <p>Subtotal (1 item): $2.97</p>
+          <span id="sc-buy-box-ptc-button"><input type="submit" name="proceedToRetailCheckout" value="Proceed to checkout" /></span>
+        </main>`
+      });
+    };
+    await fixture.route('https://www.amazon.com/cart/smart-wagon**', smartWagonRoute);
+    await fixture.route('https://www.amazon.com/gp/cart/view.html**', fullCartRoute);
+    await fixture.evaluate(() => {
+      sessionStorage.setItem('smart-wagon-add-clicks', '1');
+      sessionStorage.setItem('smart-wagon-cart-clicks', '0');
+      sessionStorage.setItem('smart-wagon-checkout-clicks', '0');
+    });
+    await fixture.goto('https://www.amazon.com/cart/smart-wagon?newItems=B0F2PWJV7D&ref_=sw_refresh');
+    const smartWagonState = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    const repeatedSmartWagonState = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (smartWagonState.browserState !== 'browse'
+      || smartWagonState.browserSurface !== 'post_add_confirmation'
+      || smartWagonState.milestoneSignals?.cartVisible !== false
+      || smartWagonState.checkoutSummary?.cartPrimeFulfillmentObserved !== false
+      || smartWagonState.checkoutSummary?.cartItems?.length
+      || repeatedSmartWagonState.browserSurface !== 'post_add_confirmation') {
+      fail('amazon_smart_wagon_treated_as_authoritative_cart', { smartWagonState, repeatedSmartWagonState });
+    }
+    const smartWagonOpenCart = await commandForTab(fixtureTab.id, {
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { type: 'navigate', intent: 'open_cart', preferExistingCartControl: true }
+    });
+    await fixture.waitForURL(/\/gp\/cart\/view\.html\?source=smart-wagon/, { timeout: 5_000 });
+    const authoritativeCartState = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    const smartWagonCounts = await fixture.evaluate(() => ({
+      add: Number(sessionStorage.getItem('smart-wagon-add-clicks') || 0),
+      openCart: Number(sessionStorage.getItem('smart-wagon-cart-clicks') || 0),
+      checkout: Number(sessionStorage.getItem('smart-wagon-checkout-clicks') || 0)
+    }));
+    if (smartWagonOpenCart?.completed !== true
+      || smartWagonOpenCart?.controlStrategy !== 'amazon_post_add_go_to_cart'
+      || smartWagonCounts.add !== 1
+      || smartWagonCounts.openCart !== 1
+      || smartWagonCounts.checkout !== 0
+      || authoritativeCartState.browserState !== 'cart'
+      || authoritativeCartState.checkoutSummary?.cartPrimeFulfillmentObserved !== true
+      || authoritativeCartState.checkoutSummary?.cartPrimeVerified !== true
+      || authoritativeCartState.checkoutSummary?.cartItems?.[0]?.asin !== 'B0F2PWJV7D') {
+      fail('amazon_smart_wagon_did_not_reach_verified_full_cart', {
+        smartWagonOpenCart,
+        smartWagonCounts,
+        authoritativeCartState
+      });
+    }
+    await fixture.goto('https://www.amazon.com/gp/cart/view.html?source=non-prime-control');
+    const nonPrimeCartState = await commandForTab(fixtureTab.id, { type: 'MAGIC_CITY_BROWSER_STATE' });
+    if (nonPrimeCartState.browserState !== 'cart'
+      || nonPrimeCartState.checkoutSummary?.cartPrimeFulfillmentObserved !== true
+      || nonPrimeCartState.checkoutSummary?.cartPrimeVerified !== false
+      || !nonPrimeCartState.checkoutSummary?.cartNonPrimeItems?.some((title) => /Nature Valley Mixed Berry/i.test(String(title)))) {
+      fail('amazon_smart_wagon_exception_leaked_into_authoritative_cart', nonPrimeCartState);
+    }
+    await fixture.unroute('https://www.amazon.com/cart/smart-wagon**', smartWagonRoute);
+    await fixture.unroute('https://www.amazon.com/gp/cart/view.html**', fullCartRoute);
+    stage('amazon_one_time_accessible_price_verified', {
+      underCap: verifiedOneTimePrice.checkoutSummary.productPrice,
+      overCap: overBudgetOneTimePrice.checkoutSummary.productPrice,
+      legacyCore: legacyCorePrice.checkoutSummary.productPrice,
+      liveAccordion: liveAccordionState.checkoutSummary.productPrice,
+      smartWagon: {
+        surface: smartWagonState.browserSurface,
+        cartClicks: smartWagonCounts.openCart,
+        cartPrimeVerified: authoritativeCartState.checkoutSummary.cartPrimeVerified,
+        nonPrimeControlVerified: nonPrimeCartState.checkoutSummary.cartPrimeVerified
+      }
+    });
     await fixture.close();
 
     const page = await context.newPage();

@@ -4,6 +4,39 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import { amazonProductAsin, amazonProductUrlMatches } from '../public/native-runner/extension/amazon-selection.js';
+
+assert.equal(
+  amazonProductAsin('https://www.amazon.com/Nature-Valley-Crunchy/dp/B0F2PWJV7D/ref=sr_1_1'),
+  'B0F2PWJV7D',
+  'slugged Amazon product URLs retain their ASIN'
+);
+assert.equal(
+  amazonProductAsin('https://www.amazon.com/gp/product/B000NVGOOD'),
+  'B000NVGOOD',
+  'canonical Amazon product URLs retain their ASIN'
+);
+assert.notEqual(
+  amazonProductAsin('https://www.amazon.com/Nature-Valley/dp/B0F2PWJV7D'),
+  amazonProductAsin('https://www.amazon.com/Nature-Valley/dp/B0F2PWJV7E'),
+  'different-ASIN redirects remain distinguishable'
+);
+assert.equal(
+  amazonProductUrlMatches(
+    'https://www.amazon.com/dp/B0F2PWJV7D',
+    'https://www.amazon.com/Nature-Valley-Crunchy/dp/B0F2PWJV7D/ref=sr_1_1'
+  ),
+  true,
+  'slugged redirects for the selected ASIN are accepted'
+);
+assert.equal(
+  amazonProductUrlMatches(
+    'https://www.amazon.com/dp/B0F2PWJV7D',
+    'https://www.amazon.com/Nature-Valley-Crunchy/dp/B0F2PWJV7E/ref=sr_1_1'
+  ),
+  false,
+  'redirects to a different ASIN are rejected'
+);
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
 const fixtureDir = path.join(root, 'artifacts/amazon-selection-calibration-100-2026-09-12');
@@ -187,6 +220,48 @@ try {
     type: 'select_candidate', query: 'test gadget', maxPrice: null, primeRequired: true
   }), { tabId: regressionTab });
   assert.equal(output.packagedFixture?.selectionKind, 'exact', 'packaged lifecycle fixture');
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: '<div data-component-type="s-search-result" data-asin="B000MIX001" style="display:block;width:600px;min-height:160px"><h2><a href="/dp/mixed-offer">Test gadget</a></h2><span class="a-price"><span class="a-offscreen">$3.50</span></span><span aria-label="Amazon Prime">Prime delivery</span><div>FREE delivery Tomorrow</div><div>Or FREE delivery on $25 of qualifying items</div><button style="display:block;width:120px;height:32px">Add to cart</button></div>'
+  });
+  output.mixedShippingFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionShadow(tabId, {
+    type: 'select_candidate', query: 'test gadget', maxPrice: 4, primeRequired: true
+  }), { tabId: regressionTab });
+  assert.equal(output.mixedShippingFixture?.selectionKind, 'exact', 'unconditional Prime offer survives a separate conditional offer');
+  assert.equal(output.mixedShippingFixture?.selected?.asin, 'B000MIX001', 'mixed shipping exact candidate');
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: '<div data-component-type="s-search-result" data-asin="B000SPLIT1" style="display:block;width:600px;min-height:160px"><h2><a href="/dp/split-shipping">Test gadget</a></h2><span class="a-price"><span class="a-offscreen">$3.50</span></span><span aria-label="Amazon Prime">Prime delivery</span><div><span>FREE delivery</span><span> on $35 of qualifying items</span></div><button style="display:block;width:120px;height:32px">Add to cart</button></div>'
+  });
+  await page.evaluate(() => { globalThis.__selectionGuard.clicks = 0; });
+  output.splitConditionalShippingFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'test gadget', maxPrice: 4, primeRequired: true
+  }), { tabId: regressionTab });
+  const splitShippingGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.splitConditionalShippingFixture?.selectionKind, 'exact_product_page_verification', 'split conditional shipping requires product-page verification');
+  assert.equal(output.splitConditionalShippingFixture?.requiresProductPageVerification, true, 'split conditional shipping verification flag');
+  assert.equal(splitShippingGuard.clicks, 0, 'split conditional shipping does not click cart');
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: '<div data-component-type="s-search-result" data-asin="B000MULT01" style="display:block;width:600px;min-height:160px"><h2><a href="/dp/multiple-prices">Test gadget</a></h2><div>One-time purchase <span class="a-price"><span class="a-offscreen">$3.50</span></span></div><div>Subscribe &amp; Save <span class="a-price"><span class="a-offscreen">$3.15</span></span></div><span aria-label="Amazon Prime">Prime delivery</span><div>FREE delivery Tomorrow</div><button style="display:block;width:120px;height:32px">Add to cart</button></div>'
+  });
+  await page.evaluate(() => { globalThis.__selectionGuard.clicks = 0; });
+  output.multiplePriceFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'test gadget', maxPrice: 4, primeRequired: true
+  }), { tabId: regressionTab });
+  const multiplePriceGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.multiplePriceFixture?.selectionKind, 'exact_product_page_verification', 'multiple offer prices require product-page verification');
+  assert.equal(output.multiplePriceFixture?.requiresProductPageVerification, true, 'multiple offer price verification flag');
+  assert.equal(output.multiplePriceFixture?.navigationRequested, true, 'multiple offer price product navigation');
+  assert.equal(multiplePriceGuard.clicks, 0, 'multiple offer price does not click cart');
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: '<div data-component-type="s-search-result" data-asin="B000WRONG1" style="display:block;width:600px;min-height:160px"><h2><a href="/dp/wrong-product">Wrong replacement accessory</a></h2><div><span class="a-price"><span class="a-offscreen">$3.50</span></span></div><div><span class="a-price"><span class="a-offscreen">$3.15</span></span></div><span aria-label="Amazon Prime">Prime delivery</span><div>FREE delivery Tomorrow</div></div>'
+  });
+  output.wrongProductVerificationFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionShadow(tabId, {
+    type: 'select_candidate', query: 'test gadget', maxPrice: 4, primeRequired: true
+  }), { tabId: regressionTab });
+  assert.equal(output.wrongProductVerificationFixture?.selectionKind, 'no_verified_candidate', 'wrong product cannot enter product-page verification');
   await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
     tabId: regressionTab,
     html: cardHtml('NATURE-VALLEY-UNAVAILABLE', 'Nature Valley Crunchy Granola Bars')

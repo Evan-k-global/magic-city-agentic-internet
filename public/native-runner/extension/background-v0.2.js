@@ -1,4 +1,4 @@
-import { selectAmazonSearchCard } from './amazon-selection.js';
+import { amazonProductAsin, amazonProductUrlMatches, selectAmazonSearchCard } from './amazon-selection.js';
 
 const DEFAULT_BASE_URL = 'https://magic-city.ai';
 const POLL_ALARM = 'magic-city-runner-poll';
@@ -240,7 +240,7 @@ function isAmazonRetailProductUrl(value = '') {
     return false;
   }
   if (domainForUrl(url.href) !== 'amazon.com') return true;
-  return isAmazonRetailShoppingUrl(url.href) && /^\/(?:dp|gp\/product)\//i.test(String(url.pathname || ''));
+  return isAmazonRetailShoppingUrl(url.href) && Boolean(amazonProductAsin(url.href));
 }
 
 function compactNavigationUrl(value = '') {
@@ -254,6 +254,8 @@ function compactNavigationUrl(value = '') {
 
 function candidateSelectionFailureReason(action = {}, report = {}, outcome = {}) {
   if (String(action.type || '') !== 'select_candidate') return '';
+  const explicitReason = String(outcome.reason || '').trim();
+  if (explicitReason) return explicitReason;
   const observedUrl = String(report.url || report.finalUrl || outcome.observedNavigationUrl || '').trim();
   const requestedUrl = String(outcome.navigationUrl || '').trim();
   const surface = String(report.browserSurface || report.browserState || report.checkoutSummary?.stage || '').toLowerCase();
@@ -1551,9 +1553,10 @@ async function confirmCandidateNavigation(tabId, plan = {}, candidateUrl = '', p
     ? withAmazonEnglishLocale(candidateUrl)
     : String(candidateUrl || '');
   let observed = await chrome.tabs.get(tabId).catch(() => ({ url: previousUrl, status: '' }));
-  const isExpectedUrl = (value = '') => plan.targetDomain === 'amazon.com'
-    ? isAmazonRetailProductUrl(value)
-    : domainForUrl(value) === plan.targetDomain && value !== previousUrl;
+  const isExpectedUrl = (value = '') => {
+    if (plan.targetDomain !== 'amazon.com') return domainForUrl(value) === plan.targetDomain && value !== previousUrl;
+    return amazonProductUrlMatches(requestedUrl, value) && isAmazonRetailProductUrl(value);
+  };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (isExpectedUrl(observed.url || '')) {
@@ -2447,10 +2450,12 @@ function observedVerifiedMilestones(report = {}, action = {}, outcome = {}, { ca
   if (signals.checkoutOpen && signals.checkoutProfileVerified) observed.push('checkout_profile_verified');
   if (signals.checkoutOpen && signals.finalReviewReady) observed.push('final_review_ready');
   if (signals.orderSubmitted || report.orderSubmitted) observed.push('order_submitted');
+  const productPageVerificationSatisfied = outcome.requiresProductPageVerification !== true
+    || outcome.productPageVerified === true;
   if (action.expectedMilestone === 'candidate_selected' && (
-    signals.candidateSelected
+    (signals.candidateSelected && productPageVerificationSatisfied)
     || outcome.existingCartItemVerified
-    || outcome.searchResultSelected === true
+    || (outcome.searchResultSelected === true && productPageVerificationSatisfied)
     || selectedIntoVerifiedCart
   )) {
     observed.push('candidate_selected');
@@ -2882,11 +2887,53 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
           if (!navigation.confirmed) {
             return { ...quickOutcome, completed: false, navigationConfirmed: false, reason: 'The exact selected product page did not open.' };
           }
+          const selectedState = await waitForPurchasableProduct(tabId, checkoutProfile);
+          if (quickOutcome.requiresProductPageVerification === true) {
+            const summary = selectedState?.checkoutSummary || {};
+            const selectedProductPrice = parseUsdAmount(summary.productPrice);
+            const priceVerified = Number.isFinite(selectedProductPrice) && selectedProductPrice > 0;
+            const priceWithinCap = priceVerified && (
+              !Number.isFinite(Number(action.maxPrice))
+              || Number(action.maxPrice) <= 0
+              || selectedProductPrice <= Number(action.maxPrice) + 0.005
+            );
+            const fulfillmentVerified = action.primeRequired !== true || (
+              summary.productPrimeEligible === true
+              && summary.productShippingKnown === true
+              && summary.productPrimeFreeShippingEligible === true
+            );
+            if (!selectedState?.addToCartAvailable || !priceWithinCap || !fulfillmentVerified) {
+              const reason = !selectedState?.addToCartAvailable
+                ? 'Amazon opened the matching product page, but no verified Add to Cart control was available.'
+                : !priceVerified
+                  ? 'Amazon opened the matching product page, but its one-time purchase price could not be verified.'
+                  : !priceWithinCap
+                    ? `The matching product costs $${selectedProductPrice.toFixed(2)}, above the approved $${Number(action.maxPrice).toFixed(2)} item budget.`
+                    : productFulfillmentFailureReason(selectedState, action) || 'The matching product page did not verify Prime and unconditional free delivery.';
+              return {
+                ...quickOutcome,
+                completed: false,
+                selectionKind: 'no_verified_candidate',
+                navigationConfirmed: true,
+                observedNavigationUrl: navigation.observedUrl,
+                state: selectedState,
+                reason
+              };
+            }
+            return {
+              ...quickOutcome,
+              productPageVerified: true,
+              selected: { ...quickOutcome.selected, price: selectedProductPrice },
+              navigationConfirmed: true,
+              observedNavigationUrl: navigation.observedUrl,
+              state: selectedState
+            };
+          }
           return {
             ...quickOutcome,
             navigationConfirmed: true,
             observedNavigationUrl: navigation.observedUrl,
-            state: await waitForPurchasableProduct(tabId, checkoutProfile)
+            state: selectedState
           };
         }
         return quickOutcome;
@@ -3682,6 +3729,7 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
         requestedNavigationUrl: outcome.navigationUrl ? compactNavigationUrl(outcome.navigationUrl) : null,
         observedNavigationUrl: outcome.observedNavigationUrl ? compactNavigationUrl(outcome.observedNavigationUrl) : null,
         navigationConfirmed: typeof outcome.navigationConfirmed === 'boolean' ? outcome.navigationConfirmed : null,
+        productPageVerified: Boolean(outcome.productPageVerified),
         directSearchResultCart: Boolean(outcome.directSearchResultCart),
         postAddCartOpened: Boolean(outcome.postAddCartOpened),
         cartOpenControlStrategy: outcome.cartOpenControlStrategy || null,

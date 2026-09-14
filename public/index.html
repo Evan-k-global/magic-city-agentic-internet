@@ -7043,7 +7043,7 @@
         return 'You can stack up to 3 active execution agents. Finish or close one run before starting another.';
       }
       if (/auth_required_for_credits/i.test(raw)) {
-        return 'Sign in or refresh your Magic City session before running this paid agent.';
+        return 'Please sign in and ensure your credit balance is sufficient.';
       }
       if (/insufficient_credits/i.test(raw)) {
         return 'Not enough credits are available for this step. Add credits, then retry.';

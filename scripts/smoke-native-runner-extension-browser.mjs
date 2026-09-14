@@ -62,6 +62,7 @@ let checkoutFixture = {
 let multiBasketItems = [];
 let brandCandidateVisits = [];
 let conditionalCandidateVisits = [];
+let mixedOfferCandidateVisits = [];
 let lateShippingCandidateVisits = [];
 let brandCartItem = null;
 let lateShippingCartItem = null;
@@ -440,8 +441,8 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<button>Add to Cart</button>',
       '</div>',
       '<div data-component-type="s-search-result" data-asin="B000NVGOOD">',
-      '<h2><a href="/dp/nature-valley-valid">Nature Valley Sweet & Salty Almond Granola Bars</a></h2>',
-      '<span class="a-price">$3.50</span><span>4.7 out of 5 stars</span><span>12,000 ratings</span><span aria-label="Amazon Prime">Prime delivery</span><p>FREE delivery Tomorrow</p>',
+      '<h2><a href="/dp/nature-valley-valid-multi-price">Nature Valley Sweet & Salty Almond Granola Bars</a></h2>',
+      '<span>Subscribe &amp; Save <span class="a-price"><span class="a-offscreen">$3.15</span></span></span><span>One-time purchase <span class="a-price"><span class="a-offscreen">$3.50</span></span></span><span>4.7 out of 5 stars</span><span>12,000 ratings</span><span aria-label="Amazon Prime">Prime delivery</span><p>FREE delivery Tomorrow</p>',
       '<button onclick="location.href=\'/cart?brand=nature-valley-valid&variant=almond\'">Add to Cart</button>',
       '</div>',
       '</main>'
@@ -457,6 +458,46 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<div id="deliveryBlockMessage">FREE delivery on $25 of qualifying items. Or $4.99 delivery in 3 hours.</div>',
       '<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="location.href=\'/cart?brand=conditional-paid\'" />',
       '</main>'
+    ].join('');
+  }
+  if (pathname === '/dp/nature-valley-valid-multi-price') {
+    mixedOfferCandidateVisits.push('nature-valley-valid-multi-price');
+    return [
+      '<span id="nav-cart-count">0</span>',
+      '<main><h1>Nature Valley Sweet & Salty Almond Granola Bars</h1>',
+      '<div id="desktop_buybox">',
+      '<div>Subscribe &amp; Save <span class="a-price"><span class="a-offscreen" style="position:absolute;width:1px;height:1px;overflow:hidden">$3.15</span><span aria-hidden="true">$3.15</span></span></div>',
+      '<div id="newAccordionRow">One-time purchase <span class="a-price"><span class="a-offscreen" style="position:absolute;width:1px;height:1px;overflow:hidden">$3.50</span><span aria-hidden="true">$3.50</span></span></div>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      '<div id="deliveryBlockMessage">FREE delivery Tomorrow</div>',
+      '<div id="merchant-info">Ships from Amazon.com. Sold by Amazon.com.</div>',
+      '<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="location.href=\'/cart?brand=nature-valley-valid&variant=almond\'" />',
+      '</div>',
+      '<aside>Other offers may ship from Lucky Supermarket.</aside>',
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/selection-product-verification-failure-search') {
+    return [
+      '<main><h1>Results</h1>',
+      '<div data-component-type="s-search-result" data-asin="B0F2PWJV7D">',
+      '<h2><a href="/Test-Gadget/dp/B0F2PWJV7D/ref=sr_1_1">Test Gadget</a></h2>',
+      '<span>Subscribe &amp; Save <span class="a-price">$3.50</span></span>',
+      '<span>One-time purchase <span class="a-price">$4.97</span></span>',
+      '<span aria-label="Amazon Prime">Prime delivery</span><p>FREE delivery Tomorrow</p>',
+      '</div></main>'
+    ].join('');
+  }
+  if (pathname === '/Test-Gadget/dp/B0F2PWJV7D/ref=sr_1_1') {
+    return [
+      '<main><h1>Test Gadget</h1>',
+      '<div id="desktop_buybox">',
+      '<div id="newAccordionRow">One-time purchase <span class="a-price"><span class="a-offscreen">$4.97</span></span></div>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      '<div id="deliveryBlockMessage">FREE delivery Tomorrow</div>',
+      '<div id="merchant-info">Ships from Amazon.com. Sold by Amazon.com.</div>',
+      '<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="sessionStorage.setItem(\'verification-failure-cart-clicks\', String(Number(sessionStorage.getItem(\'verification-failure-cart-clicks\') || 0) + 1))" />',
+      '</div></main>'
     ].join('');
   }
   if (pathname === '/late-shipping-search') {
@@ -1454,6 +1495,40 @@ async function main() {
       await merchantPage.close();
       console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
       console.log('native-runner selection fast-path timeout smoke passed');
+      return;
+    }
+    if (smokeMode === 'selection-product-verification-failure') {
+      const { merchantPage } = await prepareSelectionOnlySession('/selection-product-verification-failure-search');
+      const wake = await runSelectionFocus('browser-smoke-selection-product-verification-failure');
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const selectionCheckpoints = checkpoints.filter((checkpoint) => (
+        checkpoint.planActionId === 'select-match'
+        && checkpoint.browser?.runnerStep?.actionId === 'select-match'
+      ));
+      const cartClicks = Number(await merchantPage.evaluate(() => sessionStorage.getItem('verification-failure-cart-clicks') || '0'));
+      const state = session.extensionMissionPlanState;
+      if (selectionCheckpoints.length !== 1
+        || selectionCheckpoints[0]?.planActionStatus !== 'waiting'
+        || selectionCheckpoints[0]?.browser?.runnerStep?.productPageVerified !== false
+        || !/above the approved \$4\.00 item budget/i.test(String(selectionCheckpoints[0]?.browser?.runnerStep?.reason || ''))
+        || selectionCheckpoints[0]?.verifiedMilestones?.includes('candidate_selected')
+        || Number(state?.nextActionIndex || 0) !== 0
+        || cartClicks !== 0) {
+        fail(`browser_extension_failed_product_verification_advanced:${JSON.stringify({
+          selectionCheckpoints,
+          state,
+          cartClicks,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Failed product-page verification does not advance selection or click cart', {
+        checkpointStatus: selectionCheckpoints[0].planActionStatus,
+        nextActionIndex: state.nextActionIndex,
+        cartClicks
+      });
+      await merchantPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner product verification failure smoke passed');
       return;
     }
     const verifyAmazonNavFlyout = async () => {
@@ -4197,6 +4272,7 @@ async function main() {
       matchingAddressText: 'Test User 1 MAGIC CITY WAY San Francisco, CA 94107 United States Phone number: 415-555-0100'
     };
     conditionalCandidateVisits = [];
+    mixedOfferCandidateVisits = [];
     brandCartItem = null;
     checkpoints.length = 0;
     fulfillment = null;
@@ -4256,8 +4332,17 @@ async function main() {
         reason: conditionalSelect?.browser?.runnerStep?.reason || null
       })}`);
     }
-    recordPurchaseScenario('Prime item with paid-only delivery is skipped for another matching SKU', {
+    if (mixedOfferCandidateVisits.length !== 1
+      || conditionalSelect?.browser?.runnerStep?.productPageVerified !== true
+      || conditionalSelect?.browser?.runnerStep?.directSearchResultCart === true) {
+      fail(`browser_extension_ambiguous_offer_not_verified_once:${JSON.stringify({
+        visits: mixedOfferCandidateVisits,
+        runnerStep: conditionalSelect?.browser?.runnerStep || null
+      })}`);
+    }
+    recordPurchaseScenario('Paid-only result is skipped and a multiple-price match is verified on one product page', {
       rejectedProductPages: conditionalCandidateVisits.length,
+      verifiedProductPages: mixedOfferCandidateVisits.length,
       selectedTitle
     });
 
