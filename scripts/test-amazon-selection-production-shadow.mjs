@@ -247,13 +247,14 @@ try {
 
   await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
     tabId: regressionTab,
-    html: cardHtml('B000CONFLICT', 'Test Popcorn, 18 Count Individual Bags, 0.65 oz and 8 oz')
+    html: cardHtml('B00CNFLT01', 'Test Popcorn, 18 Count Individual Bags, 0.65 oz and 8 oz')
   });
   output.conflictingPackageFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
     type: 'select_candidate', query: 'test popcorn, 18 x 0.65 oz', maxPrice: 10, primeRequired: false
   }), { tabId: regressionTab });
   assert.equal(output.conflictingPackageFixture?.selectionKind, 'no_verified_candidate', 'conflicting package evidence');
   assert.equal(output.conflictingPackageFixture?.completed, false, 'conflicting package evidence abstains');
+  assert.equal(output.conflictingPackageFixture?.scan?.rejected?.package, 1, 'conflicting package evidence is rejected by package validation');
   output.finishedAt = new Date().toISOString();
   output.summary = output.items.reduce((summary, item) => {
     summary[item.selectionKind] = (summary[item.selectionKind] || 0) + 1;
