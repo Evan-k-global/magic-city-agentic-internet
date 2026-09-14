@@ -6,5 +6,12 @@ export const PARTNER_CONFIG = Object.freeze({
   helperOwnerAgentId: 'acme-reading-agent',
   extensionName: 'Acme Magic City Helper',
   optionalMerchantOrigins: Object.freeze(['https://example.com/*']),
+  modelAdapter: Object.freeze({
+    mode: 'disabled',
+    path: '/partner/model/consult',
+    modelId: 'partner-default',
+    timeoutMs: 15000,
+    allowedQueryParameters: Object.freeze([])
+  }),
   profile: 'release'
 });

@@ -90,6 +90,7 @@
     "smoke:native-runner-extension-amazon": "node scripts/smoke-native-runner-extension-amazon.mjs",
     "smoke:custom-helper-extension-package": "node scripts/smoke-custom-helper-extension-package.mjs",
     "test:custom-helper-extension-packaging": "node scripts/test-custom-helper-extension-packaging.mjs",
+    "test:custom-helper-model-adapter": "node scripts/test-custom-helper-model-adapter.mjs",
     "build:native-runner-macos": "node scripts/build-mac-native-runner-installer.mjs",
     "package:native-runner-extension": "node scripts/package-native-runner-extension.mjs",
     "package:custom-helper-extension": "node scripts/package-custom-helper-extension.mjs"

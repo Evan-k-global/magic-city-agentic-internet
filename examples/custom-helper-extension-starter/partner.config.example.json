@@ -5,5 +5,12 @@
   "helperOwnerAgentId": "acme-reading-agent",
   "extensionName": "Acme Magic City Helper",
   "extensionDescription": "Read-only starter for mission-scoped Magic City browser execution.",
-  "optionalMerchantOrigins": ["https://example.com/*"]
+  "optionalMerchantOrigins": ["https://example.com/*"],
+  "modelAdapter": {
+    "mode": "disabled",
+    "path": "/partner/model/consult",
+    "modelId": "partner-default",
+    "timeoutMs": 15000,
+    "allowedQueryParameters": []
+  }
 }
