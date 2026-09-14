@@ -21584,16 +21584,16 @@
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
-      const missingStep = /auth_required|sign[ -]?in|unauthorized/.test(raw)
-        ? 'Sign in to Magic City first.'
+      const requiredAction = /auth_required|sign[ -]?in|unauthorized/.test(raw)
+        ? 'Log in to Magic City, then run the agent again.'
         : /local_checkout_profile|local data vault|shipping address|device lock|checkout details/.test(raw)
-          ? 'Enter your shipping address and payment-card cue in Local Data Vault.'
+          ? 'Open Local Data Vault, enter your shipping address and payment-card cue, then run the agent again.'
           : /insufficient_credits|credit balance|credits_required/.test(raw)
-            ? 'Claim your daily free credits, or add credits if you already claimed them.'
+            ? 'Claim your daily free credits, or add credits if you already claimed them, then run the agent again.'
             : /native_runner|extension|pairing|runner_not_ready/.test(raw)
-              ? 'Install and pair the Magic City Runner Chrome extension.'
-              : 'Finish the Magic Internet Agent setup before starting this run.';
-      return `Account Setup Step Needed\n\n${missingStep}\n\nCheck these steps:\n1. Log in to Magic City.\n2. Enter your Local Data Vault information.\n3. Claim your daily free credits.\n4. Install and pair the Magic City Runner Chrome extension.`;
+              ? 'Install and pair the Magic City Runner Chrome extension, then run the agent again.'
+              : 'Complete any missing account setup steps below, then run the agent again.';
+      return `Account Setup Step Needed\n\nTo continue: ${requiredAction}\n\nCheck these steps:\n1. Log in to Magic City.\n2. Enter your Local Data Vault information.\n3. Claim your daily free credits.\n4. Install and pair the Magic City Runner Chrome extension.`;
     }
 
     async function approveActionWithRecovery(actionRunId) {
