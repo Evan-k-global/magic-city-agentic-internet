@@ -16015,6 +16015,8 @@
 	          && !santaClawzRetryBlocked
 	          && !['queued', 'claimed', 'executing', 'fulfilled'].includes(statusBadge.statusValue);
 	        const agentMissingInputs = isAgentExecutionSheet ? getMissingAgentInputLabels(session) : [];
+	        const agentRequiresManualStart = isAgentExecutionSheet
+	          && shouldShowManualAgentRunControl(session, localExecutionError);
 	        const browserExecution = session.fulfillment?.result?.browserExecution || {};
 	        const browserStopState = String(browserExecution.stopState || '').toLowerCase();
 	        const browserSummary = browserExecution.checkoutSummary || {};
@@ -16079,6 +16081,7 @@
 	        const agentRunButtonHtml = santaClawzRetryBlocked
 	          ? '<button class="execution-secondary" type="button" disabled>Agent update required</button>'
 	          : `<button class="execution-primary execution-agent-start" type="button" data-execution-fallback-run-session="${escapeExecutionValue(session.id)}">${localExecutionError ? 'Retry agent' : 'Run agent'}</button>`;
+	        const agentAutoStartButtonHtml = `<button type="button" hidden data-execution-run-agent="true" aria-hidden="true" tabindex="-1">Run agent</button>`;
 	        const hireStepDescription = isBrowserExecutionSheet
 	          ? 'Runs until login, payment, captcha, or mismatch.'
 	          : compactExecutionSentence(getExecutionSelectedAgentDescription(session) || 'Review inputs, then run.', 120);
@@ -16126,7 +16129,7 @@
 	                        <div>
 	                          <strong>${escapeExecutionValue(runState.title)}</strong>
 	                          <span>${escapeExecutionValue(runState.detail)}</span>
-	                        ${(browserRunSummaryActions || agentCanRunNow || santaClawzRetryBlocked)
+	                        ${(browserRunSummaryActions || (agentCanRunNow && agentRequiresManualStart) || santaClawzRetryBlocked)
 	                          ? `<div class="execution-run-inline-actions">${browserRunSummaryActions || agentRunButtonHtml}</div>`
 	                          : ''}
 	                      </div>
@@ -16153,7 +16156,7 @@
 	                        <p>${escapeExecutionValue(hireStepDescription)}</p>
 	                      </div>
 	                    </div>
-	                    <div class="execution-actions" id="executionActions">${browserCanRunNow ? browserRunButtonHtml : (agentCanRunNow || santaClawzRetryBlocked) ? agentRunButtonHtml : ''}</div>
+	                    <div class="execution-actions" id="executionActions">${browserCanRunNow ? browserRunButtonHtml : agentCanRunNow ? (agentRequiresManualStart ? agentRunButtonHtml : agentAutoStartButtonHtml) : santaClawzRetryBlocked ? agentRunButtonHtml : ''}</div>
 	                    ${agentMissingInputs.length ? `<div class="execution-inline-note">Required before run: ${escapeExecutionValue(agentMissingInputs.join(' · '))}</div>` : ''}
 	                    ${paidSantaClawzPricingNote ? `<div class="execution-inline-note">${escapeExecutionValue(paidSantaClawzPricingNote)}</div>` : ''}
 	                    ${renderMissionBoundAuthNote(session)}
@@ -16280,6 +16283,12 @@
           : !String(publicInputs[field.id] || '').trim())
         .map((field) => field.label)
         .slice(0, 4);
+    }
+
+    function shouldShowManualAgentRunControl(session, localError = null) {
+      if (!isSantaClawzExecutionSession(session)) return true;
+      if (localError || String(session?.status || '').toLowerCase() === 'failed') return true;
+      return getMissingAgentInputLabels(session).length > 0;
     }
 
 	    function normalizeAgentRequirementMaxLength(rawLimit, { id = '', type = '', label = '', placeholder = '' } = {}) {
@@ -19279,6 +19288,12 @@
       const actionLocalError = executionLocalErrorApplies(session, rawActionLocalError)
         ? rawActionLocalError
         : null;
+	      const agentRequiresManualStart = kind !== 'agent'
+	        || santaClawzRetryBlocked
+	        || shouldShowManualAgentRunControl(session, actionLocalError);
+	      const santaClawzAutoStartControl = kind === 'agent' && !santaClawzDeliveryReady && !agentRequiresManualStart
+	        ? '<button type="button" hidden id="executionAgentBtn" data-execution-run-agent="true" aria-hidden="true" tabindex="-1">Run agent</button>'
+	        : '';
       const actionLocalErrorCode = String(actionLocalError?.code || actionLocalError?.message || '').toLowerCase();
       const actionNeedsAuth = isBrowserLane && /auth_required/.test(actionLocalErrorCode);
       const actionNeedsFunds = isBrowserLane && executionCreditErrorNeedsTopup(session, actionLocalError);
@@ -19312,7 +19327,7 @@
         || ''
       );
 	      setExecutionHtml('executionActions', `
-	        ${santaClawzDeliveryReady
+	        ${santaClawzAutoStartControl || (santaClawzDeliveryReady
 	          ? ''
 	          : showSantaClawzCreditBackedRun
 	          ? `<button class="execution-primary" id="executionSantaClawzCreditBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Sending with credits…' : creditBackedButtonLabel}</button>`
@@ -19320,7 +19335,7 @@
 	          ? `<button class="execution-primary" id="executionSantaClawzPayBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Preparing wallet approval...' : directX402ButtonLabel}</button>`
 	          : isBrowserLane
 	            ? browserActionButtonHtml
-		            : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`}
+		            : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`)}
         ${agentViewUrl ? `<a class="execution-secondary" href="${escapeExecutionValue(agentViewUrl)}" target="_blank" rel="noopener noreferrer">View Agent</a>` : ''}
         ${session.handoffData?.kind === 'food' ? `<button class="execution-secondary" id="executionDiscoverBtn" type="button" ${executionBusy ? 'disabled' : ''}>Find live local restaurants</button>` : ''}
         ${showTopup ? `<button class="execution-secondary" id="executionTopupBtn" data-execution-topup="true" type="button" ${executionBusy ? 'disabled' : ''}>${topupButtonLabel}</button>` : ''}
@@ -19464,6 +19479,10 @@
 	          if (busy) {
 	            markExecutionStartButtonStarting(button);
 	            button.textContent = label;
+	            if (String(session?.handoffData?.kind || '') === 'browser') {
+	              button.hidden = true;
+	              button.setAttribute?.('aria-hidden', 'true');
+	            }
 	          } else {
 	            button.disabled = false;
 	            button.classList?.remove('is-starting');
