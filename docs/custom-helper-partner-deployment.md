@@ -29,6 +29,8 @@ partner-owned path and set:
 - `optionalMerchantOrigins`: matching Chrome host patterns ending in `/*`.
 - `helperPluginId` and `helperOwnerAgentId`: stable non-reserved identities.
 - `extensionName` and `extensionDescription`: partner branding.
+- `modelAdapter`: optional authenticated model consultation through the same
+  control plane. Leave `mode` as `disabled` until the partner route is ready.
 
 Build development and release packages separately:
 
@@ -122,6 +124,11 @@ the Runner reference map in `docs/partner-white-label-quickstart.md`. An
 irreversible action additionally needs scoped final authority, exact item/price/
 quantity verification, durable intent and dispatch receipts, and a no-replay
 test at every interruption boundary.
+
+Optional local or cloud model intelligence is documented in
+`docs/custom-helper-model-access.md`. Use the packaged structured adapter after
+local DOM extraction. Revalidate its candidate against the current page and
+signed mission before acting; model output is judgment, not authority.
 
 ## Honest Product Claim
 

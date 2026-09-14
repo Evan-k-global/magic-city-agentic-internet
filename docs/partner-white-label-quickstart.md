@@ -20,6 +20,7 @@ licensed under Apache-2.0. Copy its example build configuration and set:
 | Extension identity | `extensionName`, `extensionDescription` | Partner branding |
 | Approved page targets | `launchOrigins` | Exact origins this helper implementation accepts |
 | Page access | `optionalMerchantOrigins` | Matching exact patterns granted by the user |
+| Optional model judgment | `modelAdapter` | Disabled, or an authenticated relative control-plane adapter path |
 
 The existing handshake is:
 
@@ -79,6 +80,14 @@ independent helper against the same protocol boundaries.
 Do not copy merchant selectors blindly. A partner adapter should implement only
 the merchants and action types it can verify, and pause when evidence is
 missing or contradictory.
+
+For model-assisted browser judgment, use the bounded adapter in
+`examples/custom-helper-extension-starter/model-adapter.js` and follow
+`docs/custom-helper-model-access.md`. A self-hosted control plane can route the
+same authenticated request to a local model or a hosted provider without
+putting provider keys in the extension. The model returns advisory structured
+data referencing observed candidates; the helper retains every authority and
+policy check.
 
 ### Partner implementation sequence
 
@@ -187,6 +196,7 @@ does not extend to the rest of the repository.
 - `docs/custom-helper-partner-deployment.md`
 - `docs/bring-your-own-helper-agent.md`
 - `docs/custom-helper-hello-walkthrough.md`
+- `docs/custom-helper-model-access.md`
 - `docs/custom-helper-release-checklist.md`
 - `docs/custom-helper-privacy-template.md`
 - `docs/local-authenticated-browser-runner.md`

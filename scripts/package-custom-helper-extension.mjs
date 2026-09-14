@@ -65,6 +65,29 @@ function validateId(value, field) {
   return id;
 }
 
+function normalizeModelAdapter(value = {}) {
+  const mode = String(value?.mode || 'disabled').trim().toLowerCase();
+  if (!['disabled', 'control_plane'].includes(mode)) {
+    fail('modelAdapter.mode must be disabled or control_plane');
+  }
+  const adapterPath = String(value?.path || '/partner/model/consult').trim();
+  if (!adapterPath.startsWith('/') || adapterPath.startsWith('//') || /[?#]/.test(adapterPath)) {
+    fail('modelAdapter.path must be a relative control-plane path without query or hash');
+  }
+  const modelId = String(value?.modelId || 'partner-default').trim();
+  if (!modelId || modelId.length > 120) fail('modelAdapter.modelId must be 1-120 characters');
+  const timeoutMs = Number(value?.timeoutMs ?? 15000);
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 20000) {
+    fail('modelAdapter.timeoutMs must be an integer from 1000 to 20000');
+  }
+  const allowedQueryParameters = Array.from(new Set((value?.allowedQueryParameters || []).map((entry) => String(entry || '').trim())));
+  if (allowedQueryParameters.length > 20
+    || allowedQueryParameters.some((entry) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(entry))) {
+    fail('modelAdapter.allowedQueryParameters must contain at most 20 explicit query keys');
+  }
+  return { mode, path: adapterPath, modelId, timeoutMs, allowedQueryParameters };
+}
+
 function assertNoRemoteCode(filePath) {
   const text = fs.readFileSync(filePath, 'utf8');
   const blockedPatterns = [
@@ -102,6 +125,7 @@ const helperPluginId = validateId(rawConfig.helperPluginId, 'helperPluginId');
 const helperOwnerAgentId = validateId(rawConfig.helperOwnerAgentId, 'helperOwnerAgentId');
 const extensionName = String(rawConfig.extensionName || '').trim();
 const extensionDescription = String(rawConfig.extensionDescription || '').trim();
+const modelAdapter = normalizeModelAdapter(rawConfig.modelAdapter);
 if (!extensionName || extensionName.length > 75) fail('extensionName must be 1-75 characters');
 if (!extensionDescription || extensionDescription.length > 132) fail('extensionDescription must be 1-132 characters');
 
@@ -123,11 +147,11 @@ for (const permission of ['storage', 'tabs', 'scripting']) {
 }
 if (permissions.includes('debugger') || permissions.includes('webRequest')) fail('starter must not ship debugger or webRequest permissions');
 
-const staticFiles = ['background.js', 'popup.html', 'popup.js', 'README.md', 'LICENSE'];
+const staticFiles = ['background.js', 'model-adapter.js', 'popup.html', 'popup.js', 'README.md', 'LICENSE'];
 for (const relativePath of staticFiles) {
   const sourcePath = path.join(starterDir, relativePath);
   if (!fs.existsSync(sourcePath)) fail(`missing ${relativePath}`);
-  if (['background.js', 'popup.html', 'popup.js'].includes(relativePath)) assertNoRemoteCode(sourcePath);
+  if (['background.js', 'model-adapter.js', 'popup.html', 'popup.js'].includes(relativePath)) assertNoRemoteCode(sourcePath);
 }
 
 const slug = helperPluginId.replace(/[^a-z0-9._-]/g, '-');
@@ -147,6 +171,7 @@ fs.writeFileSync(
     helperOwnerAgentId,
     extensionName,
     optionalMerchantOrigins,
+    modelAdapter,
     profile
   }, null, 2)});\n`
 );

@@ -11,6 +11,7 @@ const protectedRunnerFiles = [
   'public/native-runner/extension/manifest.json',
   'public/native-runner/extension/background.js',
   'public/native-runner/extension/background-v0.2.js',
+  'public/native-runner/extension/amazon-selection.js',
   'public/native-runner/extension/executor.js'
 ];
 
@@ -49,6 +50,38 @@ try {
   const generatedConfig = fs.readFileSync(path.join(releaseOut, 'package/partner-config.js'), 'utf8');
   assert.match(generatedConfig, /https:\/\/agents\.partner\.test/);
   assert.match(generatedConfig, /"profile": "release"/);
+  assert.match(generatedConfig, /"mode": "disabled"/);
+  assert.equal(fs.existsSync(path.join(releaseOut, 'package/model-adapter.js')), true);
+
+  const modelConfig = path.join(tmpDir, 'model.json');
+  fs.writeFileSync(modelConfig, JSON.stringify({
+    ...JSON.parse(fs.readFileSync(releaseConfig, 'utf8')),
+    modelAdapter: {
+      mode: 'control_plane',
+      path: '/partner/model/consult',
+      modelId: 'partner-selection-model',
+      timeoutMs: 12000,
+      allowedQueryParameters: ['q']
+    }
+  }));
+  const modelOut = path.join(tmpDir, 'model-output');
+  const modelPackage = runPackage(modelConfig, 'release', modelOut);
+  assert.equal(modelPackage.status, 0, modelPackage.stderr || modelPackage.stdout);
+  const modelManifest = JSON.parse(fs.readFileSync(path.join(modelOut, 'package/manifest.json'), 'utf8'));
+  assert.deepEqual(modelManifest.host_permissions, ['https://agents.partner.test/*']);
+  const modelGeneratedConfig = fs.readFileSync(path.join(modelOut, 'package/partner-config.js'), 'utf8');
+  assert.match(modelGeneratedConfig, /"mode": "control_plane"/);
+  assert.match(modelGeneratedConfig, /"modelId": "partner-selection-model"/);
+  assert.match(modelGeneratedConfig, /"allowedQueryParameters": \[\s*"q"/);
+
+  const invalidModelConfig = path.join(tmpDir, 'invalid-model.json');
+  fs.writeFileSync(invalidModelConfig, JSON.stringify({
+    ...JSON.parse(fs.readFileSync(releaseConfig, 'utf8')),
+    modelAdapter: { mode: 'control_plane', path: 'https://models.partner.test/consult' }
+  }));
+  const rejectedModel = runPackage(invalidModelConfig, 'release', path.join(tmpDir, 'invalid-model-output'));
+  assert.notEqual(rejectedModel.status, 0);
+  assert.match(rejectedModel.stderr, /relative control-plane path/);
 
   const developmentConfig = path.join(tmpDir, 'development.json');
   fs.writeFileSync(developmentConfig, JSON.stringify({

@@ -13,6 +13,7 @@ node scripts/package-custom-helper-extension.mjs \
   --config path/to/partner.config.json \
   --profile release
 npm run test:custom-helper-extension-packaging
+npm run test:custom-helper-model-adapter
 npm run smoke:custom-helper-extension-package
 ```
 
@@ -38,6 +39,8 @@ emits a holder-signed checkpoint, and fulfills the session with a proof trail.
 - Rebuilding for another control-plane origin requires pairing that build again.
 - All JavaScript is bundled with the extension. No remote code, remote scripts,
   `eval`, `new Function`, or model-supplied JavaScript programs.
+- Model access is disabled unless an authenticated partner control-plane adapter
+  is configured. Provider keys never enter extension config or browser storage.
 
 ## Protocol Contract
 
@@ -61,6 +64,10 @@ emits a holder-signed checkpoint, and fulfills the session with a proof trail.
   holder public key. Do not cache or reuse dispatch nonces.
 - Every checkpoint includes `planHash`, `planActionId`, and holder
   proof-of-possession.
+- Model responses echo the session, plan, action, request and observation
+  bindings; unobserved candidates and stale responses are rejected.
+- Model output remains advisory and cannot change budget, merchant, signed
+  actions, expiry, substitution permission or final-submit authority.
 - Fulfillment releases held credits on failure and holds/captures only when the
   browser outcome is ready for explicit user approval.
 

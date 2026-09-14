@@ -27,7 +27,14 @@ custom helper must keep:
      "helperOwnerAgentId": "example-reading-agent",
      "extensionName": "Example Browser Helper",
      "extensionDescription": "Read-only mission helper for Example.",
-     "optionalMerchantOrigins": ["https://shop.example.com/*"]
+     "optionalMerchantOrigins": ["https://shop.example.com/*"],
+     "modelAdapter": {
+       "mode": "disabled",
+       "path": "/partner/model/consult",
+       "modelId": "partner-default",
+       "timeoutMs": 15000,
+       "allowedQueryParameters": []
+     }
    }
    ```
 
@@ -75,6 +82,7 @@ as a protocol and packaging gate, not proof of completed merchant automation.
 Release docs:
 
 - `docs/custom-helper-hello-walkthrough.md`
+- `docs/custom-helper-model-access.md`
 - `docs/custom-helper-release-checklist.md`
 - `docs/custom-helper-privacy-template.md`
 
@@ -85,6 +93,10 @@ Release docs:
 - Keep host permissions optional and mission-scoped.
 - Extend `executeSession` with the partner's own browser logic, but keep the
   plan, policy, checkpoint, and proof boundaries intact.
+- Optional model judgment uses the packaged `model-adapter.js` contract. It is
+  disabled by default and calls only an authenticated route on the configured
+  control plane. The model can select an observed candidate or abstain; it
+  cannot return executable code or expand mission authority.
 - Advertise only implemented capabilities. The checked-in example intentionally
   has no cart, checkout, credential, or purchase capability.
 - Test the final zip artifact before submission.
