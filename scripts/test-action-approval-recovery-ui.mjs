@@ -12,8 +12,19 @@ const helperSource = html.slice(start, end);
 
 function loadHelpers(api) {
   const context = vm.createContext({ api, window: { setTimeout }, setTimeout, Error });
-  vm.runInContext(`${helperSource}\nthis.helpers = { approveActionWithRecovery, approvedSessionAlreadyStarted };`, context);
+  vm.runInContext(`${helperSource}\nthis.helpers = { approveActionWithRecovery, approvedSessionAlreadyStarted, describeMagicInternetSetupError };`, context);
   return context.helpers;
+}
+
+{
+  const helpers = loadHelpers(async () => ({}));
+  assert.match(helpers.describeMagicInternetSetupError(new Error('auth_required')), /^Sign in to Magic City first\./);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('local_checkout_profile_missing')), /^Enter your shipping address and payment-card cue in Local Data Vault\./);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('insufficient_credits')), /^Claim your daily free credits/);
+  assert.match(helpers.describeMagicInternetSetupError(new Error('native_runner_not_ready')), /^Install and pair the Magic City Runner Chrome extension\./);
+  for (const code of ['auth_required', 'local_checkout_profile_missing', 'insufficient_credits', 'native_runner_not_ready']) {
+    assert.match(helpers.describeMagicInternetSetupError(new Error(code)), /Setup checklist: Sign in · Complete Local Data Vault · Claim daily free credits · Install and pair the Chrome extension\./);
+  }
 }
 
 {

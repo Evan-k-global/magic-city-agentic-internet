@@ -21579,6 +21579,23 @@
       return ['queued', 'claimed', 'executing', 'fulfilled', 'failed'].includes(String(data.connectorSession?.status || ''));
     }
 
+    function describeMagicInternetSetupError(error) {
+      const raw = [error?.message, error?.data?.error, error?.data?.message]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      const missingStep = /auth_required|sign[ -]?in|unauthorized/.test(raw)
+        ? 'Sign in to Magic City first.'
+        : /local_checkout_profile|local data vault|shipping address|device lock|checkout details/.test(raw)
+          ? 'Enter your shipping address and payment-card cue in Local Data Vault.'
+          : /insufficient_credits|credit balance|credits_required/.test(raw)
+            ? 'Claim your daily free credits, or add credits if you already claimed them.'
+            : /native_runner|extension|pairing|runner_not_ready/.test(raw)
+              ? 'Install and pair the Magic City Runner Chrome extension.'
+              : 'Finish the Magic Internet Agent setup before starting this run.';
+      return `${missingStep}\n\nSetup checklist: Sign in · Complete Local Data Vault · Claim daily free credits · Install and pair the Chrome extension.`;
+    }
+
     async function approveActionWithRecovery(actionRunId) {
       const path = `/actions/${encodeURIComponent(actionRunId)}/approve`;
       const request = () => api(path, { method: 'POST', body: JSON.stringify({}) });
@@ -21628,12 +21645,12 @@
       const buttons = [...card.querySelectorAll('button')];
       const buttonLabels = new Map(buttons.map((button) => [button, button.textContent]));
       const triggerButton = event.target.closest('button');
+      const magicInternetAction = card.dataset.actionMagicInternet === 'true';
       buttons.forEach((button) => { button.disabled = true; });
 
       try {
 		        if (approveId) {
 		          const actionLabel = card.dataset.actionRunLabel || 'agent';
-		          const magicInternetAction = card.dataset.actionMagicInternet === 'true';
 		          if (!magicInternetAction) {
 		            setAssistantBodyContent(messageEl.querySelector('.msg-body'), `Opening ${actionLabel}…`);
 		            setActionCardOpening(card, actionLabel, 'Opening');
@@ -21687,7 +21704,9 @@
 	          messageEl.querySelector('.msg-body'),
 	          error?.actionApprovalRecoverable
 	            ? 'Connection interrupted while confirming approval. Check this same approval again; Magic City will not create a new task.'
-	            : `Error: ${error.message}`
+	            : approveId && magicInternetAction
+	              ? describeMagicInternetSetupError(error)
+	              : `Error: ${error.message}`
 	        );
         buttons.forEach((button) => {
           button.disabled = false;
