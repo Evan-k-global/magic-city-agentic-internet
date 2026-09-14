@@ -1,3 +1,5 @@
+import { selectAmazonSearchCard } from './amazon-selection.js';
+
 const DEFAULT_BASE_URL = 'https://magic-city.ai';
 const POLL_ALARM = 'magic-city-runner-poll';
 const RESUME_ALARM = 'magic-city-runner-resume';
@@ -1361,166 +1363,12 @@ async function tabCommand(tabId, command, {
 }
 
 async function amazonSearchCardAddToCart(tabId, action = {}) {
-  const maxPrice = Number(action.maxPrice);
+  const maxPrice = action.maxPrice == null || action.maxPrice === '' ? null : Number(action.maxPrice);
   const result = await withTimeout(
     () => chrome.scripting.executeScript({
       target: { tabId },
       injectImmediately: true,
-      func: async (rawAction) => {
-        const visible = (element) => {
-          if (!element) return false;
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 4 && rect.height > 4;
-        };
-        const compact = (value = '', limit = 240) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
-        const normalizeQuery = (value = '') => String(value || '')
-          .replace(/\bgranol\s+a?bars?\b/gi, 'granola bars')
-          .replace(/\bgranola\s+bars?\b/gi, 'granola bars');
-        const normalize = (value = '') => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-        const queryTokens = normalize(normalizeQuery(rawAction?.query || rawAction?.selectionBrief || ''))
-          .split(/\s+/)
-          .filter((token) => token && !new Set(['buy', 'from', 'amazon', 'com', 'please', 'max', 'spend', 'under', 'for']).has(token));
-        const tokenMatches = (text, token) => {
-          const words = new Set(normalize(text).split(/\s+/).filter(Boolean));
-          return words.has(token) || token.endsWith('s') && words.has(token.slice(0, -1)) || words.has(`${token}s`);
-        };
-        const priceFromText = (value = '') => {
-          const match = String(value || '').match(/\$\s*(\d{1,5}(?:\.\d{2})?)/);
-          return match ? Number(match[1]) : null;
-        };
-        const labelFor = (element) => compact([
-          element?.innerText,
-          element?.textContent,
-          element?.value,
-          element?.getAttribute?.('aria-label'),
-          element?.getAttribute?.('title'),
-          element?.id,
-          element?.getAttribute?.('name')
-        ].filter(Boolean).join(' '), 300);
-        const cardControls = (card) => Array.from(card.querySelectorAll([
-          '#add-to-cart-button',
-          '[id^="add-to-cart-button"]',
-          'input[name*="submit.add-to-cart"]',
-          'button[name*="submit.add-to-cart"]',
-          '[data-action*="add-to-cart" i]',
-          'input[value*="add to cart" i]',
-          'button[aria-label*="add to cart" i]',
-          'input[aria-label*="add to cart" i]',
-          '[role="button"][aria-label*="add to cart" i]',
-          'button',
-          'input[type="submit"]',
-          'input[type="button"]',
-          '[role="button"]'
-        ].join(','))).filter((control) => {
-          if (!visible(control) || control.disabled) return false;
-          const label = labelFor(control);
-          return /\badd to (?:cart|bag)\b|\badd item\b/i.test(label)
-            && !/place (your )?order|confirm purchase|complete purchase|pay now|submit order|buy now/i.test(label);
-        });
-        const cards = Array.from(document.querySelectorAll('[data-component-type="s-search-result"], [data-asin]:not([data-asin=""])'))
-          .filter(visible)
-          .map((card, index) => {
-            const title = compact(card.querySelector('h2')?.innerText || card.querySelector('h2 a')?.textContent || card.innerText || '', 220);
-            const context = compact(card.innerText || title, 1200);
-            const href = card.querySelector('h2 a[href*="/dp/"], a[href*="/dp/"]')?.href || '';
-            const price = priceFromText(context);
-            const matchedTokens = queryTokens.filter((token) => tokenMatches(`${title} ${context}`, token));
-            const coverage = queryTokens.length ? matchedTokens.length / queryTokens.length : 0;
-            const prime = Boolean(card.querySelector('.a-icon-prime, [aria-label*="prime" i], img[alt*="prime" i]')) || /\bprime\b/i.test(context);
-            const freeShipping = /\bfree (?:delivery|shipping)\b/i.test(context);
-            const conditionalShipping = /\b(?:on|over)\s+\$\s*\d|\$\s*\d+\s+(?:of|more)|qualifying items?|minimum order/i.test(context);
-            const sponsored = /\bsponsored\b|\badvertisement\b/i.test(context);
-            const control = cardControls(card)[0] || null;
-            return { card, control, index, title, context, href, price, coverage, prime, freeShipping, conditionalShipping, sponsored, asin: String(card.getAttribute('data-asin') || '').trim() };
-          })
-          .filter((candidate) => candidate.control && candidate.coverage >= (queryTokens.length <= 4 ? 1 : 0.8))
-          .filter((candidate) => !candidate.sponsored)
-          .filter((candidate) => !Number.isFinite(Number(rawAction?.maxPrice)) || candidate.price == null || candidate.price <= Number(rawAction.maxPrice) + 0.005)
-          .filter((candidate) => rawAction?.primeRequired !== true || (candidate.prime && candidate.freeShipping && !candidate.conditionalShipping))
-          .sort((left, right) => {
-            if (right.coverage !== left.coverage) return right.coverage - left.coverage;
-            if (Number(right.prime) !== Number(left.prime)) return Number(right.prime) - Number(left.prime);
-            if (Number(right.freeShipping && !right.conditionalShipping) !== Number(left.freeShipping && !left.conditionalShipping)) {
-              return Number(right.freeShipping && !right.conditionalShipping) - Number(left.freeShipping && !left.conditionalShipping);
-            }
-            const leftPrice = Number.isFinite(left.price) ? left.price : Number.POSITIVE_INFINITY;
-            const rightPrice = Number.isFinite(right.price) ? right.price : Number.POSITIVE_INFINITY;
-            if (leftPrice !== rightPrice) return leftPrice - rightPrice;
-            return left.index - right.index;
-          });
-        const selected = cards[0];
-        if (!selected) {
-          return { completed: false, reason: 'No visible matching Amazon result card exposed an Add to cart control.' };
-        }
-        selected.control.scrollIntoView({ block: 'center', inline: 'center' });
-        selected.control.click();
-        globalThis.__magicCitySelectedCandidate = {
-          key: selected.asin ? `asin:${selected.asin}` : `url:${String(selected.href || '').replace(/[?#].*$/, '')}`,
-          asin: selected.asin,
-          url: selected.href,
-          pageUrl: String(location.href || ''),
-          selectedAt: Date.now(),
-          cartActionStarted: true
-        };
-        const cartCount = Number(String(document.querySelector('#nav-cart-count')?.textContent || '').match(/\d+/)?.[0] || '') || null;
-        const pageText = compact(document.body?.innerText || '', 4000);
-        const cartPreviewVisible = /\b(?:go to|view) cart\b|\bproceed to checkout\b/i.test(pageText)
-          && /\bsubtotal\b[\s\S]{0,80}?\$\s*\d/i.test(pageText);
-        return {
-          completed: true,
-          searchResultSelected: true,
-          directSearchResultCart: true,
-          directCartControlAvailable: true,
-          label: 'Add to cart',
-          controlStrategy: 'amazon_search_card_fast_path',
-          selected: {
-            id: `candidate-${selected.index + 1}`,
-            asin: selected.asin,
-            title: selected.title,
-            url: selected.href,
-            price: selected.price,
-            primeEligible: selected.prime,
-            freeShipping: selected.freeShipping,
-            cartActionStarted: true,
-            relevance: { coverage: selected.coverage }
-          },
-          state: {
-            url: location.href,
-            title: compact(document.title, 180),
-            interactionLayer: 'page',
-            loginRequired: false,
-            paymentRequired: false,
-            finalApprovalVisible: false,
-            providerChallenge: false,
-            productOpened: false,
-            addToCartAvailable: false,
-            browserState: 'search_results',
-            browserSurface: 'search_results',
-            browserStateConfidence: 1,
-            browserStateReason: cartPreviewVisible || cartCount
-              ? 'The exact visible Amazon result card was added to cart.'
-              : 'The exact visible Amazon result card was clicked; the next step verifies the cart.',
-            milestoneSignals: {
-              candidateSelected: true,
-              cartVisible: false,
-              checkoutOpen: false,
-              addressConfirmed: false,
-              cardConfirmed: false,
-              deliveryConfirmed: false,
-              checkoutProfileVerified: false,
-              finalReviewReady: false,
-              orderSubmitted: false
-            },
-            checkoutSummary: {
-              stage: 'search_results',
-              nextAction: 'Opening cart',
-              cartItemCount: cartCount
-            },
-            observationDurationMs: 0
-          }
-        };
-      },
+      func: selectAmazonSearchCard,
       args: [{ ...action, maxPrice: Number.isFinite(maxPrice) ? maxPrice : action.maxPrice }]
     }),
     AMAZON_SEARCH_CARD_FAST_PATH_TIMEOUT_MS,
@@ -3015,18 +2863,35 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
         throw error;
       }
       if (quickOutcome?.completed) {
-        const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
-        if (cartAdvance.advanced) {
+        if (quickOutcome.directSearchResultCart === true) {
+          const cartAdvance = await advanceAmazonAddedItemToCart(tabId, checkoutProfile, amazonCartRecoveryUrl(plan));
+          if (cartAdvance.advanced) {
+            return {
+              ...quickOutcome,
+              postAddCartOpened: true,
+              cartOpenControlStrategy: cartAdvance.outcome?.controlStrategy || null,
+              cartOpenAttempts: cartAdvance.attempts,
+              state: cartAdvance.state || quickOutcome.state
+            };
+          }
+          return quickOutcome;
+        }
+        if (quickOutcome.navigationRequested && quickOutcome.navigationUrl) {
+          const before = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+          const navigation = await confirmCandidateNavigation(tabId, plan, quickOutcome.navigationUrl, before.url);
+          if (!navigation.confirmed) {
+            return { ...quickOutcome, completed: false, navigationConfirmed: false, reason: 'The exact selected product page did not open.' };
+          }
           return {
             ...quickOutcome,
-            postAddCartOpened: true,
-            cartOpenControlStrategy: cartAdvance.outcome?.controlStrategy || null,
-            cartOpenAttempts: cartAdvance.attempts,
-            state: cartAdvance.state || quickOutcome.state
+            navigationConfirmed: true,
+            observedNavigationUrl: navigation.observedUrl,
+            state: await waitForPurchasableProduct(tabId, checkoutProfile)
           };
         }
         return quickOutcome;
       }
+      if (quickOutcome?.selectionDecisionMade === true) return quickOutcome;
     }
   }
   if (action.type === 'click_intent'
@@ -3832,6 +3697,14 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
           price: Number.isFinite(Number(outcome.selected.price)) ? Number(outcome.selected.price) : null,
           url: compactNavigationUrl(outcome.selected.url || '') || null
         } : null,
+        selectionScan: outcome.scan && typeof outcome.scan === 'object' ? {
+          rawScanned: Number(outcome.scan.rawScanned || 0),
+          distinctCards: Number(outcome.scan.distinctCards || 0),
+          selectionDurationMs: Number(outcome.scan.selectionDurationMs || 0),
+          rejected: outcome.scan.rejected && typeof outcome.scan.rejected === 'object'
+            ? Object.fromEntries(Object.entries(outcome.scan.rejected).map(([key, value]) => [key, Number(value || 0)]))
+            : null
+        } : null,
         selectedProductPrice: outcome.state?.checkoutSummary?.productPrice || null,
         selectedDeliveredPrice: outcome.state?.checkoutSummary?.productDeliveredPrice || null,
         reason: outcome.reason || null,
@@ -3996,7 +3869,7 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
           reason: outcome.reason || `Verified ${action.expectedMilestone.replace(/_/g, ' ')}.`
         };
       }
-      if (action.expectedMilestone && !expectedMilestoneVerified) {
+      if (action.expectedMilestone && !expectedMilestoneVerified && outcome.selectionKind !== 'size_alternative') {
         outcome = {
           ...outcome,
           completed: false,
@@ -4011,6 +3884,12 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
       report.productOpened = Boolean(report.productOpened || progress.productOpened);
       report.addToCartClicked = progress.addToCartClicked;
       report.checkoutOpened = progress.checkoutOpened;
+      if (outcome.selectionKind === 'size_alternative' && outcome.completed) {
+        report.sizeSubstitution = outcome.sizeSubstitution || null;
+      } else if (outcome.selectionKind === 'size_alternative') {
+        report.selectionProposal = outcome.proposedCandidate || null;
+        report.stopEvidence = outcome.reason || 'A verified size alternative is available for review.';
+      }
       const actionStatus = outcome.completed
         ? (outcome.skipped ? 'skipped' : 'completed')
         : action.expectedMilestone || requiredBasketItem
@@ -4182,6 +4061,16 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
         report.stopEvidence = outcome.reason || 'The signed final-order action did not dispatch a native merchant click.';
         report.fulfillmentStatus = 'failed';
         report.fundingDisposition = 'release';
+        return reportAndStop(session, plan, report);
+      }
+      if (!outcome.completed && action.type === 'select_candidate' && outcome.selectionKind === 'size_alternative') {
+        report.stopState = 'product_selection_needs_review';
+        report.stopEvidence = outcome.reason || 'A verified size alternative is available for review.';
+        return reportAndStop(session, plan, report);
+      }
+      if (!outcome.completed && action.type === 'select_candidate' && outcome.selectionKind === 'no_verified_candidate') {
+        report.stopState = 'product_selection_needs_review';
+        report.stopEvidence = outcome.reason || 'Magic City could not find a verified match. Try again with a more general product query.';
         return reportAndStop(session, plan, report);
       }
       if (action.expectedMilestone && !expectedMilestoneVerified) {

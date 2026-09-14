@@ -396,7 +396,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<span class="a-price">$2.50</span><span>4.9 out of 5 stars</span><span>20,000 ratings</span><span>Ships from Lucky Supermarket. FREE delivery.</span>',
       '<button onclick="location.href=\'/cart?brand=local-market\'">Add to Cart</button>',
       '</div>',
-     '<div data-component-type="s-search-result" data-asin="NATURE-VALLEY-VALID">',
+     '<div data-component-type="s-search-result" data-asin="B000NVGOOD">',
       '<h2><a href="/dp/nature-valley-valid">Nature Valley Oats n Honey Granola Bars</a></h2>',
       '<span class="a-price">$3.50</span><span>4.7 out of 5 stars</span><span>12,000 ratings</span><span>Ships from Amazon.com. Prime delivery. FREE delivery Tomorrow.</span>',
       '<button onclick="location.href=\'/cart?brand=nature-valley-valid\'">Add to Cart</button>',
@@ -439,10 +439,10 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '<span class="a-price">$2.97</span><span>4.9 out of 5 stars</span><span>20,000 ratings</span><span aria-label="Amazon Prime">Prime Overnight</span><p>FREE delivery on $25 of qualifying items. Or $4.99 delivery in 3 hours.</p>',
       '<button>Add to Cart</button>',
       '</div>',
-      '<div data-component-type="s-search-result" data-asin="NATURE-VALLEY-VALID">',
-      '<h2><a href="/dp/nature-valley-valid">Nature Valley Oats n Honey Granola Bars</a></h2>',
+      '<div data-component-type="s-search-result" data-asin="B000NVGOOD">',
+      '<h2><a href="/dp/nature-valley-valid">Nature Valley Sweet & Salty Almond Granola Bars</a></h2>',
       '<span class="a-price">$3.50</span><span>4.7 out of 5 stars</span><span>12,000 ratings</span><span aria-label="Amazon Prime">Prime delivery</span><p>FREE delivery Tomorrow</p>',
-      '<button onclick="location.href=\'/cart?brand=nature-valley-valid\'">Add to Cart</button>',
+      '<button onclick="location.href=\'/cart?brand=nature-valley-valid&variant=almond\'">Add to Cart</button>',
       '</div>',
       '</main>'
     ].join('');
@@ -597,7 +597,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     ].join('');
   }
   if (pathname === '/cart' || pathname === '/gp/cart/view.html') {
-    if (searchParams.get('brand') === 'nature-valley-valid') brandCartItem = 'nature-valley-valid';
+    if (searchParams.get('brand') === 'nature-valley-valid') {
+      brandCartItem = searchParams.get('variant') === 'almond' ? 'nature-valley-almond-valid' : 'nature-valley-valid';
+    }
     if (searchParams.get('late') === 'paid') {
       lateShippingCartItem = 'paid';
       checkoutFixture = {
@@ -620,12 +622,14 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
         freeDeliveryAvailable: true
       };
     }
-    const selectedBrandItem = brandCartItem === 'nature-valley-valid';
+    const selectedBrandItem = ['nature-valley-valid', 'nature-valley-almond-valid'].includes(brandCartItem);
     const selectedLatePaidItem = lateShippingCartItem === 'paid';
     const selectedLateFreeItem = lateShippingCartItem === 'free';
-    const cartAsin = selectedBrandItem ? 'NATURE-VALLEY-VALID' : selectedLatePaidItem ? 'TEST-GADGET-LATE-PAID' : selectedLateFreeItem ? 'TEST-GADGET-FREE-PRIME' : 'BROWSER-SMOKE-ASIN';
+    const cartAsin = selectedBrandItem ? 'B000NVGOOD' : selectedLatePaidItem ? 'TEST-GADGET-LATE-PAID' : selectedLateFreeItem ? 'TEST-GADGET-FREE-PRIME' : 'B000SMOKE1';
     const cartUrl = selectedBrandItem ? '/dp/nature-valley-valid' : selectedLatePaidItem ? '/dp/test-gadget-late-paid' : selectedLateFreeItem ? '/dp/test-gadget-free-prime' : '/dp/test-gadget';
-    const cartTitle = selectedBrandItem ? 'Nature Valley Oats n Honey Granola Bars' : selectedLatePaidItem ? 'Test Gadget Prime Snack Pack' : selectedLateFreeItem ? 'Test Gadget Free Prime Pack' : 'Test Gadget';
+    const cartTitle = brandCartItem === 'nature-valley-almond-valid'
+      ? 'Nature Valley Sweet & Salty Almond Granola Bars'
+      : selectedBrandItem ? 'Nature Valley Oats n Honey Granola Bars' : selectedLatePaidItem ? 'Test Gadget Prime Snack Pack' : selectedLateFreeItem ? 'Test Gadget Free Prime Pack' : 'Test Gadget';
     const cartPrice = selectedLateFreeItem ? '$3.75' : '$3.50';
     const cartDelivery = selectedLatePaidItem
       ? 'Prime Overnight. FREE delivery on $25 of qualifying items. Or $3.99 delivery Tomorrow.'
@@ -846,7 +850,7 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       : liveSparseDuplicateOrder
         ? 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz'
         : 'Test Gadget';
-    const pendingAsin = pendingVariant === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'BROWSER-SMOKE-ASIN';
+    const pendingAsin = pendingVariant === 'cashew' ? 'NATURE-VALLEY-CASHEW' : 'B000SMOKE1';
     const pendingQuantity = Number(searchParams.get('quantity')) || null;
     const pendingUnitPrice = Number(searchParams.get('unitPrice')) || 3.5;
     const pendingComparisonUnitPrice = Number(searchParams.get('comparisonUnitPrice')) || 0.33;
@@ -894,9 +898,9 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
     '<form action="/search"><label>Search <input type="search" name="q" role="searchbox" /></label><button type="submit">Search</button></form>',
     '<section aria-label="Search filters"><label for="prime-filter"><input id="prime-filter" type="checkbox" aria-label="Prime" /> Prime</label><label for="free-shipping-filter"><input id="free-shipping-filter" type="checkbox" aria-label="Free shipping" /> Free shipping</label></section>',
     catalogNoise,
-    '<div data-component-type="s-search-result" data-asin="BROWSER-SMOKE-ASIN">',
-    '<h2><a href="/dp/test-gadget">Test gadget collection</a></h2>',
-    '<span class="a-price">$3.50</span><span>4.7 out of 5 stars</span><span>1,240 ratings</span><span aria-label="Amazon Prime">Prime delivery</span>',
+    '<div data-component-type="s-search-result" data-asin="B000SMOKE1">',
+    '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
+    '<span class="a-price"><span class="a-offscreen">$3.50</span></span><span>4.7 out of 5 stars</span><span>1,240 ratings</span><span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery</span>',
     '<button id="browser-smoke-search-add" onclick="location.href=\'/post-add-confirmation\'">Add to cart</button>',
     '</div>',
     '<aside id="browser-smoke-sidecart" aria-label="Cart preview" hidden><p>Subtotal $3.50</p><button onclick="location.href=\'/cart?source=browser-smoke-sidecart\'">Go to Cart</button></aside>',
@@ -978,7 +982,7 @@ async function main() {
             '<!doctype html><title>Slow Test Store</title><main><h1>Results for test gadget</h1>',
             '<div data-component-type="s-search-result" data-asin="SLOW-ASIN">',
             '<h2><a href="/dp/test-gadget">Test gadget</a></h2>',
-            '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span>',
+            '<span class="a-price">$3.50</span><span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery</span>',
             '<button id="slow-search-add" onclick="sessionStorage.setItem(\'selection-click-count\', String(Number(sessionStorage.getItem(\'selection-click-count\') || 0) + 1)); location.href=\'/post-add-confirmation\'">Add to cart</button>',
             '</div><a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a></main>'
           ].join(''));
@@ -2271,7 +2275,7 @@ async function main() {
           id: 'prepare-cart', type: 'click_intent', missionAction: 'prepare_cart', intent: 'add_to_cart',
           query: 'test gadget', requiredBasketItem: true, expectedMilestone: 'cart_confirmed', expectedCartItemCount: 1, maxPrice: 4
         },
-        selectedCandidate: { title: 'Test Gadget', asin: 'BROWSER-SMOKE-ASIN', price: 3.5 },
+        selectedCandidate: { title: 'Test Gadget', asin: 'B000SMOKE1', price: 3.5 },
         assertCheckpoint: (checkpoint) => {
           if (checkpoint?.browser?.runnerStep?.recoveredFromInterruption !== true || !checkpoint?.verifiedMilestones?.includes('cart_confirmed')) {
             fail(`browser_extension_cart_recovery_not_verified:${JSON.stringify({ checkpoint, fulfillment })}`);
@@ -2934,8 +2938,9 @@ async function main() {
           status: checkpoint.planActionStatus,
           milestones: checkpoint.verifiedMilestones
         })),
-        runnerState,
-        session: {
+          runnerState,
+          openPages: context.pages().map((page) => page.url()),
+          session: {
           status: session?.status,
           planState: session?.extensionMissionPlanState,
           fulfillment: session?.fulfillment,
@@ -2985,7 +2990,15 @@ async function main() {
         prepareCartCheckpointCommittedAtMs,
         inlineCartRecoveryMs,
         prepareCartCheckpointCount,
-        sawReconnectingRunner
+        sawReconnectingRunner,
+        fulfillmentStatus: fulfillment?.status || null,
+        stopState: fulfillment?.result?.browserExecution?.stopState || null,
+        stopEvidence: fulfillment?.result?.browserExecution?.stopEvidence || null,
+        recentCheckpoints: checkpoints.slice(-4).map((checkpoint) => ({
+          actionId: checkpoint.planActionId,
+          status: checkpoint.planActionStatus,
+          reason: checkpoint.browser?.runnerStep?.reason || null
+        }))
       })}`);
     }
     const expandedRecoveryActions = [
@@ -3075,11 +3088,11 @@ async function main() {
       sessionId: 'pending-replay-session',
       planHash: 'pending-replay-plan',
       expectedItemCount: 1,
-      boundCandidate: { asin: 'BROWSER-SMOKE-ASIN', title: 'Test Gadget', price: 3.5 },
+      boundCandidate: { asin: 'B000SMOKE1', title: 'Test Gadget', price: 3.5 },
       boundCartEvidence: {
         sessionId: 'pending-replay-session',
         planHash: 'pending-replay-plan',
-        asin: 'BROWSER-SMOKE-ASIN',
+        asin: 'B000SMOKE1',
         title: 'Test Gadget',
         price: 3.5,
         quantity: 1
@@ -3214,11 +3227,11 @@ async function main() {
       receiptScope: 'pending-live-sparse-plan:confirm-pending-order',
       sessionId: 'pending-live-sparse-session',
       planHash: 'pending-live-sparse-plan',
-      boundCandidate: { asin: 'NATURE-VALLEY-VALID', title: 'Nature Valley', price: 2.97 },
+      boundCandidate: { asin: 'B000NVGOOD', title: 'Nature Valley', price: 2.97 },
       boundCartEvidence: {
         sessionId: 'pending-live-sparse-session',
         planHash: 'pending-live-sparse-plan',
-        asin: 'NATURE-VALLEY-VALID',
+        asin: 'B000NVGOOD',
         title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
         price: 2.97,
         quantity: 1
@@ -3253,7 +3266,7 @@ async function main() {
       boundCartEvidence: {
         sessionId: 'pending-unit-price-session',
         planHash: 'pending-unit-price-plan',
-        asin: 'NATURE-VALLEY-VALID',
+        asin: 'B000NVGOOD',
         title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
         price: 2.97,
         quantity: 1
@@ -3286,7 +3299,7 @@ async function main() {
       boundCartEvidence: {
         sessionId: 'pending-sibling-price-session',
         planHash: 'pending-sibling-price-plan',
-        asin: 'NATURE-VALLEY-VALID',
+        asin: 'B000NVGOOD',
         title: 'Nature Valley Crunchy Granola Bars, Oats & Honey, 12 ct, 8.94 oz',
         price: 2.97,
         quantity: 1
@@ -3368,11 +3381,11 @@ async function main() {
       receiptScope: 'pending-quantity-mismatch-plan:confirm-pending-order',
       sessionId: 'pending-quantity-mismatch-session',
       planHash: 'pending-quantity-mismatch-plan',
-      boundCandidate: { asin: 'BROWSER-SMOKE-ASIN', title: 'Test Gadget', price: 2.97 },
+      boundCandidate: { asin: 'B000SMOKE1', title: 'Test Gadget', price: 2.97 },
       boundCartEvidence: {
         sessionId: 'pending-quantity-mismatch-session',
         planHash: 'pending-quantity-mismatch-plan',
-        asin: 'BROWSER-SMOKE-ASIN',
+        asin: 'B000SMOKE1',
         title: 'Test Gadget',
         price: 2.97,
         quantity: 1
@@ -3406,7 +3419,7 @@ async function main() {
       boundCartEvidence: {
         sessionId: 'pending-price-mismatch-session',
         planHash: 'pending-price-mismatch-plan',
-        asin: 'BROWSER-SMOKE-ASIN',
+        asin: 'B000SMOKE1',
         title: 'Test Gadget',
         price: 3.5,
         quantity: 1
@@ -3574,7 +3587,7 @@ async function main() {
             actionId: 'prepare-cart',
             actionIndex: 0,
             nextActionIndex: 0,
-            selectedCandidate: { title: 'Test Gadget', asin: 'BROWSER-SMOKE-ASIN', price: 3.5 },
+            selectedCandidate: { title: 'Test Gadget', asin: 'B000SMOKE1', price: 3.5 },
             startedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           }
@@ -3870,7 +3883,7 @@ async function main() {
       })}`);
     }
     if (selectedMatchCheckpoint?.browser?.runnerStep?.directSearchResultCart !== true
-      || !['amazon_search_card_fast_path', 'selected_search_result'].includes(selectedMatchCheckpoint?.browser?.runnerStep?.controlStrategy)) {
+      || !['amazon_search_card_exact_first', 'amazon_search_card_fast_path', 'selected_search_result'].includes(selectedMatchCheckpoint?.browser?.runnerStep?.controlStrategy)) {
       fail(`browser_extension_candidate_direct_cart_not_verified:${JSON.stringify({
         url: selectedMatchCheckpoint?.browser?.url || null,
         navigationConfirmed: selectedMatchCheckpoint?.browser?.runnerStep?.navigationConfirmed ?? null,
@@ -3952,7 +3965,7 @@ async function main() {
     }
     const productCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match');
     if (productCheckpoint?.browser?.runnerStep?.directSearchResultCart !== true
-      || !['amazon_search_card_fast_path', 'selected_search_result'].includes(productCheckpoint?.browser?.runnerStep?.controlStrategy)
+      || !['amazon_search_card_exact_first', 'amazon_search_card_fast_path', 'selected_search_result'].includes(productCheckpoint?.browser?.runnerStep?.controlStrategy)
       || !/test gadget/i.test(String(productCheckpoint?.browser?.runnerStep?.selectedCandidate?.title || ''))) {
       fail(`browser_extension_did_not_use_direct_search_card_receipt:${JSON.stringify({
         runnerStep: productCheckpoint?.browser?.runnerStep || null,
@@ -4121,6 +4134,7 @@ async function main() {
           control: checkpoint.browser?.runnerStep?.controlStrategy,
           directCart: checkpoint.browser?.runnerStep?.directSearchResultCart,
           selected: checkpoint.browser?.runnerStep?.selectedCandidate,
+          selectionScan: checkpoint.browser?.runnerStep?.selectionScan,
           detail: checkpoint.detail
         }))
       })}`);
@@ -4140,7 +4154,7 @@ async function main() {
       fail(`browser_extension_inline_cart_skipped_required_selection:${JSON.stringify(brandSelectCheckpoint || {})}`);
     }
     if (brandSelectCheckpoint?.browser?.runnerStep?.directSearchResultCart !== true
-      || brandSelectCheckpoint?.browser?.runnerStep?.controlStrategy !== 'amazon_search_card_fast_path') {
+      || !['amazon_search_card_exact_first', 'amazon_search_card_fast_path'].includes(brandSelectCheckpoint?.browser?.runnerStep?.controlStrategy)) {
       fail(`browser_extension_selection_did_not_click_bound_result_cart:${JSON.stringify(brandSelectCheckpoint?.browser?.runnerStep || {})}`);
     }
     if (!/Nature Valley Oats n Honey/i.test(String(brandSelectCheckpoint?.browser?.runnerStep?.selectedCandidate?.title || ''))) {
@@ -4235,7 +4249,7 @@ async function main() {
     }
     const conditionalSelect = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match');
     const selectedTitle = String(conditionalSelect?.browser?.runnerStep?.selectedCandidate?.title || '');
-    if (!/Oats n Honey/i.test(selectedTitle)) {
+    if (!/Sweet & Salty Almond/i.test(selectedTitle)) {
       fail(`browser_extension_conditional_shipping_did_not_fallback_to_free_prime:${JSON.stringify({
         visits: conditionalCandidateVisits,
         selected: conditionalSelect?.browser?.runnerStep?.selectedCandidate || null,
