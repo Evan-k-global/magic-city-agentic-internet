@@ -56,8 +56,9 @@ if (!/export function selectAmazonSearchCard/.test(packagedAmazonSelection)
   || !/rawScanned > 96 \|\| cards\.length >= 48/.test(packagedAmazonSelection)
   || !/bestExact \? 'exact' : 'size_alternative'/.test(packagedAmazonSelection)
   || !/amazon_search_card_closest_size/.test(packagedAmazonSelection)
-  || /requiresApproval: true/.test(packagedAmazonSelection)) {
-  fail('Amazon selection must remain exact-first and bounded, with only verified closest-size fallbacks');
+  || !/rawAction\.allowSizeSubstitution === true/.test(packagedAmazonSelection)
+  || !/requiresApproval: true/.test(packagedAmazonSelection)) {
+  fail('Amazon selection must remain exact-first and bounded, with signed opt-in required for automatic closest-size fallbacks');
 }
 if (!/export\s*\{[^}]*pollOnly/.test(packagedLegacyBackground)) {
   fail('legacy controller must expose pollOnly for the lean heartbeat');

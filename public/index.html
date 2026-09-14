@@ -15712,12 +15712,19 @@
           };
         }
         if (kind === 'browser' && browserStopState === 'product_selection_needs_review') {
-          return {
-            title: 'Product not found',
-            detail: browserExecution.stopEvidence || 'Magic City could not find a verified match for that specific product. Try again with a more general product query.',
-            badgeLabel: 'Needs attention',
-            actionLabel: 'Open Amazon'
-          };
+          return browserExecution.selectionProposal
+            ? {
+                title: 'Review closest size',
+                detail: browserExecution.stopEvidence || 'A verified size alternative is available. Review it in Amazon before adding it to the cart.',
+                badgeLabel: 'Review needed',
+                actionLabel: 'Open Amazon'
+              }
+            : {
+                title: 'Product not found',
+                detail: browserExecution.stopEvidence || 'Magic City could not find a verified match for that specific product. Try again with a more general product query.',
+                badgeLabel: 'Needs attention',
+                actionLabel: 'Open Amazon'
+              };
         }
         if (kind === 'browser' && (browserStopState === 'checkout_profile_mismatch' || browserSummary.addressMatches === false)) {
           const vaultUnavailable = browserExecution.localCheckoutProfileExpected && !browserExecution.localCheckoutProfileAvailable;

@@ -105,6 +105,13 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     if (/\b(?:single|one[- ]pack|1[- ]pack)\b/i.test(query)) return { unit: 'count', total: 1, configuration: 'single' };
     return null;
   })();
+  const countUnitPattern = 'ct|count|bars?|bags?|packets?|sticks?|pods?|refills?|pairs?|pads?|sheets?|pieces?';
+  const requestedCountValues = requestedPack?.unit === 'count' ? [] : numbersFor(query, countUnitPattern);
+  const requestedCount = requestedCountValues.length === 1
+    ? requestedCountValues[0]
+    : requestedCountValues.length > 1
+      ? NaN
+      : null;
 
   const packTokenPatterns = [
     /\b\d+\s*[x\u00d7]\s*~?\d+(?:\.\d+)?\s*(?:fl\.?\s*oz|fluid\s*ounces?|oz|ounces?|sq\.?\s*ft|square\s*(?:feet|foot))\b/gi,
@@ -237,6 +244,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       }
     }
     if (requestedPack.configuration === 'nested') {
+      if (observed.length !== 1) return { status: observed.length ? 'conflict' : 'unknown', observed };
       const servingCounts = numbersFor(identityEvidence, 'count|ct|bags?|packets?|sticks?|bars?');
       if (servingCounts.length === 1) {
         const servingOuter = servingCounts[0] * (outer[0] > 1 ? outer[0] : 1);
@@ -376,28 +384,63 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       continue;
     }
     if (pack.status !== 'known' || pack.unit !== requestedPack.unit) { rejected.package += 1; continue; }
+    const offeredCountValues = requestedCount == null
+      ? []
+      : numbersFor(candidate.identityEvidence || candidate.title, countUnitPattern);
+    if (Number.isNaN(requestedCount) || (requestedCount != null && offeredCountValues.length !== 1)) {
+      rejected.package += 1;
+      continue;
+    }
+    const offeredCount = requestedCount == null ? null : offeredCountValues[0];
     const requiresMatchingPortion = requestedPack.configuration === 'nested'
       && (requestedPack.outer >= 6 || /\b(?:snack packs?|individual|on[- ]the[- ]go)\b/i.test(productText));
     if (requiresMatchingPortion && pack.per !== requestedPack.per) {
       rejected.package += 1;
       continue;
     }
-    const exactPack = requestedPack.configuration === 'range'
+    const primaryPackExact = requestedPack.configuration === 'range'
       ? pack.total >= requestedPack.min && pack.total <= requestedPack.max
       : pack.total === requestedPack.total;
+    const exactPack = primaryPackExact && (requestedCount == null || offeredCount === requestedCount);
     if (exactPack) {
       if (betterExact(candidate, bestExact)) bestExact = candidate;
       continue;
     }
-    const distance = Math.abs(Math.log(pack.total / requestedPack.total));
+    const distance = Math.max(
+      primaryPackExact ? 0 : Math.abs(Math.log(pack.total / requestedPack.total)),
+      requestedCount == null ? 0 : Math.abs(Math.log(offeredCount / requestedCount))
+    );
     if (!bestAlternative
       || distance < bestAlternative.distance
       || (distance === bestAlternative.distance && candidate.price < bestAlternative.candidate.price)
       || (distance === bestAlternative.distance && candidate.price === bestAlternative.candidate.price && candidate.index < bestAlternative.candidate.index)) {
-      bestAlternative = { candidate, pack, distance };
+      bestAlternative = { candidate, pack, offeredCount, distance };
     }
   }
 
+  const sizeSubstitutionAuthorized = rawAction.allowSizeSubstitution === true;
+  if (!bestExact && bestAlternative && !sizeSubstitutionAuthorized) {
+    const proposed = summarize(bestAlternative.candidate, bestAlternative.pack);
+    const requestedDescription = [
+      `${requestedPack.total} ${requestedPack.unit}`,
+      requestedCount == null ? '' : `${requestedCount} count`
+    ].filter(Boolean).join(', ');
+    const offeredDescription = [
+      `${bestAlternative.pack.total} ${bestAlternative.pack.unit}`,
+      bestAlternative.offeredCount == null ? '' : `${bestAlternative.offeredCount} count`
+    ].filter(Boolean).join(', ');
+    return {
+      completed: false,
+      selectionDecisionMade: true,
+      selectionKind: 'size_alternative',
+      requiresApproval: true,
+      requestedPack,
+      requestedCount,
+      proposedCandidate: proposed,
+      reason: `Closest verified size found: requested ${requestedDescription}; available ${offeredDescription} for $${bestAlternative.candidate.price.toFixed(2)}. Review before adding it to cart.`,
+      scan: { rawScanned: Math.min(rawScanned, 96), distinctCards: cards.length, rejected, selectionDurationMs: elapsed() }
+    };
+  }
   if (!bestExact && !bestAlternative) {
     return {
       completed: false,
@@ -434,7 +477,10 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     selectionKind,
     sizeSubstitution: selectionKind === 'size_alternative' ? {
       requested: requestedPack,
-      selected: selectedPack
+      requestedCount,
+      selected: selectedPack,
+      selectedCount: bestAlternative?.offeredCount ?? null,
+      authorized: true
     } : null,
     navigationRequested: Boolean(performClick && !directCart),
     navigationUrl: performClick && !directCart ? selectedCard.href : '',

@@ -135,9 +135,9 @@ try {
       elapsedMs: performance.now() - started
     });
     if (result?.selectionKind === 'size_alternative') {
-      assert.equal(result.completed, true, `fixture ${expected.id} closest-size completion`);
-      assert.equal(result.requiresApproval, undefined, `fixture ${expected.id} closest-size approval`);
-      assert.ok(result.selected?.asin, `fixture ${expected.id} closest-size selected candidate`);
+      assert.equal(result.completed, false, `fixture ${expected.id} closest-size completion`);
+      assert.equal(result.requiresApproval, true, `fixture ${expected.id} closest-size approval`);
+      assert.ok(result.proposedCandidate?.asin, `fixture ${expected.id} closest-size proposed candidate`);
     }
   }
   const wrongProductFixtures = [
@@ -205,14 +205,55 @@ try {
     globalThis.__selectionGuard.clicks = 0;
     document.querySelector('button')?.addEventListener('click', () => { globalThis.__selectionGuard.clicks += 1; });
   });
-  output.closestSizeActionFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+  output.closestSizeReviewFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
     type: 'select_candidate', query: 'test wipes, 24 ct', maxPrice: 10, primeRequired: false
   }), { tabId: regressionTab });
-  const closestSizeGuard = await page.evaluate(() => globalThis.__selectionGuard);
-  assert.equal(output.closestSizeActionFixture?.selectionKind, 'size_alternative', 'closest-size action fixture');
-  assert.equal(output.closestSizeActionFixture?.completed, true, 'closest-size action completion');
-  assert.equal(output.closestSizeActionFixture?.selected?.asin, 'B000SIZE12', 'closest-size action identity');
-  assert.equal(closestSizeGuard.clicks, 1, 'closest-size action clicks once');
+  let closestSizeGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.closestSizeReviewFixture?.selectionKind, 'size_alternative', 'closest-size review fixture');
+  assert.equal(output.closestSizeReviewFixture?.completed, false, 'closest-size review completion');
+  assert.equal(output.closestSizeReviewFixture?.requiresApproval, true, 'closest-size review authorization');
+  assert.equal(output.closestSizeReviewFixture?.proposedCandidate?.asin, 'B000SIZE12', 'closest-size review identity');
+  assert.equal(closestSizeGuard.clicks, 0, 'unapproved closest-size action does not click');
+  await page.evaluate(() => { globalThis.__selectionGuard.clicks = 0; });
+  output.closestSizeAuthorizedFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'test wipes, 24 ct', maxPrice: 10, primeRequired: false, allowSizeSubstitution: true
+  }), { tabId: regressionTab });
+  closestSizeGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.closestSizeAuthorizedFixture?.selectionKind, 'size_alternative', 'authorized closest-size action fixture');
+  assert.equal(output.closestSizeAuthorizedFixture?.completed, true, 'authorized closest-size action completion');
+  assert.equal(output.closestSizeAuthorizedFixture?.selected?.asin, 'B000SIZE12', 'authorized closest-size action identity');
+  assert.equal(closestSizeGuard.clicks, 1, 'authorized closest-size action clicks once');
+
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: cardHtml('B000BAR006', 'Test Bars, 6 Bars, 8 oz')
+  });
+  output.compoundSizeMismatchFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'test bars, 12 bars, 8 oz', maxPrice: 10, primeRequired: false
+  }), { tabId: regressionTab });
+  assert.equal(output.compoundSizeMismatchFixture?.selectionKind, 'size_alternative', 'compound count and weight mismatch');
+  assert.equal(output.compoundSizeMismatchFixture?.requiresApproval, true, 'compound mismatch requires approval');
+  assert.equal(output.compoundSizeMismatchFixture?.completed, false, 'compound mismatch is not exact');
+
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: cardHtml('B000BAR006', 'Test Bars, 6 Bars, 8 oz') + cardHtml('B000BAR012', 'Test Bars, 12 Bars, 8 oz')
+  });
+  output.compoundSizeExactFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionShadow(tabId, {
+    type: 'select_candidate', query: 'test bars, 12 bars, 8 oz', maxPrice: 10, primeRequired: false
+  }), { tabId: regressionTab });
+  assert.equal(output.compoundSizeExactFixture?.selectionKind, 'exact', 'compound count and weight exact');
+  assert.equal(output.compoundSizeExactFixture?.selected?.asin, 'B000BAR012', 'compound exact identity');
+
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: cardHtml('B000CONFLICT', 'Test Popcorn, 18 Count Individual Bags, 0.65 oz and 8 oz')
+  });
+  output.conflictingPackageFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'test popcorn, 18 x 0.65 oz', maxPrice: 10, primeRequired: false
+  }), { tabId: regressionTab });
+  assert.equal(output.conflictingPackageFixture?.selectionKind, 'no_verified_candidate', 'conflicting package evidence');
+  assert.equal(output.conflictingPackageFixture?.completed, false, 'conflicting package evidence abstains');
   output.finishedAt = new Date().toISOString();
   output.summary = output.items.reduce((summary, item) => {
     summary[item.selectionKind] = (summary[item.selectionKind] || 0) + 1;
@@ -230,7 +271,7 @@ const report = [
   '',
   `Source SHA-256: \`${output.sourceSha256}\``,
   '',
-  `Result: ${output.summary?.exact || 0} exact, ${output.summary?.size_alternative || 0} verified closest-size selections, ${output.summary?.no_verified_candidate || 0} abstentions.`,
+  `Result: ${output.summary?.exact || 0} exact, ${output.summary?.size_alternative || 0} review-only closest-size alternatives, ${output.summary?.no_verified_candidate || 0} abstentions.`,
   '',
   '| # | Request | Prior review | Candidate result | ASIN |',
   '|---:|---|---|---|---|',
@@ -238,7 +279,7 @@ const report = [
     const result = item.selectionKind === 'exact'
       ? 'exact'
       : item.selectionKind === 'size_alternative'
-        ? 'closest verified size'
+        ? 'closest size (review)'
         : 'abstain';
     return `| ${item.id} | ${String(item.request).replaceAll('|', '\\|')} | ${item.expectedClassification} | ${result} | ${item.selectedAsin ? `\`${item.selectedAsin}\`` : '-'} |`;
   }),

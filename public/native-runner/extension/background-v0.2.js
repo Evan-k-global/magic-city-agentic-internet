@@ -3886,6 +3886,9 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
       report.checkoutOpened = progress.checkoutOpened;
       if (outcome.selectionKind === 'size_alternative' && outcome.completed) {
         report.sizeSubstitution = outcome.sizeSubstitution || null;
+      } else if (outcome.selectionKind === 'size_alternative') {
+        report.selectionProposal = outcome.proposedCandidate || null;
+        report.stopEvidence = outcome.reason || 'A verified size alternative is available for review.';
       }
       const actionStatus = outcome.completed
         ? (outcome.skipped ? 'skipped' : 'completed')
@@ -4058,6 +4061,11 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
         report.stopEvidence = outcome.reason || 'The signed final-order action did not dispatch a native merchant click.';
         report.fulfillmentStatus = 'failed';
         report.fundingDisposition = 'release';
+        return reportAndStop(session, plan, report);
+      }
+      if (!outcome.completed && action.type === 'select_candidate' && outcome.selectionKind === 'size_alternative') {
+        report.stopState = 'product_selection_needs_review';
+        report.stopEvidence = outcome.reason || 'A verified size alternative is available for review.';
         return reportAndStop(session, plan, report);
       }
       if (!outcome.completed && action.type === 'select_candidate' && outcome.selectionKind === 'no_verified_candidate') {
