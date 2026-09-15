@@ -2393,14 +2393,34 @@ async function activeMissionTab(sessionId) {
   }
 }
 
-async function focusMissionTab({ sessionId = '' } = {}) {
+async function focusMissionTab({ sessionId = '', preferredWindowId = null } = {}) {
   const tab = await activeMissionTab(sessionId);
   if (!tab?.id) throw new Error('mission_tab_not_found');
-  await chrome.tabs.update(tab.id, { active: true });
-  if (tab.windowId != null) {
-    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => null);
+  const requestedWindowId = Number(preferredWindowId);
+  const hasRequestedWindow = preferredWindowId != null
+    && Number.isInteger(requestedWindowId)
+    && requestedWindowId >= 0;
+  let focusedTab = tab;
+  let moved = false;
+  if (hasRequestedWindow && Number(tab.windowId) !== requestedWindowId) {
+    const movedTab = await chrome.tabs.move(tab.id, { windowId: requestedWindowId, index: -1 }).catch(() => null);
+    focusedTab = Array.isArray(movedTab) ? movedTab[0] || tab : movedTab || tab;
+    moved = Number(focusedTab?.windowId) === requestedWindowId;
   }
-  return { focused: true, sessionId, tabId: tab.id, url: tab.url || '' };
+  await chrome.tabs.update(tab.id, { active: true });
+  const focusWindowId = Number(focusedTab?.windowId ?? tab.windowId);
+  if (Number.isInteger(focusWindowId) && focusWindowId >= 0) {
+    await chrome.windows.update(focusWindowId, { focused: true }).catch(() => null);
+  }
+  return {
+    focused: true,
+    sameWindow: hasRequestedWindow && focusWindowId === requestedWindowId,
+    moved,
+    sessionId,
+    tabId: tab.id,
+    windowId: Number.isInteger(focusWindowId) ? focusWindowId : null,
+    url: focusedTab?.url || tab.url || ''
+  };
 }
 
 async function saveMissionTab(sessionId, tabId) {
@@ -4754,7 +4774,12 @@ async function handleMessage(message, sender = null) {
   }
   if (message?.type === 'GET_PENDING_MISSION_SITE') return getPendingMissionSite();
   if (message?.type === 'START_PENDING_MISSION_SITE') return startPendingMissionSite(message);
-  if (message?.type === 'FOCUS_MISSION_TAB') return focusMissionTab(message);
+  if (message?.type === 'FOCUS_MISSION_TAB') {
+    return focusMissionTab({
+      ...message,
+      preferredWindowId: sender?.tab?.windowId
+    });
+  }
   if (message?.type === 'ALLOW_AND_START_PENDING_MISSION_SITE' || message?.type === 'ENABLE_PENDING_MISSION_SITE') {
     return allowAndStartPendingMissionSite();
   }

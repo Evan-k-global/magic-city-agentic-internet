@@ -227,9 +227,16 @@ if (!/onConnectExternal/.test(packagedBackground)
   fail('normal mission execution must use a live progress channel instead of alarm-paced continuation');
 }
 if (/EXPLICIT_WAKE_ALARM|queueExplicitMissionWake|dispatchExplicitMissionWake/.test(packagedBackground)
-  || !/return dispatch\(message, \{ origin \}\);/.test(packagedBackground)
+  || !/return dispatch\(message, externalSenderContext\(sender, origin\)\);/.test(packagedBackground)
+  || !/dispatch\(message, externalSenderContext\(port\.sender, origin\)\)/.test(packagedBackground)
   || !/Keep the external message open through the exact-session claim/.test(packagedBackground)) {
   fail('external runner wake must run through the direct exact-session claim path, without detached MV3 work');
+}
+if (!/function externalSenderContext\(sender = null, origin = ''\)/.test(packagedBackground)
+  || !/preferredWindowId: sender\?\.tab\?\.windowId/.test(packagedLegacyBackground)
+  || !/chrome\.tabs\.move\(tab\.id, \{ windowId: requestedWindowId, index: -1 \}\)/.test(packagedLegacyBackground)
+  || !/sameWindow: hasRequestedWindow && focusWindowId === requestedWindowId/.test(packagedLegacyBackground)) {
+  fail('an external focus request must move the exact mission tab into the trusted Magic City sender window');
 }
 if (!/async function pollAndExecute\(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = ''\)/.test(packagedLegacyBackground)
   || !/String\(session\?\.id \|\| ''\) === normalizedSessionId/.test(packagedLegacyBackground)

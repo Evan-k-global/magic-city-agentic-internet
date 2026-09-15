@@ -1451,6 +1451,49 @@ async function main() {
       await wakePage.close();
       return { ...result, durationMs: Date.now() - startedAt };
     };
+    if (smokeMode === 'same-window-focus') {
+      const focusSessionId = 'browser-smoke-same-window-focus-session';
+      const targetUrl = `${baseUrl}/search`;
+      const createdWindow = await worker.evaluate((url) => chrome.windows.create({ url, focused: false }), targetUrl);
+      const targetTab = createdWindow?.tabs?.[0] || null;
+      if (!targetTab?.id || targetTab.windowId == null) fail('browser_extension_focus_target_window_missing');
+      await worker.evaluate(async ({ sessionId: focusedSessionId, tabId }) => {
+        const stored = await chrome.storage.local.get({ activeMissionTabs: {} });
+        await chrome.storage.local.set({
+          activeMissionTabs: { ...(stored.activeMissionTabs || {}), [focusedSessionId]: tabId }
+        });
+      }, { sessionId: focusSessionId, tabId: targetTab.id });
+
+      const magicCityPage = await context.newPage();
+      await magicCityPage.goto(`${baseUrl}/external-wake`);
+      const magicCityTab = await worker.evaluate((url) => chrome.tabs.query({}).then((tabs) => (
+        tabs.find((tab) => tab.url === url) || null
+      )), magicCityPage.url());
+      if (!magicCityTab?.id || magicCityTab.windowId == null) fail('browser_extension_focus_sender_window_missing');
+      if (magicCityTab.windowId === targetTab.windowId) fail('browser_extension_focus_fixture_needs_two_windows');
+
+      const response = await magicCityPage.evaluate(({ extensionId: targetExtensionId, sessionId }) => new Promise((resolve) => {
+        chrome.runtime.sendMessage(targetExtensionId, { type: 'FOCUS_MISSION_TAB', sessionId }, resolve);
+      }), { extensionId, sessionId: focusSessionId });
+      const focusedTab = await worker.evaluate((tabId) => chrome.tabs.get(tabId), targetTab.id);
+      if (!response?.ok
+        || response?.result?.focused !== true
+        || response?.result?.sameWindow !== true
+        || response?.result?.moved !== true
+        || focusedTab?.windowId !== magicCityTab.windowId
+        || focusedTab?.active !== true) {
+        fail(`browser_extension_same_window_focus_failed:${JSON.stringify({ response, magicCityTab, targetTab, focusedTab })}`);
+      }
+      recordPurchaseScenario('External focus moves the exact mission tab beside the requesting Magic City tab', {
+        moved: response.result.moved,
+        sameWindow: response.result.sameWindow,
+        active: focusedTab.active
+      });
+      await magicCityPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner same-window focus smoke passed');
+      return;
+    }
     if (smokeMode === 'selection-intelligence') {
       const { merchantPage } = await prepareSelectionOnlySession('/selection-intelligence-search', {
         goal: 'buy fruity Nature Valley granola bars',

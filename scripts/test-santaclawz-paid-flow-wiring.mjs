@@ -110,7 +110,7 @@ assert.match(server, /findAgentExecutionSessionByClientRequestId/);
 assert.match(server, /reused: true/);
 assert.match(ui, /const sameAgent = existing\?\.session\?\.handoffData\?\.kind === 'agent'/);
 assert.match(ui, /agentInputs\[id\] = detail;/);
-assert.match(ui, /return hasRunnableBrowserExecutionContext\(context\.prompt \|\| '', context\.responseText \|\| ''\) \? 'browser' : '';/);
+assert.match(ui, /hasRunnableBrowserExecutionContext\(context\.prompt \|\| '', context\.responseText \|\| ''\) \|\|[\s\S]{0,160}hasPendingBrowserPurchaseContext/);
 assert.match(
   ui,
   /function looksLikeExecutionInputForSelectedAgent\(text = ''\) \{[\s\S]*?if \(looksLikeCodeAuditExecutionRequest\(value\)\) return false;/

@@ -535,7 +535,7 @@ function applyAmazonLaunchDisclosure(plan, mission = {}) {
     ? `Your request${requestedMerchant && requestedMerchant !== 'Amazon' ? ` specified ${requestedMerchant} and` : ''} excluded Amazon. Magic Internet Agent currently supports purchases only through Amazon, so running this agent will instead search Amazon for ${product}${budgetPhrase}.`
     : mission.amazonLaunchDisclosure === 'retailer_redirect'
       ? `Magic Internet Agent currently supports purchases through Amazon. Your request named ${requestedMerchant}, so this run will instead search Amazon for ${product}${budgetPhrase}.`
-      : `Magic Internet Agent currently supports purchases through Amazon, so this run will search Amazon for ${product}${budgetPhrase}.`;
+      : `Magic Internet Agent currently supports purchases through Amazon, so this run will search Amazon for ${product}${mission.budget ? `, ${mission.budget}` : ''}${budgetPhrase}.`;
   return {
     ...routedPlan,
     actionLabel: mission.amazonLaunchDisclosure === 'amazon_default' ? 'Amazon checkout available' : 'Shop on Amazon instead?',

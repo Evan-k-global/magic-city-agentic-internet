@@ -51,6 +51,12 @@ assert.doesNotMatch(
 );
 assert.match(submitSource, /if \(addAgentIntent\) attachAddAgentCallToAction\(pending\)/, 'successful add-agent prompts must show the deterministic CTA');
 assert.match(submitSource, /if \(addAgentIntent\) attachAddAgentCallToAction\(errorTarget\)/, 'failed add-agent prompts must still show the deterministic CTA');
+assert.match(submitSource, /if \(maybeStartMagicInternetAgentIntake\(prompt\)\) return;/, 'partial shopping details must enter the local MIA intake before general chat');
+
+const miaIntakeSource = extractFunctionSource('maybeStartMagicInternetAgentIntake');
+assert.match(miaIntakeSource, /hasPendingBrowserPurchaseContext/, 'MIA intake must require a recognizable shopping seed');
+assert.match(miaIntakeSource, /hasRunnableBrowserExecutionContext/, 'complete purchases must continue through the normal approval path');
+assert.match(miaIntakeSource, /gathering pre-run shopping details/, 'partial purchases must explain that only pre-run fields are being gathered');
 
 const handoffSource = extractFunctionSource('maybeRoutePromptToSelectedAgentExecution');
 assert.ok(
