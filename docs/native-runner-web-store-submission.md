@@ -97,6 +97,9 @@ After the Chrome Web Store item exists, set this environment variable on Fly:
 
 ```sh
 MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL=https://chromewebstore.google.com/detail/<extension-slug-or-id>
+MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION=0.5.12
 ```
 
 The Magic City Settings install button prefers this URL. If the extension URL is unset, it falls back to `/native-runner/extension/` for internal staging.
+
+`MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION` is both the latest published release and the minimum version accepted for new mission starts. Keep it on the existing Store version while a candidate is uploaded, reviewed, or approved but not yet public. Once the new version is publicly available, update this value and deploy Fly; older versions will receive **Update Runner** and cannot start a new mission.

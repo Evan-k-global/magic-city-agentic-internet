@@ -723,6 +723,9 @@ const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
   '0.4.33'
 ).trim();
+// Production has one supported Store release. Keep the configured minimum on
+// the currently published version while a candidate is awaiting Store review.
+const NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_MIN_EXTENSION_VERSION;
 const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
   1_000,
   Number(process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS || 7_500)
@@ -5670,7 +5673,7 @@ function formatAgentHubBootstrapAgent(agent = {}) {
 async function buildIndexHtmlWithAgentHubBootstrap(filePath) {
   const html = fs.readFileSync(filePath, 'utf8');
   const scripts = [
-    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__=${escapeScriptJson(JSON.stringify(getSantaClawzApprovedExternalAgentIds().map((agentId) => `santaclawz:${agentId}`)))};</script>`
+    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_MIN_EXTENSION_VERSION))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__=${escapeScriptJson(JSON.stringify(getSantaClawzApprovedExternalAgentIds().map((agentId) => `santaclawz:${agentId}`)))};</script>`
   ];
   try {
     if (!MAGIC_CITY_SANTACLAWZ_LIVE) return html.includes('</head>')
@@ -7496,6 +7499,13 @@ function nativeRunnerDeviceNeedsExtensionUpgrade(device = null) {
   return compareDottedVersions(version, NATIVE_RUNNER_MIN_EXTENSION_VERSION) < 0;
 }
 
+function nativeRunnerDeviceHasPublishedUpdate(device = null) {
+  if (!isMagicCityRunnerExtensionDevice(device)) return false;
+  const version = String(device?.metadata?.extensionVersion || '').trim();
+  if (!version || !NATIVE_RUNNER_LATEST_PUBLISHED_VERSION) return false;
+  return compareDottedVersions(version, NATIVE_RUNNER_LATEST_PUBLISHED_VERSION) < 0;
+}
+
 function getExecutableNativeBrowserWorkerRegistration(device = null, pluginId = NATIVE_RUNNER_PLUGIN_ID) {
   if (!device?.id) return null;
   const plugin = getPluginRegistration(pluginId);
@@ -7594,6 +7604,7 @@ function buildNativeRunnerReadiness({
   const executableReady = Boolean(executableRegistration && extensionPermissionReady);
   const pollingReady = Boolean(device && nativeRunnerDeviceHasFreshPoll(device));
   const extensionUpdateRequired = nativeRunnerDeviceNeedsExtensionUpgrade(device);
+  const extensionUpdateAvailable = nativeRunnerDeviceHasPublishedUpdate(device);
   const ready = Boolean(pollingReady && !extensionUpdateRequired && (!requireExecutableWorker || executableReady));
   let reason = 'runner_online';
   if (!activeDevices.length) {
@@ -7633,7 +7644,10 @@ function buildNativeRunnerReadiness({
     executableReady,
     browserPermissionReady: extensionPermissionReady,
     extensionUpdateRequired,
+    extensionUpdateAvailable,
     minimumExtensionVersion: NATIVE_RUNNER_MIN_EXTENSION_VERSION,
+    latestPublishedVersion: NATIVE_RUNNER_LATEST_PUBLISHED_VERSION,
+    extensionInstallUrl: NATIVE_RUNNER_EXTENSION_INSTALL_URL || null,
     executableRegistrationId: executableRegistration?.id || null,
     device: formatNativeRunnerDeviceForApi(device),
     devices: activeDevices.map((row) => formatNativeRunnerDeviceForApi(row)),

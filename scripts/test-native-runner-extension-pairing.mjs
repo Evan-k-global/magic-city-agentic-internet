@@ -123,6 +123,8 @@ async function main() {
     PUBLIC_API_KEYS: apiKey,
     MAGIC_CITY_NATIVE_RUNNER_TOKEN_TTL_MS: '600000',
     MAGIC_CITY_NATIVE_RUNNER_PAIRING_TTL_MS: '600000',
+    MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION: '0.4.33',
+    MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL: 'https://chromewebstore.google.com/detail/magic-city-runner/test-extension-id',
     MAGIC_CITY_SAFE_HTTP_STARTUP: 'true',
     SANTACLAWZ_SAFE_START_DELAY_MS: '600000',
     AUTO_START_LOCAL_EXECUTION_AGENTS: 'false',
@@ -262,6 +264,12 @@ async function main() {
       || !statusAfterExtensionRegister.data.ready) {
       throw new Error(`extension_register_did_not_mark_runner_seen:${statusAfterExtensionRegister.response.status}:${JSON.stringify(statusAfterExtensionRegister.data)}`);
     }
+    if (statusAfterExtensionRegister.data.readiness?.latestPublishedVersion !== '0.4.33'
+      || statusAfterExtensionRegister.data.readiness?.minimumExtensionVersion !== '0.4.33'
+      || statusAfterExtensionRegister.data.readiness?.extensionUpdateAvailable !== false
+      || !statusAfterExtensionRegister.data.readiness?.extensionInstallUrl) {
+      throw new Error(`runner_release_metadata_invalid:${JSON.stringify(statusAfterExtensionRegister.data.readiness)}`);
+    }
     const staleDeviceStatus = await request(baseUrl, '/native-runner/status?deviceId=nrd-stale-local-cache', {
       cookie: auth.cookie
     });
@@ -290,6 +298,42 @@ async function main() {
     if (!statusAfterVersionedPoll.response.ok
       || statusAfterVersionedPoll.data.device?.extensionVersion !== versionedPollVersion) {
       throw new Error(`versioned_extension_poll_did_not_update_device:${statusAfterVersionedPoll.response.status}:${JSON.stringify(statusAfterVersionedPoll.data)}`);
+    }
+    if (statusAfterVersionedPoll.data.readiness?.extensionUpdateRequired
+      || statusAfterVersionedPoll.data.readiness?.extensionUpdateAvailable
+      || statusAfterVersionedPoll.data.readiness?.ready !== true) {
+      throw new Error(`newer_runner_was_incorrectly_marked_outdated:${JSON.stringify(statusAfterVersionedPoll.data.readiness)}`);
+    }
+
+    const outdatedPollVersion = '0.4.32';
+    const outdatedPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: outdatedPollVersion,
+      runnerExtensionId: 'test-extension-id'
+    });
+    if (!outdatedPoll.response.ok) {
+      throw new Error(`outdated_extension_poll_failed:${outdatedPoll.response.status}:${JSON.stringify(outdatedPoll.data)}`);
+    }
+    const statusAfterOutdatedPoll = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
+      cookie: auth.cookie
+    });
+    if (statusAfterOutdatedPoll.data.readiness?.extensionUpdateRequired !== true
+      || statusAfterOutdatedPoll.data.readiness?.extensionUpdateAvailable !== true
+      || statusAfterOutdatedPoll.data.readiness?.ready !== false
+      || statusAfterOutdatedPoll.data.readiness?.latestPublishedVersion !== statusAfterOutdatedPoll.data.readiness?.minimumExtensionVersion) {
+      throw new Error(`outdated_runner_was_not_blocked:${JSON.stringify(statusAfterOutdatedPoll.data.readiness)}`);
+    }
+    const restoredPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: extensionVersion,
+      runnerExtensionId: 'test-extension-id'
+    });
+    if (!restoredPoll.response.ok) {
+      throw new Error(`current_extension_restore_failed:${restoredPoll.response.status}:${JSON.stringify(restoredPoll.data)}`);
     }
 
     const customStart = await request(baseUrl, '/native-runner/helper/pairing/start', {
