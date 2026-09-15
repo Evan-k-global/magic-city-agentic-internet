@@ -3589,6 +3589,23 @@
 	      margin-top: 12px;
 	    }
 
+    .sidebar .settings-doc-link {
+      width: fit-content;
+      max-width: 100%;
+      color: rgba(183, 239, 250, 0.96);
+      font-size: 13px;
+      font-weight: 750;
+      line-height: 1.35;
+      text-decoration: none;
+    }
+
+    .sidebar .settings-doc-link:hover,
+    .sidebar .settings-doc-link:focus-visible {
+      color: #effdff;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
     .native-runner-card {
       display: grid;
       gap: 10px;
@@ -5942,6 +5959,14 @@
 	                loading="lazy"></iframe>
 	            </div>
 	          </details>
+
+	      <div class="agent-deploy-card" id="settingsRetailBetaCard">
+	        <div class="agent-summary-title">Retail beta</div>
+	        <div class="settings-note">Magic City's hosted shopping agent currently completes purchases through Amazon. Developers can self-host Magic City, integrate custom browser helpers and frontends for their own sites and workflows, and add bounded local or cloud model intelligence while preserving the mission authorization, checkpoint, and receipt protocol.</div>
+	        <div class="settings-stack" style="margin-top:10px">
+	          <a class="settings-doc-link" href="https://github.com/zeko-labs/magic-city-agentic-internet/blob/main/docs/partner-white-label-quickstart.md" target="_blank" rel="noopener noreferrer">Developer integration guide</a>
+	        </div>
+	      </div>
 
 	    </aside>
 

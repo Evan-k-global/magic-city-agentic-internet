@@ -4,6 +4,22 @@ Partners can reuse Magic City's existing boundaries without changing the
 default Magic Internet Agent flow. There are three distinct integration paths.
 Choose one; they are not successive setup steps.
 
+## Hosted Retail Beta And Extensible Protocol
+
+The hosted Magic Internet Agent on `magic-city.ai` currently completes retail
+purchases through Amazon. A request that names another retailer is offered an
+explicit Amazon reroute before a session starts. This launch restriction keeps
+the verified Amazon flow narrow; it is not a restriction on partner-built
+deployments or the mission protocol.
+
+Partners can self-host Magic City, ship their own frontend and implement
+site-specific browser behavior in a custom helper. A helper may also consult a
+local or cloud model for bounded judgment, then revalidate the model's advisory
+response against the current page and signed mission before acting. Model
+output never expands merchant, budget, substitution or purchase authority. See
+`docs/custom-helper-partner-deployment.md` and
+`docs/custom-helper-model-access.md` for the implementation path.
+
 ## 1. Custom Helper Extension
 
 Use this when the partner wants its own Chrome extension and browser logic but

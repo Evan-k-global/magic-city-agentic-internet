@@ -120,6 +120,43 @@ try {
   assert.equal(replay.data.receipt?.id, first.data.receipt.id);
   assert.equal(replay.data.actionRun?.status, 'completed');
 
+  const rejectedUpdate = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(first.data.connectorSession.id)}/update`, {
+    method: 'POST',
+    cookie: registered.cookie,
+    body: {
+      selections: {
+        ...first.data.connectorSession.selections,
+        targetUrl: 'https://www.walmart.com',
+        allowedMerchants: 'walmart.com'
+      }
+    }
+  });
+  assert.equal(rejectedUpdate.response.status, 409, JSON.stringify(rejectedUpdate.data));
+  assert.equal(rejectedUpdate.data.error, 'magic_internet_amazon_only');
+
+  const rejectedStart = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(first.data.connectorSession.id)}/start-execution`, {
+    method: 'POST',
+    cookie: registered.cookie,
+    body: {
+      mode: 'agent_checkout',
+      selections: {
+        ...first.data.connectorSession.selections,
+        targetUrl: 'https://www.walmart.com',
+        allowedMerchants: 'walmart.com'
+      }
+    }
+  });
+  assert.equal(rejectedStart.response.status, 409, JSON.stringify(rejectedStart.data));
+  assert.equal(rejectedStart.data.error, 'magic_internet_amazon_only');
+
+  const afterRejectedStart = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(first.data.connectorSession.id)}`, {
+    cookie: registered.cookie
+  });
+  assert.equal(afterRejectedStart.response.status, 200, JSON.stringify(afterRejectedStart.data));
+  assert.notEqual(afterRejectedStart.data.session?.status, 'queued');
+  assert.equal(afterRejectedStart.data.session?.creditReservation || null, null);
+  assert.equal(afterRejectedStart.data.session?.extensionRunDispatch || null, null);
+
   console.log('action approval idempotency regression passed');
 } catch (error) {
   if (stderr) console.error(stderr.split('\n').slice(-80).join('\n'));

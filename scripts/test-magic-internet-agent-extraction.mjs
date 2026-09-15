@@ -53,6 +53,10 @@ const defaultAmazonPlan = buildActionPlan({ agent, prompt: defaultAmazonPrompt }
 assert.notEqual(defaultAmazonPlan?.mode, 'clarify', 'retail purchase prompts with an item and budget should default to Amazon');
 assert.equal(defaultAmazonPlan?.localContext?.targetUrl, 'https://www.amazon.com');
 assert.equal(defaultAmazonPlan?.localContext?.budget, '$4');
+assert.equal(defaultAmazonPlan?.actionLabel, 'Amazon checkout available');
+assert.equal(defaultAmazonPlan?.approveLabel, 'Run agent');
+assert.match(defaultAmazonPlan?.preview || '', /currently supports purchases through Amazon/i);
+assert.equal(defaultAmazonPlan?.localContext?.merchantRouting?.disclosure, 'amazon_default');
 assert.equal(isMagicInternetPurchaseRequest(defaultAmazonPrompt), true);
 assert.equal(inferCapabilityFromPrompt(defaultAmazonPrompt), 'browser-worker-agent');
 const defaultAmazonProviderFailurePlan = await buildActionPlanAsync({
@@ -64,6 +68,20 @@ const defaultAmazonProviderFailurePlan = await buildActionPlanAsync({
 });
 assert.equal(defaultAmazonProviderFailurePlan?.localContext?.targetUrl, 'https://www.amazon.com');
 assert.equal(defaultAmazonProviderFailurePlan?.localContext?.budget, '$4');
+const defaultAmazonProviderHallucinationPlan = await buildActionPlanAsync({
+  agent,
+  prompt: defaultAmazonPrompt,
+  schemaExtractor: async () => ({
+    targetUrl: 'https://www.walmart.com',
+    merchant: 'walmart.com',
+    item: 'Nature Valley granola bars',
+    budget: '$4',
+    confidence: 0.9
+  })
+});
+assert.equal(defaultAmazonProviderHallucinationPlan?.localContext?.merchantRouting?.disclosure, 'amazon_default');
+assert.equal(defaultAmazonProviderHallucinationPlan?.localContext?.requestedMerchant, null, 'a model must not invent a retailer the user did not name');
+assert.doesNotMatch(defaultAmazonProviderHallucinationPlan?.preview || '', /request named Walmart/i);
 
 const flattenedCampingAddOnPrompt = 'can you also add this camping list to my cart on amazon, mas $10 extra spend? - bag of marshmallows - graham crackers';
 assert.deepEqual(extractBrowserShoppingItems(flattenedCampingAddOnPrompt), [
@@ -263,6 +281,76 @@ assert.equal(plan.localContext?.targetUrl, 'https://www.amazon.com');
 assert.equal(plan.localContext?.budget, '$4');
 assert.match(plan.localContext?.goal || '', /nature valley granola bars/i);
 assert.match(plan.preview || '', /Budget: \$4/);
+assert.equal(plan.actionLabel, 'Ready to run the Magic Internet Agent?');
+assert.doesNotMatch(plan.preview || '', /currently supports purchases through Amazon/i);
+assert.equal(plan.localContext?.merchantRouting?.policy, 'amazon_only_launch');
+assert.equal(plan.localContext?.merchantRouting?.executionMerchant, 'amazon.com');
+
+const nonAmazonCases = [
+  {
+    prompt: 'can you help me buy new dryer sheets from bed bath and beyond, $10 max spend',
+    requestedMerchant: 'bedbathandbeyond.com',
+    displayName: 'Bed Bath & Beyond',
+    product: /new dryer sheets/i
+  },
+  {
+    prompt: 'buy dryer sheets from walmart for $10 max',
+    requestedMerchant: 'walmart.com',
+    displayName: 'Walmart',
+    product: /dryer sheets/i
+  },
+  {
+    prompt: 'purchase dryer sheets at target.com under $10',
+    requestedMerchant: 'target.com',
+    displayName: 'Target',
+    product: /dryer sheets/i
+  },
+  {
+    prompt: 'buy dryer sheets from https://www.example-retailer.com/shop under $10',
+    requestedMerchant: 'example-retailer.com',
+    displayName: 'example-retailer.com',
+    product: /dryer sheets/i
+  }
+];
+
+for (const testCase of nonAmazonCases) {
+  const routedPlan = buildActionPlan({ agent, prompt: testCase.prompt });
+  assert.notEqual(routedPlan?.mode, 'clarify', `non-Amazon request should offer the Amazon launch lane: ${testCase.prompt}`);
+  assert.equal(routedPlan?.actionLabel, 'Shop on Amazon instead?');
+  assert.equal(routedPlan?.approveLabel, 'Run agent');
+  assert.equal(routedPlan?.rejectLabel, 'Not yet');
+  assert.equal(routedPlan?.localContext?.targetUrl, 'https://www.amazon.com');
+  assert.deepEqual(routedPlan?.localContext?.contextualAuthority?.inferredMerchants, ['amazon.com']);
+  assert.equal(routedPlan?.localContext?.requestedMerchant, testCase.requestedMerchant);
+  assert.equal(routedPlan?.localContext?.merchantRouting?.disclosure, 'retailer_redirect');
+  assert.match(routedPlan?.localContext?.goal || '', /from amazon\.com/i);
+  assert.match(routedPlan?.localContext?.goal || '', testCase.product);
+  assert.match(routedPlan?.preview || '', new RegExp(`request named ${testCase.displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i'));
+  assert.match(routedPlan?.preview || '', /instead search Amazon/i);
+  assert.doesNotMatch(routedPlan?.preview || '', /Target: https:\/\/(?:www\.)?(?:walmart|target|bedbathandbeyond|example-retailer)\.com/i);
+}
+
+const restrictedMerchantPlan = buildActionPlan({
+  agent,
+  prompt: 'Buy dryer sheets only from Walmart, not Amazon, under $10'
+});
+assert.equal(restrictedMerchantPlan?.actionLabel, 'Shop on Amazon instead?');
+assert.equal(restrictedMerchantPlan?.approveLabel, 'Run agent');
+assert.equal(restrictedMerchantPlan?.localContext?.targetUrl, 'https://www.amazon.com');
+assert.equal(restrictedMerchantPlan?.localContext?.requestedMerchant, 'walmart.com');
+assert.equal(restrictedMerchantPlan?.localContext?.merchantRouting?.disclosure, 'amazon_conflict');
+assert.match(restrictedMerchantPlan?.preview || '', /specified Walmart and excluded Amazon/i);
+
+const unresolvedMerchantPlan = buildActionPlan({
+  agent,
+  prompt: 'Buy dryer sheets at Acme Shop under $10'
+});
+assert.equal(unresolvedMerchantPlan?.actionLabel, 'Shop on Amazon instead?');
+assert.equal(unresolvedMerchantPlan?.approveLabel, 'Run agent');
+assert.equal(unresolvedMerchantPlan?.localContext?.targetUrl, 'https://www.amazon.com');
+assert.equal(unresolvedMerchantPlan?.localContext?.requestedMerchant, 'Acme Shop');
+assert.equal(unresolvedMerchantPlan?.localContext?.merchantRouting?.disclosure, 'retailer_redirect');
+assert.match(unresolvedMerchantPlan?.preview || '', /request named Acme Shop/i);
 
 assert.equal(isMagicInternetPurchaseRequest('can you compare granola bars on amazon?'), false);
 assert.equal(inferCapabilityFromPrompt('can you compare granola bars on amazon?'), 'general-chat');
@@ -381,6 +469,9 @@ const ambiguousPlan = await buildActionPlanAsync({
 
 assert.notEqual(ambiguousPlan?.mode, 'clarify', 'a concrete retail purchase without a site defaults to the Amazon happy path');
 assert.equal(ambiguousPlan.localContext?.targetUrl, 'https://www.amazon.com');
+assert.equal(ambiguousPlan.localContext?.requestedMerchant, 'walmart.com');
+assert.equal(ambiguousPlan.localContext?.merchantRouting?.disclosure, 'retailer_redirect');
+assert.match(ambiguousPlan.preview || '', /request named Walmart/i);
 assert.equal(isMagicInternetPurchaseRequest('buy the usual granola bars from the smiley storefront, four bucks tops'), true);
 
 const caboTravelPrompt = [
