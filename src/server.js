@@ -230,7 +230,7 @@ import {
   GITHUB_CAPABILITY_LABELS
 } from './githubConnector.js';
 import { toUnits, fromUnits, CREDIT_SCALE } from './units.js';
-import { buildSeededAgents, executeProvider, executeProviderStream, getConfiguredProviders, rankAmazonCandidatesWithProvider } from './providers.js';
+import { buildSeededAgents, executeProvider, executeProviderStream, getConfiguredProviders, isAmazonCandidateRankerConfigured, rankAmazonCandidatesWithProvider } from './providers.js';
 import { buildAnchorPayload, compileArtifactProofProgram, generateArtifactProof, verifyArtifactProof } from './zekoProof.js';
 import { getAnchorConfig, getMbaRelayerReadiness, getMissionAuthorizationRelayerReadiness, submitAnchorPayload, zekoExplorerTxUrl } from './zekoAnchor.js';
 import { canonicalValueToFieldDecimal } from './mba/canonicalField.js';
@@ -693,6 +693,20 @@ const RUNNER_EXTENSION_PLUGIN_ID = 'magic-city-runner-extension';
 const RUNNER_EXTENSION_OWNER_AGENT_ID = 'magic-city-runner-extension';
 const HOSTED_BROWSER_WORKER_PLUGIN_ID = 'local-browser-worker-plugin';
 const HOSTED_BROWSER_WORKER_OWNER_AGENT_ID = 'browser-worker-agent';
+const AMAZON_SELECTION_INTELLIGENCE_ENABLED = String(
+  process.env.MAGIC_CITY_AMAZON_SELECTION_INTELLIGENCE_ENABLED || ''
+).trim().toLowerCase() === 'true';
+const AMAZON_SELECTION_INTELLIGENCE_MAX_CANDIDATES = 12;
+const AMAZON_SELECTION_INTELLIGENCE_MAX_ATTEMPTS_PER_MISSION = 3;
+const AMAZON_SELECTION_INTELLIGENCE_TIMEOUT_MS = Math.max(
+  1_000,
+  Math.min(Number(process.env.MAGIC_CITY_BROWSER_RANK_TIMEOUT_MS || 3_000) || 3_000, 3_000)
+);
+const AMAZON_SELECTION_INTELLIGENCE_MAX_CONCURRENCY = Math.max(
+  1,
+  Math.min(Number(process.env.MAGIC_CITY_BROWSER_RANK_MAX_CONCURRENCY || 4) || 4, 20)
+);
+let amazonSelectionIntelligenceActiveCalls = 0;
 const RESERVED_HELPER_AGENT_IDS = new Set([
   NATIVE_RUNNER_PLUGIN_ID,
   NATIVE_RUNNER_OWNER_AGENT_ID,
@@ -719,10 +733,104 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
   process.env.MAGIC_CITY_MAC_RUNNER_INSTALL_URL ||
   ''
 ).trim();
-const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
+const NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
   '0.4.33'
 ).trim();
+let NATIVE_RUNNER_MIN_EXTENSION_VERSION = NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;
+let NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;
+const NATIVE_RUNNER_STORE_UPDATE_URL = String(
+  process.env.MAGIC_CITY_NATIVE_RUNNER_STORE_UPDATE_URL ||
+  'https://clients2.google.com/service/update2/crx'
+).trim();
+const NATIVE_RUNNER_STORE_VERSION_REFRESH_MS = Math.max(
+  60_000,
+  Number(process.env.MAGIC_CITY_NATIVE_RUNNER_STORE_VERSION_REFRESH_MS || 5 * 60_000)
+);
+const NATIVE_RUNNER_STORE_VERSION_TIMEOUT_MS = Math.max(
+  1_000,
+  Number(process.env.MAGIC_CITY_NATIVE_RUNNER_STORE_VERSION_TIMEOUT_MS || 5_000)
+);
+let nativeRunnerStoreVersionRefreshPromise = null;
+let nativeRunnerStoreVersionLastCheckedAt = 0;
+
+function getChromeWebStoreExtensionId(installUrl = NATIVE_RUNNER_EXTENSION_INSTALL_URL) {
+  try {
+    const parsed = new URL(String(installUrl || '').trim());
+    if (parsed.hostname !== 'chromewebstore.google.com') return '';
+    const match = parsed.pathname.match(/(?:^|\/)([a-p]{32})(?:\/|$)/i);
+    return String(match?.[1] || '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function parseChromeWebStorePublishedVersion(xml = '', extensionId = '') {
+  const body = String(xml || '').slice(0, 64 * 1024);
+  const expectedId = String(extensionId || '').trim().toLowerCase();
+  if (!expectedId || !body.toLowerCase().includes(`appid="${expectedId}"`)) return '';
+  const match = body.match(/<updatecheck\b[^>]*\bstatus="ok"[^>]*\bversion="(\d+(?:\.\d+){1,3})"/i)
+    || body.match(/<updatecheck\b[^>]*\bversion="(\d+(?:\.\d+){1,3})"[^>]*\bstatus="ok"/i);
+  return String(match?.[1] || '').trim();
+}
+
+async function refreshNativeRunnerStoreVersion({ force = false } = {}) {
+  const extensionId = getChromeWebStoreExtensionId();
+  if (!extensionId || !NATIVE_RUNNER_STORE_UPDATE_URL) return NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+  const now = Date.now();
+  if (!force && nativeRunnerStoreVersionLastCheckedAt
+    && now - nativeRunnerStoreVersionLastCheckedAt < NATIVE_RUNNER_STORE_VERSION_REFRESH_MS) {
+    return NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+  }
+  if (nativeRunnerStoreVersionRefreshPromise) return nativeRunnerStoreVersionRefreshPromise;
+  nativeRunnerStoreVersionLastCheckedAt = now;
+  nativeRunnerStoreVersionRefreshPromise = (async () => {
+    try {
+      const updateUrl = new URL(NATIVE_RUNNER_STORE_UPDATE_URL);
+      updateUrl.searchParams.set('response', 'updatecheck');
+      updateUrl.searchParams.set('prodversion', '140.0.0.0');
+      updateUrl.searchParams.set('acceptformat', 'crx2,crx3');
+      updateUrl.searchParams.set('x', `id=${extensionId}&uc`);
+      const response = await fetch(updateUrl, {
+        headers: { accept: 'application/xml,text/xml;q=0.9,*/*;q=0.1' },
+        signal: AbortSignal.timeout(NATIVE_RUNNER_STORE_VERSION_TIMEOUT_MS)
+      });
+      if (!response.ok) throw new Error(`store_update_http_${response.status}`);
+      const publishedVersion = parseChromeWebStorePublishedVersion(await response.text(), extensionId);
+      if (!publishedVersion) throw new Error('store_update_version_missing');
+      // Never relax the configured safety floor if the Store returns stale data.
+      const effectiveVersion = compareDottedVersions(
+        publishedVersion,
+        NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION
+      ) >= 0
+        ? publishedVersion
+        : NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;
+      const changed = effectiveVersion !== NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+      NATIVE_RUNNER_MIN_EXTENSION_VERSION = effectiveVersion;
+      NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = effectiveVersion;
+      if (changed) {
+        console.log(`[agent-verification] Magic City Runner Store release is now ${effectiveVersion}`);
+      }
+      return effectiveVersion;
+    } catch (error) {
+      console.warn('[agent-verification] Runner Store version check failed; retaining cached version:', error instanceof Error ? error.message : String(error));
+      return NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+    } finally {
+      nativeRunnerStoreVersionRefreshPromise = null;
+    }
+  })();
+  return nativeRunnerStoreVersionRefreshPromise;
+}
+
+function startNativeRunnerStoreVersionRefresh() {
+  if (!getChromeWebStoreExtensionId()) return null;
+  refreshNativeRunnerStoreVersion({ force: true }).catch(() => {});
+  const timer = setInterval(() => {
+    refreshNativeRunnerStoreVersion({ force: true }).catch(() => {});
+  }, NATIVE_RUNNER_STORE_VERSION_REFRESH_MS);
+  timer.unref?.();
+  return timer;
+}
 const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
   1_000,
   Number(process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS || 7_500)
@@ -5670,7 +5778,7 @@ function formatAgentHubBootstrapAgent(agent = {}) {
 async function buildIndexHtmlWithAgentHubBootstrap(filePath) {
   const html = fs.readFileSync(filePath, 'utf8');
   const scripts = [
-    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__=${escapeScriptJson(JSON.stringify(getSantaClawzApprovedExternalAgentIds().map((agentId) => `santaclawz:${agentId}`)))};</script>`
+    `<script>window.__MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_EXTENSION_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_HELPER_INSTALL_URL__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_HELPER_INSTALL_URL))};window.__MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION__=${escapeScriptJson(JSON.stringify(NATIVE_RUNNER_MIN_EXTENSION_VERSION))};window.__MAGIC_CITY_SANTACLAWZ_MODE__=${escapeScriptJson(JSON.stringify(MAGIC_CITY_SANTACLAWZ_MODE))};window.__MAGIC_CITY_SANTACLAWZ_APPROVED_AGENT_IDS__=${escapeScriptJson(JSON.stringify(getSantaClawzApprovedExternalAgentIds().map((agentId) => `santaclawz:${agentId}`)))};</script>`
   ];
   try {
     if (!MAGIC_CITY_SANTACLAWZ_LIVE) return html.includes('</head>')
@@ -7367,6 +7475,125 @@ function isExactExtensionCheckpointReplay(session = {}, requestHash = '') {
   return Boolean(latest?.extensionPlan && latest.checkpointRequestHash === requestHash);
 }
 
+function normalizeAmazonSelectionPackageFacts(source = null) {
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
+  const text = (key, limit = 32) => String(source[key] || '').trim().slice(0, limit) || null;
+  const positive = (key) => {
+    if (source[key] === null || source[key] === '' || source[key] === undefined) return null;
+    const value = Number(source[key]);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  };
+  return {
+    status: text('status', 24),
+    unit: text('unit', 24),
+    total: positive('total'),
+    per: positive('per'),
+    outer: positive('outer'),
+    configuration: text('configuration', 32)
+  };
+}
+
+function normalizeAmazonSelectionIntelligenceCandidates(values = [], planAction = {}) {
+  if (!Array.isArray(values) || !values.length || values.length > AMAZON_SELECTION_INTELLIGENCE_MAX_CANDIDATES) {
+    throw createHttpError('amazon_candidate_ranker_candidates_invalid', 400);
+  }
+  const maxPrice = planAction.maxPrice === null || planAction.maxPrice === '' || planAction.maxPrice === undefined
+    ? null
+    : Number(planAction.maxPrice);
+  const primeRequired = planAction.primeRequired === true;
+  const ids = new Set();
+  const asins = new Set();
+  return values.map((candidate) => {
+    const id = String(candidate?.id || '').trim().slice(0, 40);
+    const asin = String(candidate?.asin || '').trim().toUpperCase();
+    const title = String(candidate?.title || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+    const price = candidate?.price === null || candidate?.price === '' || candidate?.price === undefined
+      ? null
+      : Number(candidate.price);
+    if (!/^candidate-\d{1,2}$/.test(id) || !/^[A-Z0-9]{10}$/.test(asin) || !title) {
+      throw createHttpError('amazon_candidate_ranker_candidate_invalid', 400);
+    }
+    if (ids.has(id) || asins.has(asin)) throw createHttpError('amazon_candidate_ranker_candidate_duplicate', 400);
+    ids.add(id);
+    asins.add(asin);
+    if (!Number.isFinite(price) || price <= 0 || (Number.isFinite(maxPrice) && maxPrice > 0 && price > maxPrice + 0.005)) {
+      throw createHttpError('amazon_candidate_ranker_price_invalid', 400);
+    }
+    const primeEligible = candidate?.primeEligible === true;
+    const freeShipping = candidate?.freeShipping === true;
+    const conditionalShipping = candidate?.conditionalShipping === true;
+    if (primeRequired && (!primeEligible || !freeShipping || conditionalShipping)) {
+      throw createHttpError('amazon_candidate_ranker_fulfillment_invalid', 400);
+    }
+    if (candidate?.hardEligible !== true) throw createHttpError('amazon_candidate_ranker_hard_eligibility_missing', 400);
+    return {
+      id,
+      asin,
+      title,
+      packageFacts: normalizeAmazonSelectionPackageFacts(candidate.packageFacts),
+      price,
+      primeEligible,
+      freeShipping,
+      conditionalShipping,
+      sponsored: false,
+      hardEligible: true
+    };
+  });
+}
+
+function amazonSelectionObservationHash(candidates = []) {
+  return hashHex(stableJsonStringify({
+    schema: 'magic-city-amazon-candidate-observation-v1',
+    candidates
+  }));
+}
+
+function amazonSelectionRequestId({ sessionId = '', planHash = '', actionId = '', observationHash = '' } = {}) {
+  return hashHex(stableJsonStringify({
+    schema: 'magic-city-amazon-selection-advice-request-v1',
+    sessionId,
+    planHash,
+    actionId,
+    observationHash
+  }));
+}
+
+function amazonSelectionIntelligenceAttempts(session = {}) {
+  return (Array.isArray(session.amazonSelectionIntelligenceAttempts)
+    ? session.amazonSelectionIntelligenceAttempts
+    : [])
+    .filter((attempt) => attempt && typeof attempt === 'object')
+    .slice(-AMAZON_SELECTION_INTELLIGENCE_MAX_ATTEMPTS_PER_MISSION);
+}
+
+function amazonSelectionIntelligenceResponse({
+  sessionId,
+  planHash,
+  actionId,
+  requestId,
+  observationHash,
+  rank = null,
+  reason = ''
+} = {}) {
+  const selectedCandidateId = String(rank?.selectedCandidateId || '').trim() || null;
+  const decision = selectedCandidateId
+    ? 'select'
+    : rank?.decision === 'request_user'
+      ? 'request_user'
+      : 'abstain';
+  return {
+    schema: 'magic-city-amazon-selection-advice-v1',
+    sessionId,
+    planHash,
+    actionId,
+    requestId,
+    observationHash,
+    decision,
+    selectedCandidateId,
+    reason: String(rank?.reason || reason || 'Product-match intelligence was unavailable.').slice(0, 160)
+  };
+}
+
 function formatConnectorSessionForExtension(session = null) {
   if (!session) return null;
   const selections = pickExtensionBrowserSelections(session.finalSelections || session.selections || {});
@@ -7391,6 +7618,11 @@ function formatConnectorSessionForExtension(session = null) {
     finalSelections: selections,
     extensionMissionPlan,
     extensionMissionPlanState: getExtensionMissionPlanStateForSession(session, extensionMissionPlan),
+    selectionIntelligence: {
+      enabled: AMAZON_SELECTION_INTELLIGENCE_ENABLED && isAmazonCandidateRankerConfigured(),
+      maxCandidates: AMAZON_SELECTION_INTELLIGENCE_MAX_CANDIDATES,
+      timeoutMs: AMAZON_SELECTION_INTELLIGENCE_TIMEOUT_MS
+    },
     extensionRunDispatch: hasActiveExtensionRunDispatch(session)
       ? {
           authorizedAt: session.extensionRunDispatch?.authorizedAt || null,
@@ -7496,6 +7728,13 @@ function nativeRunnerDeviceNeedsExtensionUpgrade(device = null) {
   return compareDottedVersions(version, NATIVE_RUNNER_MIN_EXTENSION_VERSION) < 0;
 }
 
+function nativeRunnerDeviceHasPublishedUpdate(device = null) {
+  if (!isMagicCityRunnerExtensionDevice(device)) return false;
+  const version = String(device?.metadata?.extensionVersion || '').trim();
+  if (!version || !NATIVE_RUNNER_LATEST_PUBLISHED_VERSION) return false;
+  return compareDottedVersions(version, NATIVE_RUNNER_LATEST_PUBLISHED_VERSION) < 0;
+}
+
 function getExecutableNativeBrowserWorkerRegistration(device = null, pluginId = NATIVE_RUNNER_PLUGIN_ID) {
   if (!device?.id) return null;
   const plugin = getPluginRegistration(pluginId);
@@ -7594,6 +7833,7 @@ function buildNativeRunnerReadiness({
   const executableReady = Boolean(executableRegistration && extensionPermissionReady);
   const pollingReady = Boolean(device && nativeRunnerDeviceHasFreshPoll(device));
   const extensionUpdateRequired = nativeRunnerDeviceNeedsExtensionUpgrade(device);
+  const extensionUpdateAvailable = nativeRunnerDeviceHasPublishedUpdate(device);
   const ready = Boolean(pollingReady && !extensionUpdateRequired && (!requireExecutableWorker || executableReady));
   let reason = 'runner_online';
   if (!activeDevices.length) {
@@ -7633,7 +7873,10 @@ function buildNativeRunnerReadiness({
     executableReady,
     browserPermissionReady: extensionPermissionReady,
     extensionUpdateRequired,
+    extensionUpdateAvailable,
     minimumExtensionVersion: NATIVE_RUNNER_MIN_EXTENSION_VERSION,
+    latestPublishedVersion: NATIVE_RUNNER_LATEST_PUBLISHED_VERSION,
+    extensionInstallUrl: NATIVE_RUNNER_EXTENSION_INSTALL_URL || null,
     executableRegistrationId: executableRegistration?.id || null,
     device: formatNativeRunnerDeviceForApi(device),
     devices: activeDevices.map((row) => formatNativeRunnerDeviceForApi(row)),
@@ -20602,71 +20845,188 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && /^\/connectors\/sessions\/[^/]+\/rank-candidates$/.test(urlPath)) {
+      const rankDeadlineAt = Date.now() + AMAZON_SELECTION_INTELLIGENCE_TIMEOUT_MS;
       const sessionId = urlPath.split('/')[3];
       const session = getConnectorSession(sessionId);
       if (!session) return notFound(res);
       const body = await readBody(req);
-      requireFields(body, ['pluginId', 'planActionId']);
+      requireFields(body, ['pluginId', 'planHash', 'planActionId', 'requestId', 'observationHash', 'candidates']);
       if (!isChromeExtensionDeclarativeRunnerRequest(req)) {
         throw createHttpError('amazon_candidate_ranker_extension_only', 403);
       }
-      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId });
+      const pluginAuth = requirePluginApiKeyOrNativeRunner(req, { body, session, pluginId: body.pluginId, advisory: true });
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'candidate_ranker_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
+      }
+      if (!AMAZON_SELECTION_INTELLIGENCE_ENABLED || !isAmazonCandidateRankerConfigured()) {
+        return sendAdvisoryJson(res, 200, {
+          available: false,
+          decision: 'abstain',
+          selectedCandidateId: null,
+          reason: 'Product-match intelligence is not enabled.'
+        });
       }
       const plan = getExtensionMissionPlanForSession(session);
       const planAction = plan?.actions?.find((action) => action.id === String(body.planActionId || '').trim());
       if (!plan || planAction?.type !== 'select_candidate') {
         throw createHttpError('amazon_candidate_ranker_action_invalid', 409);
       }
-      const targetDomain = normalizeMissionDomain(body.targetUrl || plan.startUrl || session.selections?.targetUrl || '');
-      if (targetDomain !== 'amazon.com' || plan.targetDomain !== 'amazon.com') {
+      if (String(body.planHash || '').trim() !== plan.planHash) {
+        throw createHttpError('amazon_candidate_ranker_plan_hash_mismatch', 409);
+      }
+      const planState = getExtensionMissionPlanStateForSession(session, plan);
+      const currentAction = plan.actions[Number(planState?.nextActionIndex || 0)] || null;
+      if (currentAction?.id !== planAction.id || currentAction.type !== 'select_candidate') {
+        throw createHttpError('amazon_candidate_ranker_action_not_current', 409);
+      }
+      if (!['queued', 'confirmed', 'claimed', 'executing'].includes(String(session.status || '').toLowerCase())) {
+        throw createHttpError('amazon_candidate_ranker_session_not_active', 409);
+      }
+      if (plan.targetDomain !== 'amazon.com') {
         throw createHttpError('amazon_candidate_ranker_domain_invalid', 403);
       }
-      const maxPrice = Number(body.maxPrice);
-      const publicCandidates = (Array.isArray(body.candidates) ? body.candidates : [])
-        .slice(0, 18)
-        .map((candidate, index) => ({
-          id: String(candidate?.id || `candidate-${index + 1}`).slice(0, 40),
-          title: String(candidate?.title || '').slice(0, 180),
-          url: String(candidate?.url || '').slice(0, 1200),
-          price: Number.isFinite(Number(candidate?.price)) ? Number(candidate.price) : null,
-          rating: Number.isFinite(Number(candidate?.rating)) ? Number(candidate.rating) : null,
-          reviewCount: Number.isFinite(Number(candidate?.reviewCount)) ? Number(candidate.reviewCount) : null,
-          sponsored: Boolean(candidate?.sponsored),
-          publicReviewSignals: String(candidate?.context || candidate?.publicReviewSignals || '').slice(0, 700)
-        }))
-        .filter((candidate) => candidate.title && candidate.url && normalizeMissionDomain(candidate.url) === 'amazon.com');
-      const rank = await rankAmazonCandidatesWithProvider({
-        request: String(body.request || body.query || '').slice(0, 700),
-        query: String(body.query || planAction.query || plan.query || '').slice(0, 180),
-        maxPrice: Number.isFinite(maxPrice) ? maxPrice : (Number.isFinite(Number(planAction.maxPrice)) ? Number(planAction.maxPrice) : null),
-        candidates: publicCandidates,
-        timeoutMs: Number(process.env.MAGIC_CITY_BROWSER_RANK_TIMEOUT_MS || 1800)
+      const publicCandidates = normalizeAmazonSelectionIntelligenceCandidates(body.candidates, planAction);
+      const observationHash = amazonSelectionObservationHash(publicCandidates);
+      if (String(body.observationHash || '').trim() !== observationHash) {
+        throw createHttpError('amazon_candidate_ranker_observation_hash_mismatch', 409);
+      }
+      const requestId = amazonSelectionRequestId({
+        sessionId,
+        planHash: plan.planHash,
+        actionId: planAction.id,
+        observationHash
       });
+      if (String(body.requestId || '').trim() !== requestId) {
+        throw createHttpError('amazon_candidate_ranker_request_id_mismatch', 409);
+      }
+      const attempts = amazonSelectionIntelligenceAttempts(session);
+      const existingAttempt = attempts.find((attempt) =>
+        attempt.planHash === plan.planHash && attempt.actionId === planAction.id
+      );
+      if (existingAttempt) {
+        if (existingAttempt.requestId !== requestId || existingAttempt.observationHash !== observationHash) {
+          throw createHttpError('amazon_candidate_ranker_action_already_attempted', 409);
+        }
+        if (existingAttempt.response) {
+          return sendAdvisoryJson(res, 200, { ...existingAttempt.response, available: true, replayed: true });
+        }
+        return sendAdvisoryJson(res, 202, amazonSelectionIntelligenceResponse({
+          sessionId,
+          planHash: plan.planHash,
+          actionId: planAction.id,
+          requestId,
+          observationHash,
+          reason: 'The existing product-match consultation has no completed result; Magic City will not repeat it.'
+        }));
+      }
+      if (attempts.length >= AMAZON_SELECTION_INTELLIGENCE_MAX_ATTEMPTS_PER_MISSION) {
+        return sendAdvisoryJson(res, 429, amazonSelectionIntelligenceResponse({
+          sessionId,
+          planHash: plan.planHash,
+          actionId: planAction.id,
+          requestId,
+          observationHash,
+          reason: 'The mission reached its product-match intelligence limit.'
+        }));
+      }
+      if (amazonSelectionIntelligenceActiveCalls >= AMAZON_SELECTION_INTELLIGENCE_MAX_CONCURRENCY) {
+        return sendAdvisoryJson(res, 429, amazonSelectionIntelligenceResponse({
+          sessionId,
+          planHash: plan.planHash,
+          actionId: planAction.id,
+          requestId,
+          observationHash,
+          reason: 'Product-match intelligence is busy; review this selection instead.'
+        }));
+      }
+      amazonSelectionIntelligenceActiveCalls += 1;
+      let rank = null;
+      try {
+        const startedAt = new Date().toISOString();
+        updateConnectorSession(sessionId, {
+          amazonSelectionIntelligenceAttempts: [
+            ...attempts,
+            {
+              planHash: plan.planHash,
+              actionId: planAction.id,
+              requestId,
+              observationHash,
+              status: 'pending',
+              candidateCount: publicCandidates.length,
+              startedAt,
+              response: null
+            }
+          ]
+        });
+        // Persist the no-repeat reservation before contacting the model. If the
+        // process restarts during inference, the same signed action abstains
+        // instead of issuing a second consultation.
+        try {
+          await flushPersistence();
+        } catch {
+          throw createHttpError('amazon_candidate_ranker_persistence_unavailable', 503);
+        }
+        const providerTimeoutMs = rankDeadlineAt - Date.now() - 150;
+        if (providerTimeoutMs >= 800) {
+          rank = await rankAmazonCandidatesWithProvider({
+            request: String(planAction.selectionBrief || planAction.query || '').slice(0, 700),
+            maxPrice: planAction.maxPrice === null || planAction.maxPrice === '' || planAction.maxPrice === undefined
+              ? null
+              : Number.isFinite(Number(planAction.maxPrice))
+                ? Number(planAction.maxPrice)
+                : null,
+            primeRequired: planAction.primeRequired === true,
+            candidates: publicCandidates,
+            timeoutMs: providerTimeoutMs
+          });
+        }
+      } finally {
+        amazonSelectionIntelligenceActiveCalls = Math.max(0, amazonSelectionIntelligenceActiveCalls - 1);
+      }
+      const latestSession = getConnectorSession(sessionId);
+      const latestPlan = getExtensionMissionPlanForSession(latestSession);
+      const latestPlanState = getExtensionMissionPlanStateForSession(latestSession, latestPlan);
+      const latestAction = latestPlan?.actions?.[Number(latestPlanState?.nextActionIndex || 0)] || null;
+      const response = amazonSelectionIntelligenceResponse({
+        sessionId,
+        planHash: plan.planHash,
+        actionId: planAction.id,
+        requestId,
+        observationHash,
+        rank: latestSession
+          && ['queued', 'confirmed', 'claimed', 'executing'].includes(String(latestSession.status || '').toLowerCase())
+          && latestPlan?.planHash === plan.planHash
+          && latestAction?.id === planAction.id
+          ? rank
+          : null,
+        reason: rank
+          ? 'The product-match response became stale before it could be used.'
+          : 'OpenRouter did not return a usable observed product candidate.'
+      });
+      const latestAttempts = amazonSelectionIntelligenceAttempts(latestSession || session)
+        .map((attempt) => attempt.requestId === requestId
+          ? { ...attempt, status: 'completed', completedAt: new Date().toISOString(), response }
+          : attempt);
+      updateConnectorSession(sessionId, { amazonSelectionIntelligenceAttempts: latestAttempts });
       if (pluginAuth.type === 'native_runner') {
         recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {
           action: 'rank_public_candidates',
-          status: 'success',
+          status: response.decision === 'select' ? 'success' : 'review',
           source: 'native_runner',
           sessionId,
           pluginId: body.pluginId,
           capability: 'read_public_page',
           metadata: {
             candidateCount: publicCandidates.length,
-            ranker: rank ? 'openrouter' : 'local_guardrails'
+            ranker: rank ? 'openrouter' : 'unavailable',
+            decision: response.decision
           }
         });
       }
-      return sendJson(res, 200, {
-        ranked: Boolean(rank),
-        ranker: rank ? 'openrouter' : 'local_guardrails',
-        selectedCandidateId: rank?.selectedCandidateId || null,
-        rankedCandidateIds: rank?.rankedCandidateIds || [],
-        confidence: rank?.confidence || 0,
-        needsReview: rank?.needsReview !== false,
-        reason: rank?.reason || 'OpenRouter ranking was unavailable; the extension will use deterministic local guards.',
-        model: rank?.model || null
+      return sendAdvisoryJson(res, 200, {
+        ...response,
+        available: true,
+        replayed: false
       });
     }
 
@@ -26875,6 +27235,7 @@ if (artifactMigration.migrated) {
 server.listen(PORT, HOST, () => {
   const seededAgents = ensureDefaultAgents();
   console.log(`[agent-verification] listening on http://${HOST}:${PORT}`);
+  startNativeRunnerStoreVersionRefresh();
   recoverFinalSubmitChainAuthorizations();
   if (MAGIC_CITY_SAFE_HTTP_STARTUP) {
     console.log('[agent-verification] safe HTTP startup enabled; background startup workers are deferred');

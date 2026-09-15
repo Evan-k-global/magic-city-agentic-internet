@@ -13,7 +13,19 @@ function extractFunction(source, name) {
   const start = functionStart >= 6 && source.slice(functionStart - 6, functionStart) === 'async '
     ? functionStart - 6
     : functionStart;
-  const braceStart = source.indexOf('{', functionStart);
+  const parametersStart = source.indexOf('(', functionStart);
+  let parameterDepth = 0;
+  let parametersEnd = -1;
+  for (let index = parametersStart; index < source.length; index += 1) {
+    if (source[index] === '(') parameterDepth += 1;
+    if (source[index] === ')') parameterDepth -= 1;
+    if (parameterDepth === 0) {
+      parametersEnd = index;
+      break;
+    }
+  }
+  assert.notEqual(parametersEnd, -1, `unterminated ${name} parameters`);
+  const braceStart = source.indexOf('{', parametersEnd);
   let depth = 0;
   for (let index = braceStart; index < source.length; index += 1) {
     if (source[index] === '{') depth += 1;
@@ -31,6 +43,20 @@ const runnerStatusRoute = server.slice(runnerStatusStart, runnerStatusEnd);
 assert.match(runnerStatusRoute, /advisory: true/);
 assert.match(runnerStatusRoute, /return sendAdvisoryJson\(res, 200/);
 assert.doesNotMatch(runnerStatusRoute, /recordNativeRunnerActivity|touchNativeRunnerDevice\(/);
+
+const rankCandidatesEnd = server.indexOf("if (req.method === 'POST' && /^\\/connectors\\/sessions\\/[^/]+\\/claim$/.test(urlPath))", runnerStatusEnd);
+assert.ok(rankCandidatesEnd > runnerStatusEnd, 'missing route after candidate ranking');
+const rankCandidatesRoute = server.slice(runnerStatusEnd, rankCandidatesEnd);
+const rankCapacityCheck = rankCandidatesRoute.indexOf('amazonSelectionIntelligenceActiveCalls >= AMAZON_SELECTION_INTELLIGENCE_MAX_CONCURRENCY');
+const rankCapacityReserve = rankCandidatesRoute.indexOf('amazonSelectionIntelligenceActiveCalls += 1');
+const rankPersistenceWait = rankCandidatesRoute.indexOf('await flushPersistence()');
+const rankCapacityRelease = rankCandidatesRoute.indexOf('amazonSelectionIntelligenceActiveCalls = Math.max(0, amazonSelectionIntelligenceActiveCalls - 1)');
+assert.ok(rankCapacityCheck >= 0, 'candidate ranking must check provider capacity');
+assert.ok(rankCapacityReserve > rankCapacityCheck, 'candidate ranking must reserve capacity after checking it');
+assert.ok(rankPersistenceWait > rankCapacityReserve, 'candidate ranking must reserve capacity before its first persistence wait');
+assert.ok(rankCapacityRelease > rankPersistenceWait, 'candidate ranking must release capacity after the guarded work');
+assert.match(rankCandidatesRoute.slice(rankCapacityReserve, rankCapacityRelease), /try \{/);
+assert.match(rankCandidatesRoute.slice(rankPersistenceWait, rankCapacityRelease + 120), /finally \{/);
 
 const registrationStart = server.indexOf("if (req.method === 'POST' && urlPath === '/plugins/register')");
 const registrationEnd = server.indexOf("if ((req.method === 'GET' || req.method === 'HEAD')", registrationStart);
@@ -75,7 +101,7 @@ const ephemeralUpdate = extractFunction(store, 'updateNativeRunnerDeviceEphemera
 assert.doesNotMatch(ephemeralUpdate, /persistState\(/);
 
 const runSession = extractFunction(runner, 'runSession');
-assert.match(runSession, /session = await claimSession\(rawSession\);\s*let authorityVerifiedAt = Date\.now\(\);/);
+assert.match(runSession, /session = await claimSession\(rawSession\);[\s\S]{0,120}let authorityVerifiedAt = Date\.now\(\);/);
 assert.match(runSession, /session = await checkpointRunnerStartup[\s\S]{0,160}authorityVerifiedAt = Date\.now\(\);/);
 assert.match(runSession, /session = await missionCheckpoint\(session, \{[\s\S]*?\n\s*\}\);\s*authorityVerifiedAt = Date\.now\(\);/);
 

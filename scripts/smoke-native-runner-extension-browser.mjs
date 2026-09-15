@@ -299,6 +299,41 @@ function runtimeMessageWithTimeout(page, message, timeoutMs = 3_000) {
 }
 
 function storefront(pathname, searchParams = new URLSearchParams()) {
+  if (pathname === '/selection-intelligence-search') {
+    const card = (asin, title, price) => [
+      `<div data-component-type="s-search-result" data-asin="${asin}">`,
+      `<h2><a href="/dp/${asin}">${title}</a></h2>`,
+      `<span class="a-price"><span class="a-offscreen">$${price}</span></span>`,
+      '<span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery Tomorrow</span>',
+      `<button onclick="sessionStorage.setItem('selection-intelligence-click-count', String(Number(sessionStorage.getItem('selection-intelligence-click-count') || 0) + 1)); location.href='/post-add-confirmation'">Add to cart</button>`,
+      '</div>'
+    ].join('');
+    return [
+      '<main><h1>Results for fruity Nature Valley granola bars</h1>',
+      card('B000FRUIT1', 'Nature Valley Mixed Berry Crunchy Granola Bars', '3.79'),
+      card('B000FRUIT2', 'Nature Valley Cranberry Pomegranate Granola Bars', '3.89'),
+      card('B000PEANUT', 'Nature Valley Peanut Butter Granola Bars', '3.50'),
+      '<a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/selection-explicit-identity-search') {
+    const card = (asin, brand, title, price) => [
+      `<div data-component-type="s-search-result" data-asin="${asin}">`,
+      `<div data-cy="title-recipe"><h2>${brand}</h2><h2><a href="/dp/${asin}">${title}</a></h2></div>`,
+      `<span class="a-price"><span class="a-offscreen">$${price}</span></span>`,
+      '<span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery Tomorrow</span>',
+      `<button onclick="sessionStorage.setItem('selection-explicit-identity-click-count', String(Number(sessionStorage.getItem('selection-explicit-identity-click-count') || 0) + 1))">Add to cart</button>`,
+      '</div>'
+    ].join('');
+    return [
+      '<main><h1>Results for Nature Valley Strawberry granola bars</h1>',
+      card('B000PEANUT', 'Nature Valley', 'Nature Valley Peanut Butter Granola Bars', '3.50'),
+      card('B000STRAWB', 'Great Value', 'Great Value Strawberry Granola Bars', '3.25'),
+      '<a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/selection-timeout-search') {
     return [
       '<main><h1>Results for test gadget</h1>',
@@ -966,6 +1001,8 @@ async function main() {
     const claimedSessionIds = [];
     let registrationRequestCount = 0;
     let sessionListRequestCount = 0;
+    let selectionRankRequestCount = 0;
+    let selectionRankRequestBody = null;
     let fulfillment = null;
     let session = null;
     let distractorSession = null;
@@ -1097,6 +1134,21 @@ async function main() {
           return;
         }
         return json(res, 200, { active: !['fulfilled', 'failed'].includes(session.status), session });
+      }
+      if (req.method === 'POST' && url.pathname.endsWith('/rank-candidates')) {
+        selectionRankRequestCount += 1;
+        selectionRankRequestBody = body;
+        return json(res, 200, {
+          schema: 'magic-city-amazon-selection-advice-v1',
+          sessionId: session.id,
+          planHash: body.planHash,
+          actionId: body.planActionId,
+          requestId: body.requestId,
+          observationHash: body.observationHash,
+          decision: 'select',
+          selectedCandidateId: 'candidate-1',
+          reason: 'Observed fruit-flavored Nature Valley match.'
+        });
       }
       if (req.method === 'POST' && url.pathname.endsWith('/checkpoint')) {
         const plan = session.extensionMissionPlan;
@@ -1317,7 +1369,7 @@ async function main() {
       throw error;
     });
     console.log(`native-runner browser smoke paired (${smokeMode})`);
-    const prepareSelectionOnlySession = async (pathname) => {
+    const prepareSelectionOnlySession = async (pathname, { goal = 'buy test gadget', selectionIntelligence = null } = {}) => {
       checkpoints.length = 0;
       fulfillment = null;
       transientRunnerStatusFailures = 0;
@@ -1329,7 +1381,7 @@ async function main() {
         handoffData: { kind: 'browser' },
         selections: {
           targetUrl,
-          goal: 'buy test gadget',
+          goal,
           budget: '$4',
           finalApprovalPolicy: 'auto_submit_after_verified_checkout'
         },
@@ -1354,6 +1406,7 @@ async function main() {
         },
         extensionMissionPlan: selectionPlan,
         extensionMissionPlanState: { planHash: selectionPlan.planHash, nextActionIndex: 0, completedActionIds: [] },
+        selectionIntelligence,
         missionBoundaryLatestHash: null,
         missionBoundaryEventCount: 0
       };
@@ -1398,6 +1451,67 @@ async function main() {
       await wakePage.close();
       return { ...result, durationMs: Date.now() - startedAt };
     };
+    if (smokeMode === 'selection-intelligence') {
+      const { merchantPage } = await prepareSelectionOnlySession('/selection-intelligence-search', {
+        goal: 'buy fruity Nature Valley granola bars',
+        selectionIntelligence: { enabled: true, maxCandidates: 12, timeoutMs: 3000 }
+      });
+      const wake = await runSelectionFocus('browser-smoke-selection-intelligence');
+      const selectionCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+        && checkpoint.planActionStatus !== 'waiting');
+      const clickCount = Number(await merchantPage.evaluate(() => sessionStorage.getItem('selection-intelligence-click-count') || '0'));
+      const sentCandidates = Array.isArray(selectionRankRequestBody?.candidates) ? selectionRankRequestBody.candidates : [];
+      if (!selectionCheckpoint
+        || selectionCheckpoint?.browser?.runnerStep?.selectionKind !== 'model_assisted'
+        || selectionCheckpoint?.browser?.runnerStep?.intelligenceConsulted !== true
+        || selectionCheckpoint?.browser?.runnerStep?.intelligenceDecision !== 'select'
+        || selectionCheckpoint?.browser?.runnerStep?.selectedCandidate?.asin !== 'B000FRUIT1'
+        || selectionCheckpoint?.browser?.runnerStep?.controlStrategy !== 'amazon_search_card_model_assisted'
+        || clickCount !== 1
+        || selectionRankRequestCount !== 1
+        || sentCandidates.length !== 2
+        || JSON.stringify(selectionRankRequestBody).includes('url')) {
+        fail(`browser_extension_selection_intelligence_failed:${JSON.stringify({
+          selectionCheckpoint,
+          clickCount,
+          selectionRankRequestCount,
+          selectionRankRequestBody,
+          wake
+        })}`);
+      }
+      recordPurchaseScenario('Bounded selection intelligence chooses one observed candidate after a no-click abstention', {
+        durationMs: wake.durationMs,
+        clickCount,
+        candidateCount: sentCandidates.length,
+        rankRequests: selectionRankRequestCount
+      });
+      await merchantPage.close();
+      const rankRequestsBeforeExplicitIdentity = selectionRankRequestCount;
+      const { merchantPage: explicitIdentityPage } = await prepareSelectionOnlySession('/selection-explicit-identity-search', {
+        goal: 'buy Nature Valley Strawberry granola bars',
+        selectionIntelligence: { enabled: true, maxCandidates: 12, timeoutMs: 3000 }
+      });
+      const explicitIdentityWake = await runSelectionFocus('browser-smoke-selection-explicit-identity');
+      const explicitIdentityClicks = Number(await explicitIdentityPage.evaluate(() => sessionStorage.getItem('selection-explicit-identity-click-count') || '0'));
+      if (explicitIdentityClicks !== 0
+        || selectionRankRequestCount !== rankRequestsBeforeExplicitIdentity
+        || explicitIdentityWake?.payload?.result?.executed?.[0]?.status !== 'product_selection_needs_review') {
+        fail(`browser_extension_selection_intelligence_overrode_explicit_identity:${JSON.stringify({
+          explicitIdentityClicks,
+          selectionRankRequestCount,
+          rankRequestsBeforeExplicitIdentity,
+          explicitIdentityWake
+        })}`);
+      }
+      recordPurchaseScenario('Selection intelligence preserves explicit brand and flavor constraints', {
+        clickCount: explicitIdentityClicks,
+        additionalRankRequests: selectionRankRequestCount - rankRequestsBeforeExplicitIdentity
+      });
+      await explicitIdentityPage.close();
+      console.log(JSON.stringify({ amazonPurchaseSimulations: purchaseScenarioResults.length, scenarios: purchaseScenarioResults }, null, 2));
+      console.log('native-runner selection intelligence smoke passed');
+      return;
+    }
     if (smokeMode === 'selection-injection-recovery') {
       const { merchantPage } = await prepareSelectionOnlySession('/selection-recovery-search');
       const wake = await runSelectionFocus('browser-smoke-selection-injection-recovery');
@@ -5328,6 +5442,9 @@ async function main() {
 
     if (purchaseScenarioResults.length < 10) {
       fail(`browser_extension_purchase_matrix_incomplete:${JSON.stringify(purchaseScenarioResults)}`);
+    }
+    if (selectionRankRequestCount !== 0) {
+      fail(`browser_extension_deterministic_path_called_selection_intelligence:${selectionRankRequestCount}`);
     }
     console.log(JSON.stringify({
       amazonPurchaseSimulations: purchaseScenarioResults.length,

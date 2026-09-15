@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +24,10 @@ function stableValue(value) {
     );
   }
   return value;
+}
+
+function protocolHash(value) {
+  return `0x${crypto.createHash('sha256').update(JSON.stringify(stableValue(value))).digest('hex')}`;
 }
 
 function domainForUrl(value = '') {
@@ -114,7 +119,42 @@ async function waitForServer(baseUrl) {
 async function main() {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'magic-city-native-runner-extension-'));
   const port = await getAvailablePort();
+  const rankerPort = await getAvailablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  let rankerCalls = 0;
+  let rankerDelayMs = 0;
+  let rankerProviderInput = null;
+  let rankerSawDurableAttempt = false;
+  let expectedIntelligenceRequestId = null;
+  const rankerServer = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    const systemPrompt = String(payload.messages?.[0]?.content || '');
+    const isSelectionRank = systemPrompt.includes('Choose the observed Amazon product title');
+    if (isSelectionRank) {
+      rankerCalls += 1;
+      rankerProviderInput = JSON.parse(String(payload.messages?.[1]?.content || '{}'));
+      const persistedState = JSON.parse(fs.readFileSync(path.join(tmpDir, 'data/state.json'), 'utf8'));
+      rankerSawDurableAttempt = (persistedState.connectorSessions || []).some((candidateSession) =>
+        (candidateSession.amazonSelectionIntelligenceAttempts || []).some((attempt) =>
+          attempt?.status === 'pending' && attempt?.requestId === expectedIntelligenceRequestId
+        )
+      );
+    }
+    const content = isSelectionRank
+      ? { decision: 'select', selectedId: 'candidate-1', reason: 'Observed semantic match.' }
+      : {};
+    if (isSelectionRank && rankerDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, rankerDelayMs));
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ model: 'local-selection-test', choices: [{ message: { content: JSON.stringify(content) } }] }));
+  });
+  await new Promise((resolve, reject) => {
+    rankerServer.once('error', reject);
+    rankerServer.listen(rankerPort, '127.0.0.1', resolve);
+  });
   const serverEnv = {
     ...process.env,
     NODE_ENV: 'test',
@@ -123,6 +163,9 @@ async function main() {
     PUBLIC_API_KEYS: apiKey,
     MAGIC_CITY_NATIVE_RUNNER_TOKEN_TTL_MS: '600000',
     MAGIC_CITY_NATIVE_RUNNER_PAIRING_TTL_MS: '600000',
+    MAGIC_CITY_FILE_PERSIST_MODE: 'async',
+    MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION: '0.4.33',
+    MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL: 'https://chromewebstore.google.com/detail/magic-city-runner/test-extension-id',
     MAGIC_CITY_SAFE_HTTP_STARTUP: 'true',
     SANTACLAWZ_SAFE_START_DELAY_MS: '600000',
     AUTO_START_LOCAL_EXECUTION_AGENTS: 'false',
@@ -136,7 +179,20 @@ async function main() {
     ZEKO_RELAYER_MODE: 'mba_mission_registry',
     ZEKO_GRAPHQL: 'http://127.0.0.1:9/graphql',
     MAGIC_CITY_FINAL_SUBMIT_CHAIN_GATE_ENABLED: 'false',
-    MISSION_BOUND_AUTH_SECRET: 'native-runner-extension-test-secret'
+    MISSION_BOUND_AUTH_SECRET: 'native-runner-extension-test-secret',
+    MAGIC_CITY_AMAZON_SELECTION_INTELLIGENCE_ENABLED: 'true',
+    MAGIC_CITY_BROWSER_RANK_TIMEOUT_MS: '3000',
+    TEST_OPENROUTER_API_KEY: 'test-only-key',
+    AI_PROVIDER_CONFIG: JSON.stringify([{
+      id: 'openrouter-selection-test',
+      label: 'OpenRouter selection test',
+      type: 'openai_compat',
+      baseUrl: `http://127.0.0.1:${rankerPort}`,
+      apiKeyEnv: 'TEST_OPENROUTER_API_KEY',
+      model: 'local-selection-test',
+      path: '/chat/completions',
+      lanes: ['general-chat']
+    }])
   };
   let stderr = '';
   const startServer = () => {
@@ -152,9 +208,23 @@ async function main() {
   };
   let child = startServer();
   const stopServer = async () => {
-    if (!child || child.exitCode !== null) return;
-    child.kill('SIGTERM');
-    await new Promise((resolve) => child.once('exit', resolve));
+    const stoppingChild = child;
+    if (!stoppingChild || stoppingChild.exitCode !== null) return;
+    // Async file persistence coalesces ordinary test writes for 150 ms. Let
+    // those fixtures settle before simulating a clean process restart.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 5000);
+      stoppingChild.once('exit', finish);
+      if (stoppingChild.exitCode !== null || !stoppingChild.kill('SIGTERM')) finish();
+    });
   };
 
   try {
@@ -262,6 +332,12 @@ async function main() {
       || !statusAfterExtensionRegister.data.ready) {
       throw new Error(`extension_register_did_not_mark_runner_seen:${statusAfterExtensionRegister.response.status}:${JSON.stringify(statusAfterExtensionRegister.data)}`);
     }
+    if (statusAfterExtensionRegister.data.readiness?.latestPublishedVersion !== '0.4.33'
+      || statusAfterExtensionRegister.data.readiness?.minimumExtensionVersion !== '0.4.33'
+      || statusAfterExtensionRegister.data.readiness?.extensionUpdateAvailable !== false
+      || !statusAfterExtensionRegister.data.readiness?.extensionInstallUrl) {
+      throw new Error(`runner_release_metadata_invalid:${JSON.stringify(statusAfterExtensionRegister.data.readiness)}`);
+    }
     const staleDeviceStatus = await request(baseUrl, '/native-runner/status?deviceId=nrd-stale-local-cache', {
       cookie: auth.cookie
     });
@@ -290,6 +366,42 @@ async function main() {
     if (!statusAfterVersionedPoll.response.ok
       || statusAfterVersionedPoll.data.device?.extensionVersion !== versionedPollVersion) {
       throw new Error(`versioned_extension_poll_did_not_update_device:${statusAfterVersionedPoll.response.status}:${JSON.stringify(statusAfterVersionedPoll.data)}`);
+    }
+    if (statusAfterVersionedPoll.data.readiness?.extensionUpdateRequired
+      || statusAfterVersionedPoll.data.readiness?.extensionUpdateAvailable
+      || statusAfterVersionedPoll.data.readiness?.ready !== true) {
+      throw new Error(`newer_runner_was_incorrectly_marked_outdated:${JSON.stringify(statusAfterVersionedPoll.data.readiness)}`);
+    }
+
+    const outdatedPollVersion = '0.4.32';
+    const outdatedPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: outdatedPollVersion,
+      runnerExtensionId: 'test-extension-id'
+    });
+    if (!outdatedPoll.response.ok) {
+      throw new Error(`outdated_extension_poll_failed:${outdatedPoll.response.status}:${JSON.stringify(outdatedPoll.data)}`);
+    }
+    const statusAfterOutdatedPoll = await request(baseUrl, `/native-runner/status?deviceId=${encodeURIComponent(claim.data.device.id)}`, {
+      cookie: auth.cookie
+    });
+    if (statusAfterOutdatedPoll.data.readiness?.extensionUpdateRequired !== true
+      || statusAfterOutdatedPoll.data.readiness?.extensionUpdateAvailable !== true
+      || statusAfterOutdatedPoll.data.readiness?.ready !== false
+      || statusAfterOutdatedPoll.data.readiness?.latestPublishedVersion !== statusAfterOutdatedPoll.data.readiness?.minimumExtensionVersion) {
+      throw new Error(`outdated_runner_was_not_blocked:${JSON.stringify(statusAfterOutdatedPoll.data.readiness)}`);
+    }
+    const restoredPoll = await request(baseUrl, '/connectors/sessions', {
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      runnerExtensionVersion: extensionVersion,
+      runnerExtensionId: 'test-extension-id'
+    });
+    if (!restoredPoll.response.ok) {
+      throw new Error(`current_extension_restore_failed:${restoredPoll.response.status}:${JSON.stringify(restoredPoll.data)}`);
     }
 
     const customStart = await request(baseUrl, '/native-runner/helper/pairing/start', {
@@ -667,6 +779,116 @@ async function main() {
     const nextPlanAction = extensionPlan.actions?.[1];
     if (!nextPlanAction?.id || !nextPlanAction?.missionAction) {
       throw new Error(`extension_next_plan_step_missing:${JSON.stringify(extensionPlan.actions || [])}`);
+    }
+    if (nextPlanAction.type !== 'select_candidate') {
+      throw new Error(`extension_selection_intelligence_action_missing:${JSON.stringify(nextPlanAction)}`);
+    }
+    const intelligenceCandidates = [{
+      id: 'candidate-1',
+      asin: 'B000FRUIT1',
+      title: 'Nature Valley Mixed Berry Crunchy Granola Bars',
+      packageFacts: null,
+      price: 3.79,
+      primeEligible: true,
+      freeShipping: true,
+      conditionalShipping: false,
+      sponsored: false,
+      hardEligible: true
+    }];
+    const observationHash = protocolHash({
+      schema: 'magic-city-amazon-candidate-observation-v1',
+      candidates: intelligenceCandidates
+    });
+    const intelligenceRequestId = protocolHash({
+      schema: 'magic-city-amazon-selection-advice-request-v1',
+      sessionId,
+      planHash: extensionPlan.planHash,
+      actionId: nextPlanAction.id,
+      observationHash
+    });
+    expectedIntelligenceRequestId = intelligenceRequestId;
+    const intelligenceBody = {
+      pluginId: 'magic-city-runner-extension',
+      planHash: extensionPlan.planHash,
+      planActionId: nextPlanAction.id,
+      requestId: intelligenceRequestId,
+      observationHash,
+      candidates: intelligenceCandidates
+    };
+    rankerDelayMs = 120;
+    const intelligenceRequest = request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/rank-candidates`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: intelligenceBody
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const concurrentIntelligenceAdvice = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/rank-candidates`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: intelligenceBody
+    });
+    const intelligenceAdvice = await intelligenceRequest;
+    rankerDelayMs = 0;
+    if (!intelligenceAdvice.response.ok
+      || intelligenceAdvice.data?.decision !== 'select'
+      || intelligenceAdvice.data?.selectedCandidateId !== 'candidate-1'
+      || intelligenceAdvice.data?.requestId !== intelligenceRequestId
+      || intelligenceAdvice.data?.observationHash !== observationHash
+      || rankerProviderInput?.request !== (nextPlanAction.selectionBrief || nextPlanAction.query)
+      || JSON.stringify(Object.keys(rankerProviderInput?.candidates?.[0] || {}).sort()) !== JSON.stringify(['id', 'title'])
+      || rankerSawDurableAttempt !== true
+      || rankerCalls !== 1) {
+      throw new Error(`extension_selection_intelligence_failed:${intelligenceAdvice.response.status}:${JSON.stringify({ response: intelligenceAdvice.data, rankerProviderInput, rankerSawDurableAttempt, rankerCalls })}`);
+    }
+    if (concurrentIntelligenceAdvice.response.status !== 202
+      || concurrentIntelligenceAdvice.data?.decision !== 'abstain'
+      || rankerCalls !== 1) {
+      throw new Error(`extension_selection_intelligence_concurrent_repeat_not_bounded:${concurrentIntelligenceAdvice.response.status}:${JSON.stringify(concurrentIntelligenceAdvice.data)}:${rankerCalls}`);
+    }
+    const replayedIntelligenceAdvice = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/rank-candidates`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: intelligenceBody
+    });
+    if (!replayedIntelligenceAdvice.response.ok
+      || replayedIntelligenceAdvice.data?.replayed !== true
+      || replayedIntelligenceAdvice.data?.selectedCandidateId !== 'candidate-1'
+      || rankerCalls !== 1) {
+      throw new Error(`extension_selection_intelligence_replay_failed:${replayedIntelligenceAdvice.response.status}:${JSON.stringify(replayedIntelligenceAdvice.data)}:${rankerCalls}`);
+    }
+    const changedCandidates = intelligenceCandidates.map((candidate) => ({ ...candidate, price: 3.99 }));
+    const changedObservationHash = protocolHash({
+      schema: 'magic-city-amazon-candidate-observation-v1',
+      candidates: changedCandidates
+    });
+    const changedIntelligenceAdvice = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/rank-candidates`, {
+      method: 'POST',
+      bearer: token,
+      runnerSurface: 'chrome-extension',
+      runnerProtocol: 'declarative-v1',
+      body: {
+        ...intelligenceBody,
+        candidates: changedCandidates,
+        observationHash: changedObservationHash,
+        requestId: protocolHash({
+          schema: 'magic-city-amazon-selection-advice-request-v1',
+          sessionId,
+          planHash: extensionPlan.planHash,
+          actionId: nextPlanAction.id,
+          observationHash: changedObservationHash
+        })
+      }
+    });
+    if (changedIntelligenceAdvice.response.status !== 409
+      || changedIntelligenceAdvice.data?.error !== 'amazon_candidate_ranker_action_already_attempted'
+      || rankerCalls !== 1) {
+      throw new Error(`extension_selection_intelligence_changed_replay_not_rejected:${changedIntelligenceAdvice.response.status}:${JSON.stringify(changedIntelligenceAdvice.data)}:${rankerCalls}`);
     }
     const signedCheckpoint = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
       method: 'POST',
@@ -1603,6 +1825,7 @@ async function main() {
     }));
   } finally {
     await stopServer();
+    await new Promise((resolve) => rankerServer.close(resolve));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 

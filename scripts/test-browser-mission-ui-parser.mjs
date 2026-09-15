@@ -24,6 +24,15 @@ assert.match(html, /agent-completion-primary-actions/, 'SantaClawz match cards m
 assert.match(html, /agent-completion-inline-links/, 'SantaClawz match cards must keep browsing and publishing actions compact and inline');
 assert.match(html, /agent-completion-status:empty/, 'SantaClawz match cards must not reserve space before a status exists');
 assert.match(html, /View \$\{matchCount\} match/, 'SantaClawz alternate-agent control must state how many matches are available');
+assert.match(serverSource, /const NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_MIN_EXTENSION_VERSION;/, 'the latest published Runner must equal the minimum accepted Runner');
+assert.match(serverSource, /latestPublishedVersion: NATIVE_RUNNER_LATEST_PUBLISHED_VERSION/, 'runner readiness must expose the published release');
+assert.match(serverSource, /extensionUpdateAvailable,/, 'runner readiness must expose whether the published Runner update is required');
+assert.match(html, /id="nativeRunnerUpdateBtn" hidden>Update Runner</, 'Runner settings must provide a hidden-until-needed update action');
+assert.match(html, /function nativeRunnerPublishedUpdateAvailable/, 'the UI must compare the installed Runner with the published release');
+assert.match(html, /data-native-runner-update="true">Update Runner</, 'idle and retryable browser missions must surface the shared update action');
+assert.match(html, /magicInternetAction && !mobileRunnerUnsupported \? renderNativeRunnerActionUpdateNotice\(\)/, 'the pre-run Magic Internet approval must surface a published Runner update');
+assert.match(html, /isBrowserLane && !executionBusy && !executionFulfilled[\s\S]*renderNativeRunnerUpdateNotice/, 'active browser missions must not show the update prompt');
+assert.match(html, /openNativeRunnerUpdatePage\(updateButton\)/, 'all Runner update prompts must open the shared update destination');
 
 const localVaultStart = html.indexOf('<details id="settingsDataSection">');
 const localVaultEnd = html.indexOf('</details>', localVaultStart);

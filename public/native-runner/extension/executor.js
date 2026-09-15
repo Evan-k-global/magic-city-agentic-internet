@@ -143,6 +143,18 @@
       .slice(-RECENT_BROWSER_ACTIONS_LIMIT);
   }
 
+  function priorBrowserActionReceipt(kind = '', context = activeActionContext) {
+    const actionId = String(context?.actionId || '').trim();
+    const receiptScope = String(context?.receiptScope || '').trim();
+    const expectedKind = String(kind || '').trim();
+    if (!actionId || !receiptScope || !expectedKind) return null;
+    return [...currentBrowserActionReceipts()].reverse().find((receipt) => (
+      receipt?.kind === expectedKind
+      && String(receipt.actionId || '') === actionId
+      && String(receipt.receiptScope || '') === receiptScope
+    )) || null;
+  }
+
   function browserClickKind(element, validatedLabel = '') {
     const directLabel = compactText([
       element?.getAttribute?.('aria-label'),
@@ -152,9 +164,11 @@
       element?.textContent
     ].filter(Boolean).join(' '), 80);
     if (/(?:^|\s)(?:x|×|close|cancel|done)(?:\s|$)/i.test(directLabel)) return 'pickup_overlay_close';
+    // Payment confirmation is scoped to the control's own label. A nearby
+    // Change link can inherit the whole picker text through its parent.
+    if (/\buse this payment method\b/i.test(directLabel)) return 'payment_confirm';
     const text = compactText(`${validatedLabel}\n${visibleControlLabel(element, 180)}\n${controlDescriptor(element)}`, 400);
     if (/\bplace(?: your)? order|submit order|confirm and pay\b/i.test(text)) return 'final_order';
-    if (/\buse this payment method\b/i.test(text)) return 'payment_confirm';
     if (/\bdeliver to this address|use this address\b/i.test(text)) return 'address_confirm';
     if (/\bdefault to this (?:delivery address|address) and payment method\b/i.test(text)) return 'merchant_checkout_default';
     return 'safe_browser_click';
@@ -591,13 +605,101 @@
     return [...new Set(matches.map((match) => match[1]).filter(Boolean))];
   }
 
-  function paymentChoiceContext(input, expectedLast4 = '') {
-    const expected = String(expectedLast4 || '').replace(/\D/g, '').slice(-4);
-    let fallback = null;
+  function singlePaymentCardContext(node, text = '', source = '') {
+    const normalizedText = compactText(text, 1400);
+    const endings = cardEndingMentions(normalizedText);
+    const paymentLike = /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(normalizedText);
+    if (!node || !paymentLike || endings.length !== 1) return null;
+    return { node, text: normalizedText, endings, source };
+  }
+
+  function paymentPickerScope(input) {
+    let node = input?.parentElement || input;
+    for (let depth = 0; node && depth < 10; depth += 1) {
+      const choices = Array.from(node.querySelectorAll?.('input[type="radio"], input[type="checkbox"]') || [])
+        .filter((choice) => visibleChoiceInput(choice));
+      const text = compactText(node.innerText || node.textContent || '', 8000);
+      const marker = compactText([
+        node.id,
+        node.getAttribute?.('class'),
+        node.getAttribute?.('aria-label'),
+        node.getAttribute?.('data-testid')
+      ].filter(Boolean).join(' '), 500);
+      if (choices.length >= 2
+        && cardEndingMentions(text).length >= 2
+        && /\b(?:payment|card)\b/i.test(marker)) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function amazonPaymentVisualRowContext(input) {
+    if (!isAmazonAddressPickerHost()) return null;
+    const scope = paymentPickerScope(input);
+    const anchor = input;
+    if (!scope || !anchor) return null;
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorCenterY = (anchorRect.top + anchorRect.bottom) / 2;
+    if (!Number.isFinite(anchorCenterY)) return null;
+
+    const candidates = Array.from(scope.querySelectorAll('label, div, li, p, span, section, article'))
+      .filter((node) => node !== scope && visible(node))
+      .map((node) => {
+        const context = singlePaymentCardContext(
+          node,
+          [
+            node.innerText || node.textContent || '',
+            node.getAttribute?.('aria-label') || '',
+            ariaLabelledText(node)
+          ].filter(Boolean).join('\n'),
+          'amazon_visual_row'
+        );
+        return context ? { ...context, inputCount: node.querySelectorAll?.('input[type="radio"], input[type="checkbox"]').length || 0 } : null;
+      })
+      .filter((candidate) => candidate && candidate.inputCount === 0)
+      .filter((candidate) => !Array.from(candidate.node.querySelectorAll('label, div, li, p, span, section, article'))
+        .some((child) => child !== candidate.node
+          && visible(child)
+          && singlePaymentCardContext(child, child.innerText || child.textContent || '', 'child')))
+      .map((candidate) => {
+        const rect = candidate.node.getBoundingClientRect();
+        const distance = anchorCenterY < rect.top
+          ? rect.top - anchorCenterY
+          : anchorCenterY > rect.bottom
+            ? anchorCenterY - rect.bottom
+            : 0;
+        return { ...candidate, distance };
+      })
+      .filter((candidate) => candidate.distance <= 72)
+      .sort((left, right) => left.distance - right.distance
+        || left.node.getBoundingClientRect().width - right.node.getBoundingClientRect().width);
+    const match = candidates[0] || null;
+    const runnerUp = candidates[1] || null;
+    if (!match || (runnerUp && runnerUp.distance === match.distance && runnerUp.endings[0] !== match.endings[0])) return null;
+    return match;
+  }
+
+  function paymentChoiceContext(input, _expectedLast4 = '') {
+    const label = input?.labels?.[0];
+    const labelContext = label
+      ? singlePaymentCardContext(label, [
+        label.innerText || label.textContent || '',
+        label.getAttribute?.('aria-label') || '',
+        ariaLabelledText(label)
+      ].filter(Boolean).join('\n'), 'label')
+      : null;
+    if (labelContext) return labelContext;
+
+    const ariaContext = singlePaymentCardContext(input, [
+      input?.getAttribute?.('aria-label') || '',
+      ariaLabelledText(input),
+      ariaDescribedText(input)
+    ].filter(Boolean).join('\n'), 'aria');
+    if (ariaContext) return ariaContext;
+
     let node = input;
-    // Amazon's inputs are sometimes nested under a large payment container
-    // without an associated label. Walk outward and use the smallest visible
-    // row that names exactly one saved card, never the whole payment section.
     for (let depth = 0; node && depth < 9; depth += 1) {
       const text = compactText([
         node.innerText || node.textContent || '',
@@ -605,20 +707,113 @@
         node.getAttribute?.('data-testid') || ''
       ].filter(Boolean).join('\n'), 1400);
       const endings = cardEndingMentions(text);
-      const paymentLike = /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text);
-      const hasExpected = !expected || endings.includes(expected);
-      if (paymentLike && endings.length && hasExpected) {
-        const candidate = { node, text, endings };
-        if (!expected || endings.length === 1 || endings.every((ending) => ending === expected)) return candidate;
-        fallback ||= candidate;
-      }
+      const context = singlePaymentCardContext(node, text, 'ancestor');
+      const visibleChoiceCount = Array.from(node.querySelectorAll?.('input[type="radio"], input[type="checkbox"]') || [])
+        .filter((choice) => visibleChoiceInput(choice)).length;
+      if (context && visibleChoiceCount <= 1) return context;
+      // Card mentions only accumulate while walking outward. Once an ancestor
+      // contains several endings or visible choices it is shared checkout state,
+      // never this input's row.
+      if (endings.length && visibleChoiceCount > 1) break;
       node = node.parentElement;
     }
-    return fallback;
+    return amazonPaymentVisualRowContext(input);
+  }
+
+  function paymentChoiceUnavailable(context = null, input = null) {
+    return Boolean(input?.disabled || input?.getAttribute?.('aria-disabled') === 'true')
+      || /\b(?:expired|currently unavailable|not available|cannot be used|update required)\b/i.test(String(context?.text || ''));
+  }
+
+  function semanticPaymentCardControls() {
+    if (!isAmazonAddressPickerHost()) return [];
+    return Array.from(interactionRoot().querySelectorAll('button, [role="radio"], [role="option"]'))
+      .filter((control) => visible(control)
+        && !control.matches?.('input')
+        && !control.querySelector?.('input[type="radio"], input[type="checkbox"]'));
+  }
+
+  function semanticPaymentCardControlText(control) {
+    return compactText([
+      control?.getAttribute?.('aria-label') || '',
+      ariaLabelledText(control),
+      ariaDescribedText(control),
+      control?.innerText || control?.textContent || ''
+    ].filter(Boolean).join('\n'), 1400);
+  }
+
+  function semanticPaymentCardControlContext(control) {
+    if (!control) return null;
+    // The interactive row itself must identify exactly one card. Never climb
+    // into a shared payment container that can describe several cards.
+    return singlePaymentCardContext(control, semanticPaymentCardControlText(control), 'semantic_payment_control');
+  }
+
+  function semanticPaymentCardControlSelected(control) {
+    if (!control) return false;
+    const testId = String(control.getAttribute?.('data-testid') || '');
+    return control.getAttribute?.('aria-current') === 'true'
+      || control.getAttribute?.('aria-checked') === 'true'
+      || control.getAttribute?.('aria-selected') === 'true'
+      || control.getAttribute?.('data-selected') === 'true'
+      || /^(?:checked|selected)$/i.test(String(control.getAttribute?.('data-state') || ''))
+      || /^selected(?:-|_)/i.test(testId);
+  }
+
+  function semanticPaymentCardChoices() {
+    return semanticPaymentCardControls()
+      .map((control) => ({
+        control,
+        context: semanticPaymentCardControlContext(control),
+        selected: semanticPaymentCardControlSelected(control),
+        kind: 'semantic_control'
+      }))
+      .filter((choice) => choice.context?.endings?.length === 1);
+  }
+
+  function unreadableSelectedPaymentControlPresent() {
+    return semanticPaymentCardControls().some((control) => semanticPaymentCardControlSelected(control)
+      && cardEndingMentions(semanticPaymentCardControlText(control)).length !== 1);
+  }
+
+  function selectSemanticPaymentCardControl(choice = null) {
+    const control = choice?.control;
+    const context = semanticPaymentCardControlContext(control);
+    const expected = String(choice?.context?.endings?.[0] || '').replace(/\D/g, '').slice(-4);
+    if (!control
+      || !visible(control)
+      || paymentChoiceUnavailable(context, control)
+      || context?.endings?.length !== 1
+      || context.endings[0] !== expected) return false;
+    if (semanticPaymentCardControlSelected(control)) return true;
+    try {
+      control.scrollIntoView?.({ block: 'center', inline: 'center' });
+      control.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function paymentChoiceInput(input) {
+    if (!input || !visibleChoiceInput(input)) return false;
+    if (paymentChoiceContext(input)) return true;
+    const marker = compactText([
+      input.id,
+      input.getAttribute?.('name'),
+      input.getAttribute?.('aria-label'),
+      input.getAttribute?.('data-testid'),
+      input.closest?.('[id*="payment" i], [class*="payment" i], [data-testid*="payment" i]')?.getAttribute?.('id'),
+      input.closest?.('[id*="payment" i], [class*="payment" i], [data-testid*="payment" i]')?.getAttribute?.('class')
+    ].filter(Boolean).join(' '), 600);
+    return /\b(?:payment|card)\b/i.test(marker);
   }
 
   function paymentChoiceClickTarget(input, context = null) {
     if (!input) return null;
+    // In Amazon's split-column picker the card description is a visual sibling,
+    // not the radio's interactive row. Use it only as identity evidence.
+    if (context?.source === 'amazon_visual_row') return input;
     const expected = String(context?.endings?.[0] || '').replace(/\D/g, '').slice(-4);
     const candidates = [
       input.labels?.[0],
@@ -644,14 +839,16 @@
 
   function selectPaymentChoiceInput(input, context = null) {
     if (!input || input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) return false;
+    const observedContext = paymentChoiceContext(input);
+    const expected = String(context?.endings?.[0] || '').replace(/\D/g, '').slice(-4);
+    if (!observedContext || observedContext.endings.length !== 1 || observedContext.endings[0] !== expected || paymentChoiceUnavailable(observedContext, input)) return false;
     if (input.checked || input.getAttribute?.('aria-checked') === 'true') return true;
-    const target = paymentChoiceClickTarget(input, context);
+    const target = paymentChoiceClickTarget(input, observedContext);
     try {
       target?.scrollIntoView?.({ block: 'center', inline: 'center' });
-      // Amazon's saved-card radios can be represented by a sibling row. Click
-      // that row first, then use the native input only as a narrow fallback.
-      if (target && target !== input) target.click();
-      if (!input.checked && input.getAttribute?.('aria-checked') !== 'true') input.click();
+      // Invoke exactly one control. A row click can select its nested radio;
+      // clicking the radio again risks toggling or advancing a sibling layout.
+      (target || input).click();
       return Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true');
     } catch {
       return false;
@@ -800,19 +997,47 @@
 
   function selectedCardLast4() {
     const root = interactionRoot();
-    const checked = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => input.checked && visibleChoiceInput(input))
-      .map((input) => paymentChoiceContext(input)?.text || compactText(radioContainer(input)?.innerText || '', 500))
-      .find((text) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && /\d{4}/.test(text));
-    if (checked) return last4FromText(checked);
+    const paymentInputs = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+      .filter((input) => paymentChoiceInput(input));
+    if (paymentInputs.length) {
+      const selectedInputs = paymentInputs.filter((input) => input.checked || input.getAttribute?.('aria-checked') === 'true');
+      if (selectedInputs.length !== 1) return '';
+      const selectedInput = selectedInputs[0];
+      const context = paymentChoiceContext(selectedInput);
+      if (!context || context.endings.length !== 1 || paymentChoiceUnavailable(context, selectedInput)) return '';
+      const matchingEligibleInputs = paymentInputs.filter((input) => {
+        const candidateContext = paymentChoiceContext(input);
+        return candidateContext?.endings?.length === 1
+          && candidateContext.endings[0] === context.endings[0]
+          && !paymentChoiceUnavailable(candidateContext, input);
+      });
+      if (matchingEligibleInputs.length !== 1 || matchingEligibleInputs[0] !== selectedInput) return '';
+      return context.endings[0];
+    }
 
-    const ariaSelected = Array.from(root.querySelectorAll('[role="radio"][aria-checked="true"], [role="option"][aria-selected="true"]'))
+    const semanticChoices = semanticPaymentCardChoices();
+    if (semanticChoices.length) {
+      const selectedChoices = semanticChoices.filter((choice) => choice.selected && !paymentChoiceUnavailable(choice.context, choice.control));
+      if (selectedChoices.length !== 1) return '';
+      const selectedChoice = selectedChoices[0];
+      const selectedEnding = selectedChoice.context.endings[0];
+      const matchingEligibleChoices = semanticChoices.filter((choice) => choice.context.endings[0] === selectedEnding
+        && !paymentChoiceUnavailable(choice.context, choice.control));
+      if (matchingEligibleChoices.length !== 1 || matchingEligibleChoices[0].control !== selectedChoice.control) return '';
+      return selectedEnding;
+    }
+    if (unreadableSelectedPaymentControlPresent()) return '';
+
+    const ariaSelectedEndings = [...new Set(Array.from(root.querySelectorAll('[role="radio"][aria-checked="true"], [role="option"][aria-selected="true"]'))
       .filter(visible)
       .map((control) => compactText(control.innerText || control.textContent || textFor(control), 600))
-      .find((text) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text) && /\d{4}/.test(text));
-    if (ariaSelected) return last4FromText(ariaSelected);
+      .map((text) => cardEndingMentions(text))
+      .filter((endings) => endings.length === 1)
+      .map((endings) => endings[0]))];
+    if (ariaSelectedEndings.length === 1) return ariaSelectedEndings[0];
+    if (ariaSelectedEndings.length > 1) return '';
 
-    const summaryText = Array.from(root.querySelectorAll([
+    const summaryEnding = Array.from(root.querySelectorAll([
       '[id*="payment" i]',
       '[data-testid*="payment" i]',
       '[class*="payment-summary" i]',
@@ -823,42 +1048,53 @@
     ].join(',')))
       .filter(visible)
       .map((element) => compactText(element.innerText || element.textContent || '', 800))
-      .find((text) => /\b(?:paying with|selected payment|payment method)\b/i.test(text)
-        && /\b(?:visa|mastercard|amex|american express|discover|card)\b/i.test(text)
-        && /\d{4}/.test(text));
-    return summaryText ? last4FromText(summaryText) : '';
+      .filter((text) => /\b(?:paying with|selected payment|payment method)\b/i.test(text))
+      .map((text) => cardEndingMentions(text))
+      .find((endings) => endings.length === 1)?.[0];
+    return summaryEnding || '';
   }
 
   function expectedPaymentCardIsSelected(expectedLast4 = '') {
     const expected = String(expectedLast4 || '').replace(/\D/g, '').slice(-4);
     if (!expected) return false;
     const root = interactionRoot();
-    const paymentChoices = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visibleChoiceInput(input))
-      .map((input) => ({
-        input,
-        text: paymentChoiceContext(input, expected)?.text || compactText([
-          radioContainer(input)?.innerText || '',
-          input.labels?.[0]?.innerText || '',
-          input.getAttribute?.('aria-label') || '',
-          ariaLabelledText(input)
-        ].filter(Boolean).join('\n'), 900)
-      }))
-      .filter(({ text }) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(text)
-        && /\d{4}/.test(text));
+    const visiblePaymentInputs = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+      .filter((input) => paymentChoiceInput(input));
     // When the merchant presents card choices, trust only the checked card
     // row. A stale summary must never override an explicit selection.
-    if (paymentChoices.length) {
-      return paymentChoices.some(({ input, text }) => input.checked && last4FromText(text) === expected);
+    if (visiblePaymentInputs.length) {
+      const selectedInputs = visiblePaymentInputs.filter((input) => input.checked || input.getAttribute?.('aria-checked') === 'true');
+      if (selectedInputs.length !== 1) return false;
+      const selectedInput = selectedInputs[0];
+      const context = paymentChoiceContext(selectedInput);
+      if (!context || paymentChoiceUnavailable(context, selectedInput) || context.endings[0] !== expected) return false;
+      const matchingEligibleInputs = visiblePaymentInputs.filter((input) => {
+        const candidateContext = paymentChoiceContext(input);
+        return candidateContext?.endings?.length === 1
+          && candidateContext.endings[0] === expected
+          && !paymentChoiceUnavailable(candidateContext, input);
+      });
+      return matchingEligibleInputs.length === 1 && matchingEligibleInputs[0] === selectedInput;
     }
 
-    const summaryText = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"], [id*="payment" i], [data-testid*="payment" i]'))
+
+    const semanticChoices = semanticPaymentCardChoices();
+    if (semanticChoices.length) {
+      const selectedChoices = semanticChoices.filter((choice) => choice.selected && !paymentChoiceUnavailable(choice.context, choice.control));
+      if (selectedChoices.length !== 1 || selectedChoices[0].context.endings[0] !== expected) return false;
+      const matchingEligibleChoices = semanticChoices.filter((choice) => choice.context.endings[0] === expected
+        && !paymentChoiceUnavailable(choice.context, choice.control));
+      return matchingEligibleChoices.length === 1 && matchingEligibleChoices[0].control === selectedChoices[0].control;
+    }
+    if (unreadableSelectedPaymentControlPresent()) return false;
+
+    const summaryEnding = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"], [id*="payment" i], [data-testid*="payment" i]'))
       .filter(visible)
       .map((element) => compactText(element.innerText || element.textContent || '', 800))
-      .find((text) => /\b(?:paying with|selected payment|payment method)\b/i.test(text)
-        && /\b(?:visa|mastercard|amex|american express|discover|card)\b/i.test(text)
-        && last4FromText(text) === expected);
-    return Boolean(summaryText);
+      .filter((text) => /\b(?:paying with|selected payment|payment method)\b/i.test(text))
+      .map((text) => cardEndingMentions(text))
+      .find((endings) => endings.length === 1)?.[0];
+    return summaryEnding === expected;
   }
 
   function addressLooksLikeProfile(text = '', profile = {}) {
@@ -2982,15 +3218,16 @@
     const selectedShippingAddressAlreadyMatches = Boolean(shippingText) && selectedVisibleAddressChoiceMatches(profile);
     const candidateInputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
       .filter((input) => visibleChoiceInput(input));
+    const matchingPaymentChoice = expectedLast4 ? findMatchingStoredPaymentChoice(profile) : null;
+    if (matchingPaymentChoice && !matchingPaymentChoice.selected) {
+      const paymentSelected = matchingPaymentChoice.kind === 'semantic_control'
+        ? selectSemanticPaymentCardControl(matchingPaymentChoice)
+        : selectPaymentChoiceInput(matchingPaymentChoice.input, matchingPaymentChoice.context);
+      if (paymentSelected) selected.push('matching payment card');
+    }
     for (const input of candidateInputs) {
-      const paymentChoice = expectedLast4 ? paymentChoiceContext(input, expectedLast4) : null;
       const addressChoice = shippingText ? addressChoiceContext(input) : null;
-      if (expectedLast4 && !input.checked && paymentChoice?.endings?.includes(expectedLast4)) {
-        if (selectPaymentChoiceInput(input, paymentChoice)) {
-          selected.push('matching payment card');
-        }
-        continue;
-      }
+      if (paymentChoiceInput(input)) continue;
       if (shippingText && !selectedShippingAddressAlreadyMatches && !input.checked
         && addressChoice
         && addressLooksLikeProfile(addressChoice.text, profile)) {
@@ -3010,15 +3247,6 @@
       const sameRow = sameRowTextForControl(control);
       const nearby = nearbyTextForControl(control);
       const haystack = compactText([label, descriptor, sectionText, sameRow, nearby].filter(Boolean).join('\n'), 3000);
-      if (expectedLast4 && !selectedKinds.has('matching payment card') && last4FromText(haystack) === expectedLast4
-        && /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(haystack)
-        && /\b(?:use|select|choose|continue|paying with|ending)\b/i.test(haystack)) {
-        if (immediateSafeClick(control)) {
-          selected.push('matching payment card');
-          selectedKinds.add('matching payment card');
-          continue;
-        }
-      }
       if (shippingText && !selectedKinds.has('matching delivery address') && addressLooksLikeProfile(haystack, profile)
         && /\b(?:use|select|choose|deliver to|ship to)\s+(?:this\s+)?address\b/i.test(`${label}\n${descriptor}`)) {
         if (immediateSafeClick(control)) {
@@ -3027,28 +3255,13 @@
         }
       }
     }
-    if (expectedLast4 && !selectedKinds.has('matching payment card')) {
-      const matchingPaymentChoice = findMatchingStoredPaymentChoice(profile);
-      if (matchingPaymentChoice && selectPaymentChoiceInput(
-        matchingPaymentChoice.input,
-        matchingPaymentChoice.context
-      )) {
-        // Amazon often updates the checked radio and summary asynchronously.
-        // Record the safe click now; fillCheckoutProfile re-observes before it
-        // confirms the card or decides that the mismatch remains.
-        selected.push('matching payment card');
-        selectedKinds.add('matching payment card');
-      }
-    }
     return [...new Set(selected)];
   }
 
   function savedPaymentChoiceVisible() {
     return Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-      .filter((input) => visibleChoiceInput(input))
-      .some((input) => /\b(?:visa|mastercard|amex|american express|discover|card|payment)\b/i.test(
-        paymentChoiceContext(input)?.text || compactText(radioContainer(input)?.innerText || '', 700)
-      ));
+      .some((input) => paymentChoiceInput(input))
+      || semanticPaymentCardChoices().length > 0;
   }
 
   function findPaymentAddControl() {
@@ -3070,19 +3283,31 @@
     const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     if (!expectedLast4) return null;
     const inputs = Array.from(interactionRoot().querySelectorAll('input[type="radio"], input[type="checkbox"]'));
-    for (const input of inputs) {
-      if (input.disabled || input.getAttribute?.('aria-disabled') === 'true' || !visibleChoiceInput(input)) continue;
-      const context = paymentChoiceContext(input, expectedLast4);
-      if (!context?.endings?.includes(expectedLast4)) continue;
-      return {
+    const matches = inputs
+      .filter((input) => !input.disabled && input.getAttribute?.('aria-disabled') !== 'true' && visibleChoiceInput(input))
+      .map((input) => ({ input, context: paymentChoiceContext(input) }))
+      .filter(({ input, context }) => context?.endings?.length === 1
+        && context.endings[0] === expectedLast4
+        && !paymentChoiceUnavailable(context, input))
+      .map(({ input, context }) => ({
         input,
         context,
+        selected: Boolean(input.checked || input.getAttribute?.('aria-checked') === 'true'),
+        kind: 'input',
         target: paymentChoiceClickTarget(input, context),
         label: compactText(context.text, 180),
         score: 280
-      };
-    }
-    return null;
+      }));
+    if (matches.length) return matches.length === 1 ? matches[0] : null;
+    const buttonMatches = semanticPaymentCardChoices()
+      .filter((choice) => choice.context.endings[0] === expectedLast4
+        && !paymentChoiceUnavailable(choice.context, choice.control))
+      .map((choice) => ({
+        ...choice,
+        label: compactText(choice.context.text, 180),
+        score: 280
+      }));
+    return buttonMatches.length === 1 ? buttonMatches[0] : null;
   }
 
   function findPaymentMethodConfirmControl() {
@@ -3797,6 +4022,15 @@
       const confirmPayment = expectedLast4 && expectedPaymentCardIsSelected(expectedLast4)
         ? findPaymentMethodConfirmControl()
         : null;
+      if (confirmPayment && priorBrowserActionReceipt('payment_confirm')) {
+        return {
+          completed: false,
+          paymentConfirmationPending: true,
+          reason: 'Amazon is still applying the selected payment method.',
+          browserState: browserState.state,
+          controlStrategy: 'selected_payment_method_confirmation_pending'
+        };
+      }
       if (confirmPayment && immediateSafeClick(confirmPayment.control)) {
         return {
           completed: true,
@@ -4355,6 +4589,28 @@
         state: existingState
       };
     }
+    const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
+    const existingSummary = existingState.checkoutSummary || {};
+    const priorPaymentConfirmation = priorBrowserActionReceipt('payment_confirm');
+    if (expectedLast4
+      && priorPaymentConfirmation
+      && existingSummary.checkoutOpen === true
+      && !existingState.providerChallenge
+      && !existingState.loginRequired
+      && (existingSummary.cardMatches !== true || existingSummary.paymentMethodConfirmationRequired === true)) {
+      return {
+        completed: true,
+        skipped: false,
+        navigationRequested: false,
+        paymentConfirmationPending: true,
+        paymentConfirmationAlreadyRequested: true,
+        label: 'Waiting for payment confirmation',
+        reason: 'Amazon is still applying the selected payment method.',
+        safeFieldsFilled: [],
+        checkoutSelections: [],
+        state: existingState
+      };
+    }
     const rawPageText = pagePlainText(30000);
     const controlText = interactiveControls().map(textFor).join('\n');
     if (isOptionalOfferPage(rawPageText, controlText)) {
@@ -4410,6 +4666,21 @@
     const addressVerification = String(summary.addressVerification || '');
     const completeShippingProfile = fullShippingAddressAvailable(profile);
 
+    // Amazon's current payment picker uses React-managed card buttons. After
+    // selecting one, re-observe the rendered selected row before confirming it.
+    if (selectedOptions.includes('matching payment card') && semanticPaymentCardChoices().length) {
+      return {
+        completed: true,
+        skipped: false,
+        navigationRequested: true,
+        paymentSelectionPending: true,
+        label: 'Select matching payment card',
+        safeFieldsFilled: [...new Set(filled)],
+        checkoutSelections: selections,
+        state
+      };
+    }
+
     // If the signed Shipping speed section was opened but its radio rows did
     // not render, re-observe. Do not ever fall back to generic delivery or
     // pickup controls.
@@ -4431,12 +4702,24 @@
 
     // Confirming an exact saved-card selection is a non-final checkout step.
     // Raw card entry and the final order action remain hard boundaries.
-    const expectedLast4 = String(profile.paymentCardLast4 || '').replace(/\D/g, '').slice(-4);
     const selectedLast4 = expectedPaymentCardIsSelected(expectedLast4)
       ? expectedLast4
       : selectedCardLast4();
     if (expectedLast4 && selectedLast4 === expectedLast4) {
       const confirmPayment = findPaymentMethodConfirmControl();
+      if (confirmPayment && priorBrowserActionReceipt('payment_confirm')) {
+        return {
+          completed: true,
+          skipped: false,
+          navigationRequested: true,
+          paymentConfirmationPending: true,
+          paymentConfirmationAlreadyRequested: true,
+          label: 'Waiting for payment confirmation',
+          safeFieldsFilled: [...new Set(filled)],
+          checkoutSelections: selections,
+          state
+        };
+      }
       if (confirmPayment && immediateSafeClick(confirmPayment.control)) {
         return {
           completed: true,

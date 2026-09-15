@@ -39,8 +39,12 @@ assert.equal(
 );
 
 const root = path.resolve(new URL('..', import.meta.url).pathname);
-const fixtureDir = path.join(root, 'artifacts/amazon-selection-calibration-100-2026-09-12');
-const destination = path.join(fixtureDir, 'shadow-v10/production-candidate');
+const fixtureDir = process.env.MAGIC_CITY_AMAZON_SELECTION_FIXTURE_DIR
+  ? path.resolve(process.env.MAGIC_CITY_AMAZON_SELECTION_FIXTURE_DIR)
+  : path.join(root, 'artifacts/amazon-selection-calibration-100-2026-09-12');
+const destination = process.env.MAGIC_CITY_AMAZON_SELECTION_OUTPUT_DIR
+  ? path.resolve(process.env.MAGIC_CITY_AMAZON_SELECTION_OUTPUT_DIR)
+  : path.join(fixtureDir, 'shadow-v10/production-candidate');
 const audit = JSON.parse(fs.readFileSync(path.join(fixtureDir, 'shadow-v10/final/audit.json'), 'utf8'));
 const sourcePath = path.join(root, 'public/native-runner/extension/amazon-selection.js');
 const source = fs.readFileSync(sourcePath, 'utf8');
@@ -206,12 +210,101 @@ try {
     const record = {
       id: fixture.id,
       badOnly: badOnly?.selectionKind || null,
+      intelligenceCandidates: badOnly?.intelligenceCandidates || [],
       selectedWithSibling: withSibling?.selected?.asin || withSibling?.proposedCandidate?.asin || null
     };
     output.wrongProductRegressions.push(record);
     assert.equal(record.badOnly, 'no_verified_candidate', `wrong-product fixture ${fixture.id}`);
+    assert.equal(badOnly?.intelligenceCandidates?.length || 0, 0, `wrong-product fixture ${fixture.id} is not offered to intelligence`);
     assert.equal(record.selectedWithSibling, 'B000000002', `valid sibling fixture ${fixture.id}`);
   }
+
+  const semanticCards = [
+    cardHtml('B000FRUIT1', 'Nature Valley Mixed Berry Crunchy Granola Bars'),
+    cardHtml('B000FRUIT2', 'Nature Valley Cranberry Pomegranate Granola Bars'),
+    cardHtml('B000PEANUT', 'Nature Valley Peanut Butter Granola Bars')
+  ].join('');
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: semanticCards
+  });
+  await page.evaluate(() => { globalThis.__selectionGuard.clicks = 0; });
+  output.selectionIntelligenceInitialFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'fruity Nature Valley granola bars', maxPrice: 6, primeRequired: false
+  }), { tabId: regressionTab });
+  let intelligenceGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.selectionIntelligenceInitialFixture?.selectionKind, 'no_verified_candidate', 'semantic wording keeps the first pass non-mutating');
+  assert.equal(output.selectionIntelligenceInitialFixture?.completed, false, 'semantic wording requires bounded advice');
+  assert.equal(output.selectionIntelligenceInitialFixture?.intelligenceCandidates?.length, 2, 'only fruit-compatible semantic candidates are observed');
+  assert.deepEqual(
+    output.selectionIntelligenceInitialFixture.intelligenceCandidates.map((candidate) => candidate.asin),
+    ['B000FRUIT1', 'B000FRUIT2'],
+    'the soft fruity preference cannot admit a conflicting peanut-butter flavor'
+  );
+  assert.equal(intelligenceGuard.clicks, 0, 'semantic candidate collection never clicks');
+
+  const approvedSemanticCandidate = output.selectionIntelligenceInitialFixture.intelligenceCandidates[0];
+  await page.evaluate(() => {
+    globalThis.__selectionGuard.clicks = 0;
+    document.querySelectorAll('button').forEach((button) => {
+      button.addEventListener('click', () => { globalThis.__selectionGuard.clicks += 1; });
+    });
+  });
+  output.selectionIntelligenceApprovedFixture = await worker.evaluate(({ tabId, approved }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate',
+    query: 'fruity Nature Valley granola bars',
+    maxPrice: 6,
+    primeRequired: false,
+    intelligenceApprovedCandidate: approved
+  }), { tabId: regressionTab, approved: approvedSemanticCandidate });
+  intelligenceGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.selectionIntelligenceApprovedFixture?.selectionKind, 'model_assisted', 'observed semantic candidate is identified as model-assisted');
+  assert.equal(output.selectionIntelligenceApprovedFixture?.selected?.asin, approvedSemanticCandidate.asin, 'approved candidate remains bound to its ASIN');
+  assert.equal(output.selectionIntelligenceApprovedFixture?.completed, true, 'fresh observed semantic candidate can use the existing cart path');
+  assert.equal(intelligenceGuard.clicks, 1, 'approved semantic candidate clicks exactly once');
+
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: semanticCards.replace('$5.00', '$5.50')
+  });
+  await page.evaluate(() => { globalThis.__selectionGuard.clicks = 0; });
+  output.selectionIntelligenceStaleFixture = await worker.evaluate(({ tabId, approved }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate',
+    query: 'fruity Nature Valley granola bars',
+    maxPrice: 6,
+    primeRequired: false,
+    intelligenceApprovedCandidate: approved
+  }), { tabId: regressionTab, approved: approvedSemanticCandidate });
+  intelligenceGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.selectionIntelligenceStaleFixture?.intelligenceRevalidationFailed, true, 'changed candidate evidence is rejected');
+  assert.equal(output.selectionIntelligenceStaleFixture?.completed, false, 'stale advice cannot complete selection');
+  assert.equal(intelligenceGuard.clicks, 0, 'stale advice produces zero clicks');
+
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: semanticCards
+  });
+  output.selectionIntelligenceStrictVariantFixture = await worker.evaluate(({ tabId }) => globalThis.runSelectionShadow(tabId, {
+    type: 'select_candidate', query: 'fruity Nature Valley granola bars, flavor Mixed Berry', maxPrice: 6, primeRequired: false
+  }), { tabId: regressionTab });
+  assert.equal(output.selectionIntelligenceStrictVariantFixture?.selectionKind, 'no_verified_candidate', 'explicit variant remains deterministic');
+  assert.equal(output.selectionIntelligenceStrictVariantFixture?.intelligenceCandidates?.length || 0, 0, 'explicit variant cannot enter semantic fallback');
+
+  await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
+    tabId: regressionTab,
+    html: cardHtml('B000EXACT1', 'Nature Valley Granola Bars')
+  });
+  await page.evaluate(() => {
+    globalThis.__selectionGuard.clicks = 0;
+    document.querySelector('button')?.addEventListener('click', () => { globalThis.__selectionGuard.clicks += 1; });
+  });
+  output.selectionIntelligenceExactControl = await worker.evaluate(({ tabId }) => globalThis.runSelectionAction(tabId, {
+    type: 'select_candidate', query: 'Nature Valley granola bars', maxPrice: 6, primeRequired: false
+  }), { tabId: regressionTab });
+  intelligenceGuard = await page.evaluate(() => globalThis.__selectionGuard);
+  assert.equal(output.selectionIntelligenceExactControl?.selectionKind, 'exact', 'valid exact match keeps the deterministic fast path');
+  assert.equal(output.selectionIntelligenceExactControl?.completed, true, 'valid exact match still completes selection');
+  assert.equal(intelligenceGuard.clicks, 1, 'valid exact match clicks exactly once');
   await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
     tabId: regressionTab,
     html: '<div data-component-type="s-search-result" data-asin="B000SMOKE1" style="display:block;width:600px;min-height:160px"><h2><a href="/dp/test-gadget">Test gadget</a></h2><span class="a-price"><span class="a-offscreen">$3.50</span></span><span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery</span><button style="display:block;width:120px;height:32px">Add to cart</button></div>'
