@@ -10836,6 +10836,41 @@
 	      if (sessionId) executionLocalRunnerProgress.delete(sessionId);
 	    }
 
+	    const executionMissionTabFocusIntents = new Map();
+
+	    function requestNativeRunnerMissionTabFocus(sessionId = '') {
+	      const normalizedSessionId = String(sessionId || '').trim();
+	      if (!normalizedSessionId) return false;
+	      const existing = executionMissionTabFocusIntents.get(normalizedSessionId);
+	      if (existing?.inFlight || existing?.timer) return true;
+	      const intent = existing || {
+	        expiresAt: Date.now() + 45_000,
+	        inFlight: false,
+	        timer: null
+	      };
+	      executionMissionTabFocusIntents.set(normalizedSessionId, intent);
+	      const attempt = async () => {
+	        intent.timer = null;
+	        if (Date.now() >= intent.expiresAt) {
+	          executionMissionTabFocusIntents.delete(normalizedSessionId);
+	          return;
+	        }
+	        intent.inFlight = true;
+	        const response = await sendNativeRunnerExtensionMessage({
+	          type: 'FOCUS_MISSION_TAB',
+	          sessionId: normalizedSessionId
+	        }).catch(() => null);
+	        intent.inFlight = false;
+	        if (response?.ok && response.result?.focused === true) {
+	          executionMissionTabFocusIntents.delete(normalizedSessionId);
+	          return;
+	        }
+	        intent.timer = setTimeout(attempt, 750);
+	      };
+	      void attempt();
+	      return true;
+	    }
+
 	    function applyExecutionRunnerProgress(session, panel = null) {
 	      const status = String(session?.status || '').toLowerCase();
 	      const progress = executionLocalRunnerProgress.get(session?.id) || null;
@@ -10938,6 +10973,9 @@
 	        clientRunStartedAt: String(clientRunStartedAt || '').trim() || new Date().toISOString(),
 	        ...(dispatchNonce ? { extensionDispatchNonce: dispatchNonce } : {})
 	      });
+	      // Website-started missions should become visible without making tab
+	      // focus part of claim, execution, or checkout success.
+	      requestNativeRunnerMissionTabFocus(sessionId);
       const timeoutResult = { ok: true, pending: true, reason: 'extension_wake_pending' };
       const wake = await Promise.race([
         wakeRequest,
@@ -15171,6 +15209,8 @@
 	      executionProtocolPollingSessions.clear();
 	      executionPollingRequestsInFlight.clear();
 	      executionCancellingSessions.clear();
+	      executionMissionTabFocusIntents.forEach((intent) => clearTimeout(intent?.timer));
+	      executionMissionTabFocusIntents.clear();
 	      clearSelectedAgentExecution();
       if (executionPollHandle) {
         clearInterval(executionPollHandle);
@@ -15190,6 +15230,9 @@
 	      executionPollingRequestsInFlight.delete(sessionId);
 	      executionCancellingSessions.delete(sessionId);
 	      executionLocalErrors.delete(sessionId);
+	      const focusIntent = executionMissionTabFocusIntents.get(sessionId);
+	      if (focusIntent?.timer) clearTimeout(focusIntent.timer);
+	      executionMissionTabFocusIntents.delete(sessionId);
 	      clearSelectedAgentExecution(sessionId);
       if (activeExecutionSessionId === sessionId) {
         activeExecutionSessionId = executionSessionOrder[executionSessionOrder.length - 1] || null;
@@ -17957,6 +18000,7 @@
       const preview = liveBrowser.previewArtifact || fulfillmentBrowser?.previewArtifact || null;
       const pageUrl = liveBrowser.url || fulfillmentBrowser?.finalUrl || fulfillmentBrowser?.targetUrl || session.fulfillment?.handoff?.url || null;
       const checkoutSummary = liveBrowser.checkoutSummary || fulfillmentBrowser?.checkoutSummary || null;
+	      const browserOrderSubmitted = sessionHasBrowserOrderSubmitted(session);
       return `
         <div class="execution-live">
           <div class="execution-live-head">
