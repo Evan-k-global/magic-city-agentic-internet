@@ -356,6 +356,10 @@ assert.equal(context.inferBrowserTargetUrlFromText(accumulatedPurchasePrompt), '
 assert.equal(context.inferBrowserBudgetFromText(accumulatedPurchasePrompt), '$4');
 assert.equal(context.inferBrowserProductFromText(accumulatedPurchasePrompt), 'nature valley granola bars');
 assert.equal(context.hasRunnableBrowserExecutionContext(accumulatedPurchasePrompt, ''), true);
+const bareBudgetFollowUpPrompt = `${incompletePurchasePrompt}\n\nAdditional execution detail:\n$4`;
+assert.equal(context.inferBrowserBudgetFromText(bareBudgetFollowUpPrompt), '$4');
+assert.equal(context.hasRunnableBrowserExecutionContext(bareBudgetFollowUpPrompt, ''), true);
+assert.equal(context.inferAgentCompletionDesiredKind({ prompt: '$4' }), '', 'a bare amount must not select MIA without shopping context');
 assert.equal(context.isShortExecutionConfirmation('confirm'), true);
 assert.equal(context.isShortExecutionConfirmation("that's okay"), true);
 assert.equal(context.isShortExecutionConfirmation('what does this cost?'), false);

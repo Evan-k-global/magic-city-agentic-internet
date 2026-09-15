@@ -21,5 +21,6 @@ assert.match(
   /href="https:\/\/github\.com\/zeko-labs\/magic-city-agentic-internet\/blob\/main\/docs\/partner-white-label-quickstart\.md"/
 );
 assert.match(retailBetaCard, />Developer integration guide<\/a>/);
+assert.match(html, /\.sidebar \.settings-doc-link \{[\s\S]*color: rgba\(255, 255, 255, 0\.92\);[\s\S]*font-weight: 600;[\s\S]*text-decoration: underline;/, 'developer guide must use a restrained white underlined link treatment');
 
 console.log('retail beta settings UI ok');
