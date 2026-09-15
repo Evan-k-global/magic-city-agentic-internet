@@ -6,6 +6,7 @@ const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '.
 const extensionDir = path.join(rootDir, 'public/native-runner/extension');
 const distDir = path.join(rootDir, 'dist/native-runner-extension');
 const packageDir = path.join(distDir, 'package');
+const packageTimestamp = new Date('2020-01-01T00:00:00.000Z');
 
 const requiredFiles = [
   'manifest.json',
@@ -35,6 +36,7 @@ function copyFile(relativePath) {
   const to = path.join(packageDir, relativePath);
   fs.mkdirSync(path.dirname(to), { recursive: true });
   fs.copyFileSync(from, to);
+  fs.utimesSync(to, packageTimestamp, packageTimestamp);
 }
 
 const manifestPath = path.join(extensionDir, 'manifest.json');
@@ -75,7 +77,7 @@ const zipName = `magic-city-runner-${manifest.version}.zip`;
 const zipPath = path.join(distDir, zipName);
 fs.rmSync(zipPath, { force: true });
 
-const zip = spawnSync('zip', ['-qr', zipPath, ...requiredFiles], {
+const zip = spawnSync('zip', ['-Xqr', zipPath, ...requiredFiles], {
   cwd: packageDir,
   stdio: 'inherit'
 });
@@ -83,5 +85,24 @@ const zip = spawnSync('zip', ['-qr', zipPath, ...requiredFiles], {
 if (zip.error) fail(zip.error.message);
 if (zip.status !== 0) fail(`zip exited with ${zip.status}`);
 
+// Linked worktrees keep their own ignored dist directory. Mirror release ZIPs
+// into the primary checkout so every local Runner version stays in one place.
+const gitCommonDir = spawnSync(
+  'git',
+  ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+  { cwd: rootDir, encoding: 'utf8' }
+);
+let archivePath = null;
+if (gitCommonDir.status === 0) {
+  const primaryRoot = path.dirname(String(gitCommonDir.stdout || '').trim());
+  if (primaryRoot && path.resolve(primaryRoot) !== rootDir) {
+    const archiveDir = path.join(primaryRoot, 'dist/native-runner-extension');
+    fs.mkdirSync(archiveDir, { recursive: true });
+    archivePath = path.join(archiveDir, zipName);
+    fs.copyFileSync(zipPath, archivePath);
+  }
+}
+
 console.log(`Packaged Magic City Runner ${manifest.version}`);
 console.log(zipPath);
+if (archivePath) console.log(`Archived ${archivePath}`);
