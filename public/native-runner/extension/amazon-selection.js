@@ -638,7 +638,6 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
   };
   const approvedEvidenceMatches = (candidate, pack) => {
     if (!approvedIntelligenceCandidate) return false;
-    const id = `candidate-${candidate.index + 1}`;
     const expectedPrice = approvedIntelligenceCandidate.price === null || approvedIntelligenceCandidate.price === ''
       ? null
       : Number(approvedIntelligenceCandidate.price);
@@ -651,24 +650,28 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       && Number(expectedPack.outer || 0) === Number(pack?.outer || 0)
       && String(expectedPack.configuration || '') === String(pack?.configuration || '')
     );
-    return id === String(approvedIntelligenceCandidate.id || '')
-      && candidate.asin === String(approvedIntelligenceCandidate.asin || '').toUpperCase()
-      && normalize(candidate.title) === normalize(approvedIntelligenceCandidate.title || '')
+    const sameAsin = candidate.asin === String(approvedIntelligenceCandidate.asin || '').toUpperCase();
+    if (!sameAsin || !samePack) return false;
+    if (approvedIntelligenceCandidate.requiresProductPageVerification === true) {
+      // Amazon can hydrate price and delivery fragments while the bounded
+      // title consultation is in flight. Keep the advice bound to the same
+      // ASIN, then verify the current offer on its product page.
+      return true;
+    }
+    return normalize(candidate.title) === normalize(approvedIntelligenceCandidate.title || '')
       && (expectedPrice === null
         ? !Number.isFinite(candidate.price)
         : Number.isFinite(expectedPrice) && Math.abs(candidate.price - expectedPrice) <= 0.005)
       && candidate.prime === (approvedIntelligenceCandidate.primeEligible === true)
       && candidate.freeShipping === (approvedIntelligenceCandidate.freeShipping === true)
       && candidate.conditionalShipping === (approvedIntelligenceCandidate.conditionalShipping === true)
-      && (approvedIntelligenceCandidate.requiresProductPageVerification === true)
-        === (approvedIntelligenceCandidate.identityStatus === 'provisional'
-          || !Number.isFinite(candidate.price)
-          || requiresFulfillment && !(candidate.prime && candidate.freeShipping))
-      && samePack;
+      && !(approvedIntelligenceCandidate.identityStatus === 'provisional'
+        || !Number.isFinite(candidate.price)
+        || requiresFulfillment && !(candidate.prime && candidate.freeShipping));
   };
   for (const candidate of cards) {
-    const candidateId = `candidate-${candidate.index + 1}`;
-    if (approvedIntelligenceCandidate && candidateId !== String(approvedIntelligenceCandidate.id || '')) continue;
+    if (approvedIntelligenceCandidate
+      && candidate.asin !== String(approvedIntelligenceCandidate.asin || '').toUpperCase()) continue;
     const exactIdentity = titleHasIdentity(candidate.title, candidate.brand);
     const semanticIdentity = !exactIdentity && semanticIdentityEligible(candidate.title);
     const provisionalIdentity = !exactIdentity && !semanticIdentity && provisionalIdentityEligible(candidate.title);
