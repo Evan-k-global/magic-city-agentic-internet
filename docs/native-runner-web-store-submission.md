@@ -102,4 +102,6 @@ MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION=0.5.12
 
 The Magic City Settings install button prefers this URL. If the extension URL is unset, it falls back to `/native-runner/extension/` for internal staging.
 
-`MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION` is both the latest published release and the minimum version accepted for new mission starts. Keep it on the existing Store version while a candidate is uploaded, reviewed, or approved but not yet public. Once the new version is publicly available, update this value and deploy Fly; older versions will receive **Update Runner** and cannot start a new mission.
+`MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION` is the fail-closed safety floor. Keep it on the current Store release while a candidate is uploaded, reviewed, or approved but not yet public.
+
+Fly reads the version actually published for `MAGIC_CITY_NATIVE_RUNNER_EXTENSION_INSTALL_URL` from Chrome's official update service and caches it for five minutes. Once a newer release is public, that published version automatically becomes both the latest release and the minimum version accepted for new mission starts. Older versions then receive **Update Runner** without another Fly deployment. A Store lookup failure retains the last known version (or the configured safety floor after startup); it never blocks an active mission or lowers the required version.

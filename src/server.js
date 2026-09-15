@@ -719,13 +719,104 @@ const NATIVE_RUNNER_HELPER_INSTALL_URL = String(
   process.env.MAGIC_CITY_MAC_RUNNER_INSTALL_URL ||
   ''
 ).trim();
-const NATIVE_RUNNER_MIN_EXTENSION_VERSION = String(
+const NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION = String(
   process.env.MAGIC_CITY_NATIVE_RUNNER_MIN_EXTENSION_VERSION ||
   '0.4.33'
 ).trim();
-// Production has one supported Store release. Keep the configured minimum on
-// the currently published version while a candidate is awaiting Store review.
-const NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+let NATIVE_RUNNER_MIN_EXTENSION_VERSION = NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;
+let NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;
+const NATIVE_RUNNER_STORE_UPDATE_URL = String(
+  process.env.MAGIC_CITY_NATIVE_RUNNER_STORE_UPDATE_URL ||
+  'https://clients2.google.com/service/update2/crx'
+).trim();
+const NATIVE_RUNNER_STORE_VERSION_REFRESH_MS = Math.max(
+  60_000,
+  Number(process.env.MAGIC_CITY_NATIVE_RUNNER_STORE_VERSION_REFRESH_MS || 5 * 60_000)
+);
+const NATIVE_RUNNER_STORE_VERSION_TIMEOUT_MS = Math.max(
+  1_000,
+  Number(process.env.MAGIC_CITY_NATIVE_RUNNER_STORE_VERSION_TIMEOUT_MS || 5_000)
+);
+let nativeRunnerStoreVersionRefreshPromise = null;
+let nativeRunnerStoreVersionLastCheckedAt = 0;
+
+function getChromeWebStoreExtensionId(installUrl = NATIVE_RUNNER_EXTENSION_INSTALL_URL) {
+  try {
+    const parsed = new URL(String(installUrl || '').trim());
+    if (parsed.hostname !== 'chromewebstore.google.com') return '';
+    const match = parsed.pathname.match(/(?:^|\/)([a-p]{32})(?:\/|$)/i);
+    return String(match?.[1] || '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function parseChromeWebStorePublishedVersion(xml = '', extensionId = '') {
+  const body = String(xml || '').slice(0, 64 * 1024);
+  const expectedId = String(extensionId || '').trim().toLowerCase();
+  if (!expectedId || !body.toLowerCase().includes(`appid="${expectedId}"`)) return '';
+  const match = body.match(/<updatecheck\b[^>]*\bstatus="ok"[^>]*\bversion="(\d+(?:\.\d+){1,3})"/i)
+    || body.match(/<updatecheck\b[^>]*\bversion="(\d+(?:\.\d+){1,3})"[^>]*\bstatus="ok"/i);
+  return String(match?.[1] || '').trim();
+}
+
+async function refreshNativeRunnerStoreVersion({ force = false } = {}) {
+  const extensionId = getChromeWebStoreExtensionId();
+  if (!extensionId || !NATIVE_RUNNER_STORE_UPDATE_URL) return NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+  const now = Date.now();
+  if (!force && nativeRunnerStoreVersionLastCheckedAt
+    && now - nativeRunnerStoreVersionLastCheckedAt < NATIVE_RUNNER_STORE_VERSION_REFRESH_MS) {
+    return NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+  }
+  if (nativeRunnerStoreVersionRefreshPromise) return nativeRunnerStoreVersionRefreshPromise;
+  nativeRunnerStoreVersionLastCheckedAt = now;
+  nativeRunnerStoreVersionRefreshPromise = (async () => {
+    try {
+      const updateUrl = new URL(NATIVE_RUNNER_STORE_UPDATE_URL);
+      updateUrl.searchParams.set('response', 'updatecheck');
+      updateUrl.searchParams.set('prodversion', '140.0.0.0');
+      updateUrl.searchParams.set('acceptformat', 'crx2,crx3');
+      updateUrl.searchParams.set('x', `id=${extensionId}&uc`);
+      const response = await fetch(updateUrl, {
+        headers: { accept: 'application/xml,text/xml;q=0.9,*/*;q=0.1' },
+        signal: AbortSignal.timeout(NATIVE_RUNNER_STORE_VERSION_TIMEOUT_MS)
+      });
+      if (!response.ok) throw new Error(`store_update_http_${response.status}`);
+      const publishedVersion = parseChromeWebStorePublishedVersion(await response.text(), extensionId);
+      if (!publishedVersion) throw new Error('store_update_version_missing');
+      // Never relax the configured safety floor if the Store returns stale data.
+      const effectiveVersion = compareDottedVersions(
+        publishedVersion,
+        NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION
+      ) >= 0
+        ? publishedVersion
+        : NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;
+      const changed = effectiveVersion !== NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+      NATIVE_RUNNER_MIN_EXTENSION_VERSION = effectiveVersion;
+      NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = effectiveVersion;
+      if (changed) {
+        console.log(`[agent-verification] Magic City Runner Store release is now ${effectiveVersion}`);
+      }
+      return effectiveVersion;
+    } catch (error) {
+      console.warn('[agent-verification] Runner Store version check failed; retaining cached version:', error instanceof Error ? error.message : String(error));
+      return NATIVE_RUNNER_MIN_EXTENSION_VERSION;
+    } finally {
+      nativeRunnerStoreVersionRefreshPromise = null;
+    }
+  })();
+  return nativeRunnerStoreVersionRefreshPromise;
+}
+
+function startNativeRunnerStoreVersionRefresh() {
+  if (!getChromeWebStoreExtensionId()) return null;
+  refreshNativeRunnerStoreVersion({ force: true }).catch(() => {});
+  const timer = setInterval(() => {
+    refreshNativeRunnerStoreVersion({ force: true }).catch(() => {});
+  }, NATIVE_RUNNER_STORE_VERSION_REFRESH_MS);
+  timer.unref?.();
+  return timer;
+}
 const FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS = Math.max(
   1_000,
   Number(process.env.MAGIC_CITY_FINAL_SUBMIT_CHAIN_AUTH_WAIT_MS || 7_500)
@@ -26889,6 +26980,7 @@ if (artifactMigration.migrated) {
 server.listen(PORT, HOST, () => {
   const seededAgents = ensureDefaultAgents();
   console.log(`[agent-verification] listening on http://${HOST}:${PORT}`);
+  startNativeRunnerStoreVersionRefresh();
   recoverFinalSubmitChainAuthorizations();
   if (MAGIC_CITY_SAFE_HTTP_STARTUP) {
     console.log('[agent-verification] safe HTTP startup enabled; background startup workers are deferred');
