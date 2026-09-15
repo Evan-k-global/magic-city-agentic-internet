@@ -2493,7 +2493,16 @@ function milestoneFailureReason(action = {}, report = {}, outcome = {}) {
   if (expected === 'checkout_profile_verified') return 'The address, card cue, and delivery option were not all verified.';
   if (expected === 'final_review_ready') {
     if (!signals.addressConfirmed) return 'The delivery address is not confirmed yet.';
-    if (!signals.cardConfirmed) return 'The selected card does not match the Local Data Vault card cue yet.';
+    if (!signals.cardConfirmed) {
+      const payment = report.checkoutSummary || {};
+      if (payment.cardMatches === true && payment.paymentMethodConfirmationRequired === true) {
+        return 'Amazon is still applying the selected payment method.';
+      }
+      if (!payment.selectedCardLast4) {
+        return 'Magic City could not verify which saved payment card is selected.';
+      }
+      return 'The selected card does not match the Local Data Vault card cue yet.';
+    }
     if (!signals.deliveryConfirmed) return 'The preferred delivery option is not confirmed yet.';
     return 'The merchant final-order review is not ready yet.';
   }

@@ -161,6 +161,12 @@ if (!/function visibleProductPrice\(\)/.test(packagedExecutor)
   || !/if \(!visible\(container\) && !visibleLegacyCorePrice\(container\)\) return null/.test(packagedExecutor)) {
   fail('product-page verification must bind the one-time price through a visible offer container');
 }
+if (!/function singlePaymentCardContext\(/.test(packagedExecutor)
+  || !/function amazonPaymentVisualRowContext\(/.test(packagedExecutor)
+  || !/return matches\.length === 1 \? matches\[0\] : null/.test(packagedExecutor)
+  || !/paymentConfirmationAlreadyRequested:\s*true/.test(packagedExecutor)) {
+  fail('payment selection must bind one unique card row and avoid repeated confirmation clicks');
+}
 if (!/function activeCartItemEvidence\(\)/.test(packagedExecutor)
   || !/function pendingOrderMatchEvidence\(action/.test(packagedExecutor)
   || !/function canonicalProductTitle\(value = ''\)/.test(packagedExecutor)
@@ -276,6 +282,17 @@ if (!/onClaimAccepted/.test(packagedLegacyBackground)
   });
   if (smoke.error) fail(smoke.error.message);
   if (smoke.status !== 0) fail(`browser smoke exited with ${smoke.status}`);
+
+  const cardReconciliationSmoke = spawnSync(process.execPath, ['scripts/test-native-runner-card-reconciliation.mjs'], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      MAGIC_CITY_EXTENSION_SOURCE: unpackedDir
+    },
+    stdio: 'inherit'
+  });
+  if (cardReconciliationSmoke.error) fail(cardReconciliationSmoke.error.message);
+  if (cardReconciliationSmoke.status !== 0) fail(`card reconciliation smoke exited with ${cardReconciliationSmoke.status}`);
 
   const connectionDropSmoke = spawnSync(process.execPath, ['scripts/smoke-native-runner-extension-browser.mjs'], {
     cwd: rootDir,
