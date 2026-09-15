@@ -180,6 +180,18 @@ function normalizeBrowserBudgetCandidate(value = '') {
   return direct ? `$${direct[1].replace(/,/g, '')}` : '';
 }
 
+function stripMatchingBudgetEchoFromProduct(value = '', budget = '') {
+  let product = cleanBrowserProductCandidate(value);
+  const expectedAmount = Number(String(normalizeBrowserBudgetCandidate(budget)).replace(/[$,]/g, ''));
+  if (!product || !Number.isFinite(expectedAmount)) return product;
+  while (product) {
+    const trailingAmount = product.match(/(?:^|[\s,;:-])\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)\s*$/i);
+    if (!trailingAmount || Number(trailingAmount[1].replace(/,/g, '')) !== expectedAmount) break;
+    product = product.slice(0, trailingAmount.index).replace(/\b(?:with|for)\s*$/i, '').trim();
+  }
+  return product || cleanBrowserProductCandidate(value);
+}
+
 function browserMerchantToTargetUrl(value = '') {
   const host = String(value || '')
     .trim()
@@ -228,7 +240,7 @@ function cleanBrowserProductCandidate(value = '') {
 function isUsableBrowserProductCandidate(value = '') {
   const candidate = String(value || '').trim();
   if (!candidate || candidate.length < 2) return false;
-  if (/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|all these things|these things|the list|my list|it|that|book|reserve|checkout|for|from|on|at|via|use|buy|purchase|order|get me|shop|find|max|budget|spend|limit|cap)$/i.test(candidate)) return false;
+  if (/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|all these things|these things|the list|my list|it|that|this|these|those|them|one|ones|book|reserve|checkout|for|from|on|at|via|use|buy|purchase|order|get me|shop|find|max|budget|spend|limit|cap)$/i.test(candidate)) return false;
   return /[a-z0-9]/i.test(candidate);
 }
 
@@ -457,7 +469,7 @@ function mergeProviderBrowserMission(prompt = '', providerMission = null) {
 
 function buildBrowserMissionGoal(prompt = '', mission = {}) {
   const shoppingItems = Array.isArray(mission.shoppingItems) ? mission.shoppingItems.map((item) => cleanBrowserProductCandidate(item)).filter(Boolean) : [];
-  const product = cleanBrowserProductCandidate(mission.product || mission.item || '');
+  const product = stripMatchingBudgetEchoFromProduct(mission.product || mission.item || '', mission.budget);
   const merchant = mission.merchant || inferBrowserMerchantLabel(mission.targetUrl || '');
   const budget = mission.budget || '';
   const preferences = normalizeMissionPreferences(mission.preferences);
@@ -528,14 +540,14 @@ function applyAmazonLaunchDisclosure(plan, mission = {}) {
     }
   };
   if (!mission.amazonLaunchDisclosure) return routedPlan;
-  const product = cleanBrowserProductCandidate(mission.product || '') || 'your requested item';
+  const product = stripMatchingBudgetEchoFromProduct(mission.product || '', mission.budget) || 'your requested item';
   const budgetPhrase = mission.budget ? ` within your ${mission.budget} budget` : '';
   const requestedMerchant = browserMerchantDisplayName(mission.requestedMerchant);
   const explanation = mission.amazonLaunchDisclosure === 'amazon_conflict'
     ? `Your request${requestedMerchant && requestedMerchant !== 'Amazon' ? ` specified ${requestedMerchant} and` : ''} excluded Amazon. Magic Internet Agent currently supports purchases only through Amazon, so running this agent will instead search Amazon for ${product}${budgetPhrase}.`
     : mission.amazonLaunchDisclosure === 'retailer_redirect'
       ? `Magic Internet Agent currently supports purchases through Amazon. Your request named ${requestedMerchant}, so this run will instead search Amazon for ${product}${budgetPhrase}.`
-      : `Magic Internet Agent currently supports purchases through Amazon, so this run will search Amazon for ${product}${mission.budget ? `, ${mission.budget}` : ''}${budgetPhrase}.`;
+      : `Magic Internet Agent currently supports purchases through Amazon, so this run will search Amazon for ${product}${budgetPhrase}.`;
   return {
     ...routedPlan,
     actionLabel: mission.amazonLaunchDisclosure === 'amazon_default' ? 'Amazon checkout available' : 'Shop on Amazon instead?',

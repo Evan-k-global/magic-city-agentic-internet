@@ -29,7 +29,6 @@ const context = {
   executionUiStartSessions: new Set(),
   executionRunHandlers: new Map(),
   executionCollapsedSessions: new Set(),
-  executionMissionTabFocusIntents: new Map(),
   activeExecutionSessionId: null,
   renderExecutionDock: () => {
     executionRenderCount += 1;
@@ -57,7 +56,6 @@ vm.runInContext([
   extractFunctionSource('reconcileExecutionWakeError'),
   extractFunctionSource('runnerProgressLabel'),
   extractFunctionSource('rememberExecutionRunnerProgress'),
-  extractFunctionSource('requestNativeRunnerMissionTabFocus'),
   extractFunctionSource('getExecutionStatusModel'),
   extractFunctionSource('describeExecutionRunState'),
   extractFunctionSource('openExecutionPanel')
@@ -188,30 +186,6 @@ dockListeners[0]({
 assert.equal(delegatedSessionId, sessionId, 'the persistent listener must start the button\'s exact session');
 assert.equal(defaultPrevented, true);
 
-let focusMessages = [];
-let focusAttempts = 0;
-context.setTimeout = (callback) => {
-  void callback();
-  return 1;
-};
-context.sendNativeRunnerExtensionMessage = async (message) => {
-  focusMessages.push(message);
-  focusAttempts += 1;
-  return focusAttempts === 1
-    ? { ok: false, reason: 'mission_tab_not_found' }
-    : { ok: true, result: { focused: true } };
-};
-assert.equal(context.requestNativeRunnerMissionTabFocus(sessionId), true);
-await new Promise((resolve) => setImmediate(resolve));
-await new Promise((resolve) => setImmediate(resolve));
-assert.equal(focusMessages.length, 2, 'website focus retries until the mission tab exists');
-assert.deepEqual(
-  JSON.parse(JSON.stringify(focusMessages[1])),
-  { type: 'FOCUS_MISSION_TAB', sessionId },
-  'website focus remains bound to the exact mission'
-);
-assert.equal(context.executionMissionTabFocusIntents.has(sessionId), false, 'successful focus stops retries');
-
 context.executionPendingSessions.add(sessionId);
 context.executionLocalErrors.set(sessionId, {
   code: 'extension_wake_rejected:claim_failed',
@@ -322,10 +296,11 @@ assert.match(
   /type: 'RUN_PENDING_SESSIONS',[\s\S]*extensionDispatchNonce/,
   'the website wake must pass the exact signed dispatch nonce for direct claim'
 );
-assert.match(
-  html,
-  /requestNativeRunnerMissionTabFocus\(sessionId\);[\s\S]{0,180}extension_wake_pending/,
-  'tab focus must start alongside the Runner wake without gating it'
+const missionWakeSource = extractFunctionSource('requestNativeRunnerMissionWake');
+assert.doesNotMatch(
+  missionWakeSource,
+  /FOCUS_MISSION_TAB|requestNativeRunnerMissionTabFocus/,
+  'website-started missions must leave the Magic City tab in the foreground'
 );
 assert.match(
   html,

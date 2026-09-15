@@ -10880,41 +10880,6 @@
 	      if (sessionId) executionLocalRunnerProgress.delete(sessionId);
 	    }
 
-	    const executionMissionTabFocusIntents = new Map();
-
-	    function requestNativeRunnerMissionTabFocus(sessionId = '') {
-	      const normalizedSessionId = String(sessionId || '').trim();
-	      if (!normalizedSessionId) return false;
-	      const existing = executionMissionTabFocusIntents.get(normalizedSessionId);
-	      if (existing?.inFlight || existing?.timer) return true;
-	      const intent = existing || {
-	        expiresAt: Date.now() + 45_000,
-	        inFlight: false,
-	        timer: null
-	      };
-	      executionMissionTabFocusIntents.set(normalizedSessionId, intent);
-	      const attempt = async () => {
-	        intent.timer = null;
-	        if (Date.now() >= intent.expiresAt) {
-	          executionMissionTabFocusIntents.delete(normalizedSessionId);
-	          return;
-	        }
-	        intent.inFlight = true;
-	        const response = await sendNativeRunnerExtensionMessage({
-	          type: 'FOCUS_MISSION_TAB',
-	          sessionId: normalizedSessionId
-	        }).catch(() => null);
-	        intent.inFlight = false;
-	        if (response?.ok && response.result?.focused === true) {
-	          executionMissionTabFocusIntents.delete(normalizedSessionId);
-	          return;
-	        }
-	        intent.timer = setTimeout(attempt, 750);
-	      };
-	      void attempt();
-	      return true;
-	    }
-
 	    function applyExecutionRunnerProgress(session, panel = null) {
 	      const status = String(session?.status || '').toLowerCase();
 	      const progress = executionLocalRunnerProgress.get(session?.id) || null;
@@ -11017,9 +10982,6 @@
 	        clientRunStartedAt: String(clientRunStartedAt || '').trim() || new Date().toISOString(),
 	        ...(dispatchNonce ? { extensionDispatchNonce: dispatchNonce } : {})
 	      });
-	      // Website-started missions should become visible without making tab
-	      // focus part of claim, execution, or checkout success.
-	      requestNativeRunnerMissionTabFocus(sessionId);
       const timeoutResult = { ok: true, pending: true, reason: 'extension_wake_pending' };
       const wake = await Promise.race([
         wakeRequest,
@@ -14812,7 +14774,7 @@
       if (travelTask) return travelTask;
       const direct = value.match(/\b(?:buy|purchase|order|get me|shop for|add to cart|find)\s+(.+?)(?:\s+(?:additional execution detail|from|on|at|via|under|budget|max|maximum|up to|less than|spend(?:ing)?|for)\b|$)/i);
       const candidate = cleanBrowserTaskText(direct?.[1] || '');
-      if (candidate && !/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|it|that|this|these|them|book|reserve|checkout)$/i.test(candidate)) return candidate;
+      if (candidate && !/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|it|that|this|these|those|them|one|ones|book|reserve|checkout)$/i.test(candidate)) return candidate;
       const merchantPhrase = value.match(/\b(?:from|on|at|via)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/i);
       if (merchantPhrase && merchantPhrase.index > 0) {
         const beforeMerchant = cleanBrowserTaskText(value.slice(0, merchantPhrase.index));
@@ -15087,10 +15049,40 @@
       return `${base}\n\nAdditional execution detail:\n${next}`;
     }
 
+    function resolveBrowserShoppingIntakePrompt(prompt = '', priorUserMessages = []) {
+      const detail = String(prompt || '').trim();
+      if (!detail || !hasBrowserPurchaseIntent(detail)) return detail;
+      const product = inferBrowserProductFromText(detail);
+      const productIsReference = /^(?:it|them|this|that|these|those|one|ones)$/i.test(product);
+      if ((product && !productIsReference) || extractBrowserShoppingItemsFromText(detail).length > 1) return detail;
+      if (!/\b(?:it|them|this|that|these|those|one|ones)\b/i.test(detail)) return detail;
+      const priorTurns = Array.isArray(priorUserMessages) ? priorUserMessages.slice(-4).reverse() : [];
+      for (const priorTurn of priorTurns) {
+        const prior = String(priorTurn || '').trim();
+        if (!prior || looksLikeCodeAuditExecutionRequest(prior)) continue;
+        if (!inferBrowserProductFromText(prior) && extractBrowserShoppingItemsFromText(prior).length < 2) continue;
+        return appendExecutionDetail(prior, detail);
+      }
+      return detail;
+    }
+
+    function recentUserMessagesForBrowserIntake(prompt = '', limit = 4) {
+      const rows = [...($('messages')?.children || [])]
+        .filter((element) => element.classList.contains('user'))
+        .map((element) => getMessageRawText(element).trim())
+        .filter(Boolean);
+      if (rows.at(-1) === String(prompt || '').trim()) rows.pop();
+      return rows.slice(-Math.max(1, Number(limit) || 4));
+    }
+
     function maybeStartMagicInternetAgentIntake(prompt = '') {
       const detail = String(prompt || '').trim();
       if (!detail || pendingSelectedAgentExecution || getSelectedAgentExecutionSession()) return false;
-      if (!hasPendingBrowserPurchaseContext(detail, '') || hasRunnableBrowserExecutionContext(detail, '')) return false;
+      const intakePrompt = resolveBrowserShoppingIntakePrompt(
+        detail,
+        recentUserMessagesForBrowserIntake(detail)
+      );
+      if (!hasPendingBrowserPurchaseContext(intakePrompt, '') || hasRunnableBrowserExecutionContext(intakePrompt, '')) return false;
       const browserAgent = buildHelperSavedAgent('browser') || {
         pluginId: HOSTED_BROWSER_WORKER_PLUGIN_ID,
         agentName: 'Magic Internet Agent'
@@ -15098,11 +15090,11 @@
       rememberSelectedAgentExecution({
         agent: browserAgent,
         capability: 'browser-worker-agent',
-        starterPrompt: detail,
+        starterPrompt: intakePrompt,
         context: {}
       });
       addAssistantResult(
-        buildBrowserMissingExecutionInfoMessage(detail, 'Magic Internet Agent'),
+        buildBrowserMissingExecutionInfoMessage(intakePrompt, 'Magic Internet Agent'),
         renderDetailLines([
           'Agent: Magic Internet Agent',
           'Route: gathering pre-run shopping details'
@@ -15349,8 +15341,6 @@
 	      executionProtocolPollingSessions.clear();
 	      executionPollingRequestsInFlight.clear();
 	      executionCancellingSessions.clear();
-	      executionMissionTabFocusIntents.forEach((intent) => clearTimeout(intent?.timer));
-	      executionMissionTabFocusIntents.clear();
 	      clearSelectedAgentExecution();
       if (executionPollHandle) {
         clearInterval(executionPollHandle);
@@ -15372,9 +15362,6 @@
 	      executionPollingRequestsInFlight.delete(sessionId);
 	      executionCancellingSessions.delete(sessionId);
 	      executionLocalErrors.delete(sessionId);
-	      const focusIntent = executionMissionTabFocusIntents.get(sessionId);
-	      if (focusIntent?.timer) clearTimeout(focusIntent.timer);
-	      executionMissionTabFocusIntents.delete(sessionId);
 	      clearSelectedAgentExecution(sessionId);
       if (activeExecutionSessionId === sessionId) {
         activeExecutionSessionId = executionSessionOrder[executionSessionOrder.length - 1] || null;

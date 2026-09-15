@@ -278,6 +278,8 @@ const functionNames = [
   'isShortExecutionConfirmation',
   'hasRunnableBrowserExecutionContext',
   'buildBrowserMissingExecutionInfoMessage',
+  'appendExecutionDetail',
+  'resolveBrowserShoppingIntakePrompt',
   'inferAgentCompletionDesiredKind'
 ];
 
@@ -407,5 +409,40 @@ assert.equal(context.hasPendingBrowserPurchaseContext(directShoppingRequest, '')
 assert.equal(context.hasRunnableBrowserExecutionContext(directShoppingRequest, ''), true);
 assert.equal(context.inferAgentCompletionDesiredKind({ prompt: directShoppingRequest }), 'browser');
 assert.equal(context.hasPendingBrowserPurchaseContext('I want to buy granola bars', ''), true);
+
+for (const reference of ['them', 'those', 'one']) {
+  const referentialPurchasePrompt = context.resolveBrowserShoppingIntakePrompt(
+    `i want to buy ${reference}`,
+    ['nature valley granola bars']
+  );
+  assert.equal(context.inferBrowserProductFromText(referentialPurchasePrompt), 'nature valley granola bars');
+  assert.equal(context.inferBrowserTargetUrlFromText(referentialPurchasePrompt), 'https://www.amazon.com');
+  assert.equal(context.hasPendingBrowserPurchaseContext(referentialPurchasePrompt, ''), true);
+  assert.equal(context.hasRunnableBrowserExecutionContext(referentialPurchasePrompt, ''), false);
+  assert.equal(
+    context.hasRunnableBrowserExecutionContext(`${referentialPurchasePrompt}\n\nAdditional execution detail:\n$4`, ''),
+    true,
+    `a bare budget must complete the ${reference} shopping intake`
+  );
+  assert.match(
+    context.buildBrowserMissingExecutionInfoMessage(referentialPurchasePrompt, 'Magic Internet Agent'),
+    /tell me: max spend/i
+  );
+}
+assert.equal(
+  context.resolveBrowserShoppingIntakePrompt('i want to buy them', ['I want a code audit']),
+  'i want to buy them',
+  'referential shopping must not inherit unrelated code-audit context'
+);
+for (const nonPurchaseFollowUp of [
+  'Can you explain how to buy them?',
+  'I do not want to buy them'
+]) {
+  assert.equal(
+    context.resolveBrowserShoppingIntakePrompt(nonPurchaseFollowUp, ['nature valley granola bars']),
+    nonPurchaseFollowUp,
+    `${nonPurchaseFollowUp} must not become a shopping execution`
+  );
+}
 
 console.log('browser mission UI parser ok');
