@@ -201,6 +201,214 @@ async function main() {
       fail(`shared_payment_row_binding_failed:${JSON.stringify({ sharedSelection, sharedAfter })}`);
     }
 
+    const setKeyboardPaymentFixture = async (rows) => {
+      await page.setContent(`<!doctype html>
+        <style>button[data-testid*="primary-pm-card-keyboard-pressable"] { display: block; width: 420px; min-height: 54px; }</style>
+        <main>
+          <h1>Review checkout</h1>
+          <section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>
+          <section id="payment-method" aria-label="Payment method">
+            <h2>Paying with</h2>
+            ${rows.join('\n')}
+            <button id="keyboard-use-payment" onclick="document.body.dataset.keyboardConfirmClicks=String(Number(document.body.dataset.keyboardConfirmClicks||0)+1)">Use this payment method</button>
+          </section>
+          <p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p>
+        </main>
+        <script>
+          function selectKeyboardCard(control) {
+            document.querySelectorAll('button[data-testid*="primary-pm-card-keyboard-pressable"]').forEach((button) => {
+              button.dataset.testid = 'unselected-primary-pm-card-keyboard-pressable';
+              button.setAttribute('aria-current', 'false');
+              button.setAttribute('aria-expanded', 'false');
+            });
+            control.dataset.testid = 'selected-primary-pm-card-keyboard-pressable';
+            control.setAttribute('aria-current', 'true');
+            control.setAttribute('aria-expanded', 'true');
+            document.body.dataset.keyboardCardClicks = String(Number(document.body.dataset.keyboardCardClicks || 0) + 1);
+            document.body.dataset.keyboardSelectedCard = control.dataset.ending;
+          }
+        </script>`);
+    };
+    const keyboardRow = ({ ending, selected = false, suffix = '' }) => `<button
+      data-testid="${selected ? 'selected' : 'unselected'}-primary-pm-card-keyboard-pressable"
+      data-ending="${ending}"
+      aria-current="${selected ? 'true' : 'false'}"
+      aria-expanded="${selected ? 'true' : 'false'}"
+      aria-label="Mastercard ending in ${ending} ${suffix}"
+      onclick="selectKeyboardCard(this)">Mastercard ending in ${ending} ${suffix}</button>`;
+
+    await setKeyboardPaymentFixture([
+      keyboardRow({ ending: '6383' }),
+      keyboardRow({ ending: '1817' }),
+      keyboardRow({ ending: '0109', selected: true })
+    ]);
+    const keyboardAction = {
+      id: 'keyboard-payment-row',
+      receiptScope: 'test-plan:keyboard-payment-row',
+      type: 'fill_checkout_profile',
+      primeRequired: true
+    };
+    const keyboardSelection = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: keyboardAction,
+      checkoutProfile: profile
+    });
+    const keyboardAfterSelection = await page.evaluate(() => ({
+      selected: document.querySelector('button[aria-current="true"]')?.dataset.ending || '',
+      cardClicks: Number(document.body.dataset.keyboardCardClicks || 0),
+      confirmClicks: Number(document.body.dataset.keyboardConfirmClicks || 0)
+    }));
+    if (keyboardAfterSelection.selected !== '6383'
+      || keyboardAfterSelection.cardClicks !== 1
+      || keyboardAfterSelection.confirmClicks !== 0
+      || keyboardSelection.paymentSelectionPending !== true
+      || !keyboardSelection.checkoutSelections?.includes('matching payment card')) {
+      fail(`keyboard_payment_row_was_not_selected_once:${JSON.stringify({ keyboardSelection, keyboardAfterSelection })}`);
+    }
+    const keyboardConfirmation = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: keyboardAction,
+      checkoutProfile: profile
+    });
+    const keyboardAfterConfirmation = await page.evaluate(() => ({
+      selected: document.querySelector('button[aria-current="true"]')?.dataset.ending || '',
+      cardClicks: Number(document.body.dataset.keyboardCardClicks || 0),
+      confirmClicks: Number(document.body.dataset.keyboardConfirmClicks || 0)
+    }));
+    if (keyboardAfterConfirmation.selected !== '6383'
+      || keyboardAfterConfirmation.cardClicks !== 1
+      || keyboardAfterConfirmation.confirmClicks !== 1
+      || keyboardConfirmation.paymentConfirmationPending !== true
+      || keyboardConfirmation.state?.checkoutSummary?.cardMatches !== true) {
+      fail(`keyboard_payment_row_was_not_independently_confirmed:${JSON.stringify({ keyboardConfirmation, keyboardAfterConfirmation })}`);
+    }
+
+    await page.setContent(`<!doctype html>
+      <style>[role="radio"] { display: block; width: 420px; min-height: 54px; }</style>
+      <main>
+        <h1>Review checkout</h1>
+        <section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>
+        <section id="semantic-payment-method" aria-label="Payment method">
+          <h2>Paying with</h2>
+          <div role="radio" aria-checked="false" aria-label="Mastercard ending in 6383" data-ending="6383" onclick="selectSemanticCard(this)">Mastercard ending in 6383</div>
+          <div role="radio" aria-checked="false" aria-label="Mastercard ending in 1817" data-ending="1817" onclick="selectSemanticCard(this)">Mastercard ending in 1817</div>
+          <div role="radio" aria-checked="true" aria-label="Visa ending in 0109" data-ending="0109" onclick="selectSemanticCard(this)">Visa ending in 0109</div>
+          <button id="semantic-use-payment" onclick="document.body.dataset.semanticConfirmClicks=String(Number(document.body.dataset.semanticConfirmClicks||0)+1)">Use this payment method</button>
+        </section>
+        <p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p>
+      </main>
+      <script>
+        function selectSemanticCard(control) {
+          document.querySelectorAll('[role="radio"]').forEach((row) => row.setAttribute('aria-checked', 'false'));
+          control.setAttribute('aria-checked', 'true');
+          document.body.dataset.semanticCardClicks = String(Number(document.body.dataset.semanticCardClicks || 0) + 1);
+        }
+      </script>`);
+    const semanticAction = {
+      id: 'semantic-payment-row',
+      receiptScope: 'test-plan:semantic-payment-row',
+      type: 'fill_checkout_profile',
+      primeRequired: true
+    };
+    const semanticSelection = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: semanticAction,
+      checkoutProfile: profile
+    });
+    const semanticAfterSelection = await page.evaluate(() => ({
+      selected: document.querySelector('[role="radio"][aria-checked="true"]')?.dataset.ending || '',
+      cardClicks: Number(document.body.dataset.semanticCardClicks || 0),
+      confirmClicks: Number(document.body.dataset.semanticConfirmClicks || 0)
+    }));
+    if (semanticAfterSelection.selected !== '6383'
+      || semanticAfterSelection.cardClicks !== 1
+      || semanticAfterSelection.confirmClicks !== 0
+      || semanticSelection.paymentSelectionPending !== true) {
+      fail(`semantic_payment_row_was_not_selected_once:${JSON.stringify({ semanticSelection, semanticAfterSelection })}`);
+    }
+    const semanticConfirmation = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: semanticAction,
+      checkoutProfile: profile
+    });
+    const semanticAfterConfirmation = await page.evaluate(() => ({
+      selected: document.querySelector('[role="radio"][aria-checked="true"]')?.dataset.ending || '',
+      cardClicks: Number(document.body.dataset.semanticCardClicks || 0),
+      confirmClicks: Number(document.body.dataset.semanticConfirmClicks || 0)
+    }));
+    if (semanticAfterConfirmation.selected !== '6383'
+      || semanticAfterConfirmation.cardClicks !== 1
+      || semanticAfterConfirmation.confirmClicks !== 1
+      || semanticConfirmation.paymentConfirmationPending !== true
+      || semanticConfirmation.state?.checkoutSummary?.cardMatches !== true) {
+      fail(`semantic_payment_row_was_not_independently_confirmed:${JSON.stringify({ semanticConfirmation, semanticAfterConfirmation })}`);
+    }
+
+    await setKeyboardPaymentFixture([
+      keyboardRow({ ending: '6383', selected: true }),
+      keyboardRow({ ending: '6383' }),
+      keyboardRow({ ending: '0109' })
+    ]);
+    const duplicateKeyboardOutcome = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { id: 'reject-duplicate-keyboard-ending', receiptScope: 'test-plan:reject-duplicate-keyboard-ending', type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: profile
+    });
+    const duplicateKeyboardClicks = await page.evaluate(() => ({
+      card: Number(document.body.dataset.keyboardCardClicks || 0),
+      confirm: Number(document.body.dataset.keyboardConfirmClicks || 0)
+    }));
+    if (duplicateKeyboardClicks.card !== 0
+      || duplicateKeyboardClicks.confirm !== 0
+      || duplicateKeyboardOutcome.state?.checkoutSummary?.cardMatches === true) {
+      fail(`duplicate_keyboard_payment_ending_was_approved:${JSON.stringify({ duplicateKeyboardOutcome, duplicateKeyboardClicks })}`);
+    }
+
+    await setKeyboardPaymentFixture([
+      keyboardRow({ ending: '6383', suffix: 'Expired' }),
+      keyboardRow({ ending: '0109', selected: true })
+    ]);
+    const expiredKeyboardOutcome = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { id: 'reject-expired-keyboard-card', receiptScope: 'test-plan:reject-expired-keyboard-card', type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: profile
+    });
+    const expiredKeyboardClicks = await page.evaluate(() => ({
+      card: Number(document.body.dataset.keyboardCardClicks || 0),
+      confirm: Number(document.body.dataset.keyboardConfirmClicks || 0)
+    }));
+    if (expiredKeyboardClicks.card !== 0
+      || expiredKeyboardClicks.confirm !== 0
+      || expiredKeyboardOutcome.checkoutSelections?.includes('matching payment card')) {
+      fail(`expired_keyboard_payment_card_was_not_rejected:${JSON.stringify({ expiredKeyboardOutcome, expiredKeyboardClicks })}`);
+    }
+
+    await page.setContent(`<!doctype html>
+      <style>button { display: block; min-height: 42px; }</style>
+      <main>
+        <h1>Review checkout</h1>
+        <section aria-label="Delivery address"><h2>Delivering to Test User</h2><p>1 Magic City Way, San Francisco, CA 94107, United States</p></section>
+        <section id="ambiguous-button-payment" aria-label="Payment method">
+          <h2>Paying with Mastercard ending in 6383</h2>
+          <button data-testid="selected-primary-pm-card-keyboard-pressable" aria-current="true" aria-label="Mastercard ending in 6383; backup card ending in 1817">Mastercard ending in 6383; backup card ending in 1817</button>
+          <button id="ambiguous-button-confirm" onclick="document.body.dataset.ambiguousButtonConfirmClicks=String(Number(document.body.dataset.ambiguousButtonConfirmClicks||0)+1)">Use this payment method</button>
+        </section>
+        <p>Items: $2.97</p><p>Shipping &amp; handling: $0.00</p><p>Order total: $2.97</p>
+      </main>`);
+    const ambiguousButtonOutcome = await command({
+      type: 'MAGIC_CITY_EXECUTE_PLAN_STEP',
+      action: { id: 'reject-ambiguous-button-card', receiptScope: 'test-plan:reject-ambiguous-button-card', type: 'fill_checkout_profile', primeRequired: true },
+      checkoutProfile: profile
+    });
+    const ambiguousButtonConfirmClicks = Number(
+      await page.locator('body').getAttribute('data-ambiguous-button-confirm-clicks') || 0
+    );
+    if (ambiguousButtonConfirmClicks !== 0
+      || ambiguousButtonOutcome.paymentConfirmationPending === true
+      || ambiguousButtonOutcome.state?.checkoutSummary?.cardMatches === true) {
+      fail(`ambiguous_selected_button_used_stale_summary:${JSON.stringify({ ambiguousButtonOutcome, ambiguousButtonConfirmClicks })}`);
+    }
+
     await page.setContent(`<!doctype html>
       <style>
         #payment-method { display: grid; grid-template-columns: 32px 1fr; grid-auto-rows: 48px; align-items: center; }
@@ -426,6 +634,15 @@ async function main() {
       paymentConfirmationReceipts: confirmationReceiptsWhilePending,
       sharedContainerClickSequence: sharedAfter.clicks,
       splitColumnClickSequence: splitColumnAfter.clicks,
+      keyboardPaymentCardSelected: keyboardAfterSelection.selected,
+      keyboardPaymentCardClicks: keyboardAfterConfirmation.cardClicks,
+      keyboardPaymentConfirmClicks: keyboardAfterConfirmation.confirmClicks,
+      genericSemanticCardSelected: semanticAfterSelection.selected,
+      genericSemanticCardClicks: semanticAfterConfirmation.cardClicks,
+      genericSemanticConfirmClicks: semanticAfterConfirmation.confirmClicks,
+      duplicateKeyboardEndingRejected: true,
+      expiredKeyboardCardRejected: true,
+      ambiguousSelectedButtonBlockedSummaryFallback: true,
       duplicateEndingRejected: true,
       expiredCardRejected: true,
       selectedInvalidCardsRejected: ['expired', 'disabled', 'ambiguous'],

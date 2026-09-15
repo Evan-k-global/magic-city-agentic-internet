@@ -142,6 +142,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
   const productText = packTokenPatterns.reduce((value, pattern) => value.replace(pattern, ' '), query);
   const requestedIdentityTokens = tokens(productText).slice(0, 18);
   const requestedFirstToken = requestedIdentityTokens[0] || '';
+  const softSemanticTokens = new Set(['fruity']);
 
   const semanticRoles = (value = '') => {
     const text = normalize(value);
@@ -151,7 +152,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     add('accessory', /\b(?:keeper|accessory|replacement lid)\b/);
     add('skin-moisturizer', /\b(?:moisturizer|moisturizing|water gel|healing ointment|skin protectant)\b/);
     add('makeup', /\b(?:foundation|tint|makeup)\b/);
-    add('blade-refill', /\b(?:razor blade|blade refill)\b/);
+    add('blade-refill', /\b(?:razor blades?|blade refills?)\b/);
     add('razor-handle', /\b(?:razor handle|handle kit|razor kit)\b/);
     add('ready-drink', /\b(?:thirst quencher|sports drink|ready to drink)\b/);
     add('drink-powder', /\b(?:powder|drink mix)\b/);
@@ -303,6 +304,21 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       && (!brandFirst || !requestedFirstToken || brandFirst === requestedFirstToken)
       && wanted.every((token) => available.has(token));
   };
+  const semanticIdentityEligible = (title = '') => {
+    if (/\b(?:only|exactly|must be|specifically|flavo[u]?r|scent|color|colour|model|formula|compatible with)\b/i.test(productText)) return false;
+    const wanted = requestedIdentityTokens.filter((token) => !softSemanticTokens.has(token));
+    const availableTokens = tokens(title);
+    const available = new Set(availableTokens);
+    // Intelligence can interpret an allowlisted soft description, but it may
+    // not drop any other requested identity token.
+    if (!wanted.length || wanted.some((token) => !available.has(token))) return false;
+    if (requestedIdentityTokens.includes('fruity')
+      && !/\b(?:fruit|[a-z]*berry|pomegranate)\b/i.test(normalize(title))) return false;
+    const wantedBigrams = new Set(wanted.slice(0, -1).map((token, index) => `${token} ${wanted[index + 1]}`));
+    const availableBigrams = availableTokens.slice(0, -1).map((token, index) => `${token} ${availableTokens[index + 1]}`);
+    const sharesPhrase = availableBigrams.some((pair) => wantedBigrams.has(pair));
+    return wanted.length >= 2 && sharesPhrase;
+  };
 
   const cards = [];
   const seen = new Set();
@@ -374,9 +390,14 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
 
   const maxPrice = rawAction.maxPrice == null || rawAction.maxPrice === '' ? null : Number(rawAction.maxPrice);
   const requiresFulfillment = rawAction.primeRequired === true;
+  const approvedIntelligenceCandidate = rawAction.intelligenceApprovedCandidate
+    && typeof rawAction.intelligenceApprovedCandidate === 'object'
+    ? rawAction.intelligenceApprovedCandidate
+    : null;
   let bestExact = null;
   let bestAlternative = null;
   let bestVerificationCandidate = null;
+  const intelligenceCandidates = [];
   const rejected = { price: 0, budget: 0, fulfillment: 0, prime: 0, freeShipping: 0, conditionalShipping: 0, identity: 0, package: 0 };
   const summarize = (candidate, pack = null) => ({
     id: `candidate-${candidate.index + 1}`,
@@ -386,8 +407,11 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     price: candidate.price,
     primeEligible: candidate.prime,
     freeShipping: candidate.freeShipping,
+    conditionalShipping: candidate.conditionalShipping,
     cartActionStarted: false,
-    pack
+    pack,
+    packageFacts: pack,
+    hardEligible: true
   });
   const elapsed = () => Math.max(0, performance.now() - selectionStartedAt);
   const betterExact = (candidate, current) => {
@@ -429,8 +453,35 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       )
     };
   };
+  const approvedEvidenceMatches = (candidate, pack) => {
+    if (!approvedIntelligenceCandidate) return false;
+    const id = `candidate-${candidate.index + 1}`;
+    const expectedPrice = Number(approvedIntelligenceCandidate.price);
+    const expectedPack = approvedIntelligenceCandidate.packageFacts || approvedIntelligenceCandidate.pack || null;
+    const samePack = !expectedPack || (
+      String(expectedPack.status || '') === String(pack?.status || '')
+      && String(expectedPack.unit || '') === String(pack?.unit || '')
+      && Number(expectedPack.total || 0) === Number(pack?.total || 0)
+      && Number(expectedPack.per || 0) === Number(pack?.per || 0)
+      && Number(expectedPack.outer || 0) === Number(pack?.outer || 0)
+      && String(expectedPack.configuration || '') === String(pack?.configuration || '')
+    );
+    return id === String(approvedIntelligenceCandidate.id || '')
+      && candidate.asin === String(approvedIntelligenceCandidate.asin || '').toUpperCase()
+      && normalize(candidate.title) === normalize(approvedIntelligenceCandidate.title || '')
+      && Number.isFinite(expectedPrice)
+      && Math.abs(candidate.price - expectedPrice) <= 0.005
+      && candidate.prime === (approvedIntelligenceCandidate.primeEligible === true)
+      && candidate.freeShipping === (approvedIntelligenceCandidate.freeShipping === true)
+      && candidate.conditionalShipping === (approvedIntelligenceCandidate.conditionalShipping === true)
+      && samePack;
+  };
   for (const candidate of cards) {
-    if (!titleHasIdentity(candidate.title, candidate.brand) || incompatibleRole(candidate.title) || functionalMismatch(candidate.title)) { rejected.identity += 1; continue; }
+    const candidateId = `candidate-${candidate.index + 1}`;
+    if (approvedIntelligenceCandidate && candidateId !== String(approvedIntelligenceCandidate.id || '')) continue;
+    const exactIdentity = titleHasIdentity(candidate.title, candidate.brand);
+    const semanticIdentity = !exactIdentity && semanticIdentityEligible(candidate.title);
+    if ((!exactIdentity && !semanticIdentity) || incompatibleRole(candidate.title) || functionalMismatch(candidate.title)) { rejected.identity += 1; continue; }
     const packageMatch = packageMatchFor(candidate);
     if (packageMatch.kind === 'reject') { rejected.package += 1; continue; }
     const priceInconclusive = candidate.priceConflict || !Number.isFinite(candidate.price) || candidate.price <= 0;
@@ -444,7 +495,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       if (candidate.conditionalShipping) rejected.conditionalShipping += 1;
     }
     if (priceInconclusive || fulfillmentInconclusive) {
-      if (packageMatch.kind === 'exact' && (!bestVerificationCandidate || betterExact(candidate, bestVerificationCandidate.candidate))) {
+      if (exactIdentity && packageMatch.kind === 'exact' && (!bestVerificationCandidate || betterExact(candidate, bestVerificationCandidate.candidate))) {
         bestVerificationCandidate = {
           candidate,
           pack: packageMatch.pack,
@@ -452,6 +503,21 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
           fulfillmentInconclusive
         };
       }
+      continue;
+    }
+    if (semanticIdentity) {
+      if (packageMatch.kind !== 'exact') { rejected.package += 1; continue; }
+      if (approvedIntelligenceCandidate) {
+        if (approvedEvidenceMatches(candidate, packageMatch.pack)) bestExact = candidate;
+        else rejected.identity += 1;
+      } else if (intelligenceCandidates.length < 12) {
+        intelligenceCandidates.push(summarize(candidate, packageMatch.pack));
+      }
+      continue;
+    }
+    if (approvedIntelligenceCandidate) {
+      if (packageMatch.kind === 'exact' && approvedEvidenceMatches(candidate, packageMatch.pack)) bestExact = candidate;
+      else rejected.identity += 1;
       continue;
     }
     if (packageMatch.kind === 'exact') {
@@ -472,6 +538,16 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
   }
 
   const sizeSubstitutionAuthorized = rawAction.allowSizeSubstitution === true;
+  if (approvedIntelligenceCandidate && !bestExact) {
+    return {
+      completed: false,
+      selectionDecisionMade: true,
+      selectionKind: 'no_verified_candidate',
+      intelligenceRevalidationFailed: true,
+      reason: 'The model-selected Amazon result changed or no longer satisfies the approved product, package, budget, and delivery constraints.',
+      scan: { rawScanned: Math.min(rawScanned, 96), distinctCards: cards.length, rejected, selectionDurationMs: elapsed() }
+    };
+  }
   if (!bestExact && bestVerificationCandidate) {
     const selected = summarize(bestVerificationCandidate.candidate, bestVerificationCandidate.pack);
     return {
@@ -514,11 +590,17 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       selectionDecisionMade: true,
       selectionKind: 'no_verified_candidate',
       reason: 'Magic City could not find a verified match for that specific product within budget. Try again with a more general product query.',
+      intelligenceCandidates,
       scan: { rawScanned: Math.min(rawScanned, 96), distinctCards: cards.length, rejected, selectionDurationMs: elapsed() }
     };
   }
 
-  const selectionKind = bestExact ? 'exact' : 'size_alternative';
+  const selectionKind = approvedIntelligenceCandidate ? 'model_assisted' : bestExact ? 'exact' : 'size_alternative';
+  const selectionDescription = selectionKind === 'model_assisted'
+    ? 'model-assisted'
+    : selectionKind === 'exact'
+      ? 'exact'
+      : 'closest-size';
   const selectedCard = bestExact || bestAlternative.candidate;
   let selectedPack = bestExact ? offeredPack(selectedCard.title) : bestAlternative.pack;
   if (selectedPack.status === 'unknown') selectedPack = offeredPack(selectedCard.identityEvidence || selectedCard.title);
@@ -554,10 +636,24 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     searchResultSelected: directCart,
     directSearchResultCart: directCart,
     directCartControlAvailable: Boolean(selectedCard.control),
-    label: directCart ? 'Add to cart' : selectionKind === 'exact' ? 'Exact candidate' : 'Closest verified size',
+    label: directCart
+      ? 'Add to cart'
+      : selectionKind === 'exact'
+        ? 'Exact candidate'
+        : selectionKind === 'model_assisted'
+          ? 'Model-assisted candidate'
+          : 'Closest verified size',
     controlStrategy: directCart
-      ? selectionKind === 'exact' ? 'amazon_search_card_exact_first' : 'amazon_search_card_closest_size'
-      : selectionKind === 'exact' ? 'amazon_search_card_exact_navigation' : 'amazon_search_card_closest_size_navigation',
+      ? selectionKind === 'exact'
+        ? 'amazon_search_card_exact_first'
+        : selectionKind === 'model_assisted'
+          ? 'amazon_search_card_model_assisted'
+          : 'amazon_search_card_closest_size'
+      : selectionKind === 'exact'
+        ? 'amazon_search_card_exact_navigation'
+        : selectionKind === 'model_assisted'
+          ? 'amazon_search_card_model_assisted_navigation'
+          : 'amazon_search_card_closest_size_navigation',
     selected,
     scan: { rawScanned: Math.min(rawScanned, 96), distinctCards: cards.length, rejected, selectionDurationMs: elapsed() },
     state: {
@@ -574,10 +670,10 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       browserSurface: 'search_results',
       browserStateConfidence: 1,
       browserStateReason: directCart
-        ? `The ${selectionKind === 'exact' ? 'exact' : 'closest-size'} verified Amazon result card was added to cart.`
+        ? `The ${selectionDescription} verified Amazon result card was added to cart.`
         : performClick
-          ? `The ${selectionKind === 'exact' ? 'exact' : 'closest-size'} verified Amazon result card was selected for product-page verification.`
-          : `The ${selectionKind === 'exact' ? 'exact' : 'closest-size'} verified Amazon result card was selected without clicking.`,
+          ? `The ${selectionDescription} verified Amazon result card was selected for product-page verification.`
+          : `The ${selectionDescription} verified Amazon result card was selected without clicking.`,
       milestoneSignals: {
         candidateSelected: directCart,
         cartVisible: false,

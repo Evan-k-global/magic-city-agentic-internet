@@ -899,7 +899,39 @@ async function clearPendingPaymentWait(sessionId = '') {
   return setPendingPaymentWait(sessionId, null);
 }
 
-async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs = API_TIMEOUT_MS } = {}) {
+async function readBoundedApiResponse(response, maxBytes = null) {
+  if (!Number.isFinite(Number(maxBytes)) || Number(maxBytes) <= 0) return response.text();
+  const limit = Number(maxBytes);
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw new Error('runner_api_response_too_large');
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > limit) throw new Error('runner_api_response_too_large');
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      throw new Error('runner_api_response_too_large');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs = API_TIMEOUT_MS, maxResponseBytes = null } = {}) {
   const config = await getConfig();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -924,7 +956,7 @@ async function api(path, { method = 'GET', body = null, bearer = '', timeoutMs =
     // Keep the deadline active through the response body. Headers alone do
     // not complete a control-plane request and a stalled body must not strand
     // an active browser mission indefinitely.
-    text = await response.text();
+    text = await readBoundedApiResponse(response, maxResponseBytes);
   } catch (error) {
     await recordAwaitedOperation('control_plane_request', `${method} ${path}`, 'failed', {
       startedAt: operationStartedAt,
@@ -1382,6 +1414,114 @@ async function amazonSearchCardAddToCart(tabId, action = {}) {
   }));
   if (Array.isArray(result)) return result[0]?.result || null;
   return result && typeof result === 'object' ? result : null;
+}
+
+function normalizeSelectionIntelligenceCandidate(candidate = null) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const id = String(candidate.id || '').trim().slice(0, 40);
+  const asin = String(candidate.asin || '').trim().toUpperCase();
+  const title = String(candidate.title || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+  const price = candidate.price === null || candidate.price === '' || candidate.price === undefined
+    ? null
+    : Number(candidate.price);
+  if (!/^candidate-\d{1,2}$/.test(id) || !/^[A-Z0-9]{10}$/.test(asin) || !title || !Number.isFinite(price) || price <= 0) return null;
+  const sourcePack = candidate.packageFacts || candidate.pack || null;
+  const positive = (key) => {
+    if (!sourcePack || sourcePack[key] === null || sourcePack[key] === '' || sourcePack[key] === undefined) return null;
+    const value = Number(sourcePack[key]);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  };
+  const text = (key, limit) => String(sourcePack?.[key] || '').trim().slice(0, limit) || null;
+  return {
+    id,
+    asin,
+    title,
+    packageFacts: sourcePack ? {
+      status: text('status', 24),
+      unit: text('unit', 24),
+      total: positive('total'),
+      per: positive('per'),
+      outer: positive('outer'),
+      configuration: text('configuration', 32)
+    } : null,
+    price,
+    primeEligible: candidate.primeEligible === true,
+    freeShipping: candidate.freeShipping === true,
+    conditionalShipping: candidate.conditionalShipping === true,
+    sponsored: false,
+    hardEligible: candidate.hardEligible === true
+  };
+}
+
+async function consultAmazonSelectionIntelligence(session, plan, action, quickOutcome, tabId) {
+  if (session?.selectionIntelligence?.enabled !== true
+    || quickOutcome?.selectionKind !== 'no_verified_candidate') return null;
+  const candidates = (Array.isArray(quickOutcome.intelligenceCandidates)
+    ? quickOutcome.intelligenceCandidates
+    : [])
+    .slice(0, Math.min(12, Number(session.selectionIntelligence.maxCandidates) || 12))
+    .map(normalizeSelectionIntelligenceCandidate)
+    .filter(Boolean);
+  if (!candidates.length || new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) return null;
+  const observationHash = await hashPlan({
+    schema: 'magic-city-amazon-candidate-observation-v1',
+    candidates
+  });
+  const requestId = await hashPlan({
+    schema: 'magic-city-amazon-selection-advice-request-v1',
+    sessionId: session.id,
+    planHash: plan.planHash,
+    actionId: action.id,
+    observationHash
+  });
+  const config = await getConfig();
+  let advice = null;
+  try {
+    advice = await api(`/connectors/sessions/${encodeURIComponent(session.id)}/rank-candidates`, {
+      method: 'POST',
+      bearer: config.deviceToken,
+      timeoutMs: Math.min(3_000, Math.max(1_000, Number(session.selectionIntelligence.timeoutMs) || 3_000)),
+      maxResponseBytes: 4 * 1024,
+      body: {
+        pluginId: RUNNER_EXTENSION_PLUGIN_ID,
+        planHash: plan.planHash,
+        planActionId: action.id,
+        requestId,
+        observationHash,
+        candidates
+      }
+    });
+  } catch {
+    return null;
+  }
+  if (advice?.schema !== 'magic-city-amazon-selection-advice-v1'
+    || advice.sessionId !== session.id
+    || advice.planHash !== plan.planHash
+    || advice.actionId !== action.id
+    || advice.requestId !== requestId
+    || advice.observationHash !== observationHash) return null;
+  if (advice.decision !== 'select' || !advice.selectedCandidateId) {
+    return {
+      ...quickOutcome,
+      intelligenceConsulted: true,
+      intelligenceDecision: advice.decision || 'abstain',
+      reason: String(advice.reason || quickOutcome.reason || '').slice(0, 240)
+    };
+  }
+  const selected = candidates.find((candidate) => candidate.id === advice.selectedCandidateId);
+  if (!selected) return null;
+  const revalidated = await amazonSearchCardAddToCart(tabId, {
+    ...action,
+    intelligenceApprovedCandidate: selected
+  });
+  if (!revalidated || typeof revalidated !== 'object') return null;
+  return {
+    ...revalidated,
+    intelligenceConsulted: true,
+    intelligenceDecision: 'select',
+    intelligenceRequestId: requestId,
+    intelligenceObservationHash: observationHash
+  };
 }
 
 async function advanceAmazonAddedItemToCart(tabId, checkoutProfile = null, cartUrl = '') {
@@ -2700,7 +2840,7 @@ async function runCheckoutProfileReconcile(tabId, action, checkoutProfile = null
   };
 }
 
-async function executePlanAction(tabId, action, plan, checkoutProfile = null, assertActive = null) {
+async function executePlanAction(tabId, action, plan, checkoutProfile = null, assertActive = null, session = null) {
   // This is runtime-only context, not a mutation of the signed plan. It scopes
   // durable page receipts to this exact signed action so a completed order in a
   // previous mission never suppresses a fresh mission in the same Amazon tab.
@@ -2947,6 +3087,8 @@ async function executePlanAction(tabId, action, plan, checkoutProfile = null, as
         }
         return quickOutcome;
       }
+      const intelligenceOutcome = await consultAmazonSelectionIntelligence(session, plan, action, quickOutcome, tabId);
+      if (intelligenceOutcome) return intelligenceOutcome;
       if (quickOutcome?.selectionDecisionMade === true) return quickOutcome;
     }
   }
@@ -3657,7 +3799,7 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
               state: recoveredState
             }
         : await withTimeout(
-            () => executePlanAction(tab.id, executionAction, plan, checkoutProfile, assertActive),
+            () => executePlanAction(tab.id, executionAction, plan, checkoutProfile, assertActive, session),
             action.awaitMerchantOrderConfirmation === true
               ? Math.min(
                   MAX_MERCHANT_ORDER_CONFIRMATION_TIMEOUT_MS + 5_000,
@@ -3734,6 +3876,11 @@ async function runSession(rawSession, { onClaimAccepted = null } = {}) {
         skipped: Boolean(outcome.skipped),
         durationMs: actionDurationMs,
         controlStrategy: outcome.controlStrategy || null,
+        selectionKind: String(outcome.selectionKind || '').slice(0, 48) || null,
+        intelligenceConsulted: outcome.intelligenceConsulted === true,
+        intelligenceDecision: String(outcome.intelligenceDecision || '').slice(0, 24) || null,
+        intelligenceRequestId: String(outcome.intelligenceRequestId || '').slice(0, 80) || null,
+        intelligenceObservationHash: String(outcome.intelligenceObservationHash || '').slice(0, 80) || null,
         fallbackAttempts: Number(outcome.fallbackAttempts || 0),
         requestedNavigationUrl: outcome.navigationUrl ? compactNavigationUrl(outcome.navigationUrl) : null,
         observedNavigationUrl: outcome.observedNavigationUrl ? compactNavigationUrl(outcome.observedNavigationUrl) : null,
