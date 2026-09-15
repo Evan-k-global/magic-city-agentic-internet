@@ -124,6 +124,17 @@ function countBrowserWorkerSignals(prompt) {
 function inferBrowserMerchantLabel(prompt = '') {
   const text = String(prompt || '');
   const lower = text.toLowerCase();
+  const scopedMerchant = lower.match(/\b(?:only\s+)?(?:from|on|at|via|use)\s+(amazon(?:\.com)?|bezos|everything store|target(?:\.com)?|tarjay|bullseye|walmart(?:\.com)?|wally world|bed bath (?:&|and) beyond|bedbathandbeyond(?:\.com)?|best buy|bestbuy(?:\.com)?|instacart(?:\.com)?|kayak(?:\.com)?|expedia(?:\.com)?|booking(?:\.com)?|hotels(?:\.com)?)\b/i)?.[1] || '';
+  if (/^(?:amazon(?:\.com)?|bezos|everything store)$/i.test(scopedMerchant)) return 'amazon.com';
+  if (/^(?:target(?:\.com)?|tarjay|bullseye)$/i.test(scopedMerchant)) return 'target.com';
+  if (/^(?:walmart(?:\.com)?|wally world)$/i.test(scopedMerchant)) return 'walmart.com';
+  if (/^(?:bed bath (?:&|and) beyond|bedbathandbeyond(?:\.com)?)$/i.test(scopedMerchant)) return 'bedbathandbeyond.com';
+  if (/^(?:best buy|bestbuy(?:\.com)?)$/i.test(scopedMerchant)) return 'bestbuy.com';
+  if (/^instacart(?:\.com)?$/i.test(scopedMerchant)) return 'instacart.com';
+  if (/^kayak(?:\.com)?$/i.test(scopedMerchant)) return 'kayak.com';
+  if (/^expedia(?:\.com)?$/i.test(scopedMerchant)) return 'expedia.com';
+  if (/^booking(?:\.com)?$/i.test(scopedMerchant)) return 'booking.com';
+  if (/^hotels(?:\.com)?$/i.test(scopedMerchant)) return 'hotels.com';
   const urlMatch = text.match(/https?:\/\/(?:www\.)?([^/\s)]+)/i);
   if (urlMatch) return urlMatch[1].replace(/^www\./i, '');
   const domainMatch = lower.match(/\b([a-z0-9-]+\.(?:com|net|org|io|ai))\b/);
@@ -131,6 +142,7 @@ function inferBrowserMerchantLabel(prompt = '') {
   if (/\b(amazon|bezos|everything store)\b/.test(lower)) return 'amazon.com';
   if (/\b(target|tarjay|bullseye)\b/.test(lower)) return 'target.com';
   if (/\b(walmart|wally world)\b/.test(lower)) return 'walmart.com';
+  if (/\bbed bath (?:&|and) beyond\b|\bbedbathandbeyond\b/.test(lower)) return 'bedbathandbeyond.com';
   if (/\bbest buy\b|\bbestbuy\b/.test(lower)) return 'bestbuy.com';
   if (/\binstacart\b/.test(lower)) return 'instacart.com';
   if (/\bkayak\b/.test(lower)) return 'kayak.com';
@@ -138,6 +150,21 @@ function inferBrowserMerchantLabel(prompt = '') {
   if (/\bbooking\.com\b|\bbooking\b/.test(lower)) return 'booking.com';
   if (/\bhotels\.com\b|\bhotels\b/.test(lower)) return 'hotels.com';
   return '';
+}
+
+function inferUnresolvedBrowserMerchantPhrase(prompt = '') {
+  const text = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const match = text.match(/\b(?:from|via|use)\s+((?:the\s+)?[a-z0-9][a-z0-9&'. -]{1,60}?)(?=\s*(?:[,!?]|\.\s|\s+(?:for|under|with|max|maximum|budget|up to|less than)\b|$))/i)
+    || text.match(/\b(?:on|at)\s+((?:the\s+)?[a-z0-9][a-z0-9&'. -]{0,50}(?:shop|store|market|mart|retailer|website|site))(?=\s*(?:[,!?]|\.\s|\s+(?:for|under|with|max|maximum|budget|up to|less than)\b|$))/i);
+  const candidate = String(match?.[1] || '').trim().replace(/[.,;:]+$/, '');
+  if (!candidate || /^(?:sale|a website|a site|a store|the website|the site|the store)$/i.test(candidate)) return '';
+  return candidate;
+}
+
+function hasExplicitAmazonExclusion(prompt = '') {
+  const text = String(prompt || '');
+  return /\b(?:not|never|avoid|except|excluding)\s+(?:from\s+)?(?:amazon|amazon\.com|bezos|the everything store)\b/i.test(text)
+    || /\b(?:do not|don't)\b[^.!?]{0,40}\b(?:amazon|amazon\.com)\b/i.test(text);
 }
 
 function inferBrowserBudgetLabel(prompt = '') {
@@ -187,11 +214,11 @@ function normalizeBrowserTargetUrlCandidate(value = '', merchant = '') {
 function cleanBrowserProductCandidate(value = '') {
   const withoutPolitePhrases = String(value || '')
     .replace(/^\s*(?:yes|yeah|yep|correct|right|confirmed|confirming|ok|okay)[,.\s-]+/i, ' ')
-    .replace(/\b(?:please|for me|online|from amazon|on amazon|at amazon|from target|from walmart|on target|on walmart|from kayak|on kayak|at kayak|from expedia|on expedia|at expedia|from booking|on booking|at booking)\b/gi, ' ')
+    .replace(/\b(?:please|for me|online|from amazon|on amazon|at amazon|from target|from walmart|on target|on walmart|from bed bath (?:&|and) beyond|on bed bath (?:&|and) beyond|at bed bath (?:&|and) beyond|from kayak|on kayak|at kayak|from expedia|on expedia|at expedia|from booking|on booking|at booking)\b/gi, ' ')
     .replace(/\b(?:i\s+want\s+to|i\s+would\s+like\s+to|i'?d\s+like\s+to|can\s+you|could\s+you|help\s+me)\b/gi, ' ')
     .replace(/^\s*(?:buy|purchase|order|get me|shop for|add to cart|find)\s+/i, ' ');
   return stripUsdBudgetPhrases(withoutPolitePhrases)
-    .replace(/\b(?:from|on|at|via|use)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/gi, ' ')
+    .replace(/\b(?:from|on|at|via|use)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|bed bath (?:&|and) beyond|bedbathandbeyond(?:\.com)?|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/gi, ' ')
     .replace(/\b(?:buy|purchase|order|get me|shop for|add to cart|find|max|maximum|budget|spend|cap|limit)\b\s*$/gi, ' ')
     .replace(/[?.!,;:]+$/g, '')
     .replace(/\s+/g, ' ')
@@ -286,7 +313,7 @@ function inferBrowserProductLabel(prompt = '') {
   const direct = text.match(/\b(?:buy|purchase|order|get me|shop for|add to cart|find)\s+(.+?)(?:\s+(?:from|on|at|via|under|budget|max|maximum|up to|less than|spend(?:ing)?|for)\b|$)/i);
   const candidate = cleanBrowserProductCandidate(direct?.[1] || '');
   if (isUsableBrowserProductCandidate(candidate)) return candidate;
-  const merchantPhrase = text.match(/\b(?:from|on|at|via)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/i);
+  const merchantPhrase = text.match(/\b(?:from|on|at|via)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|bed bath (?:&|and) beyond|bedbathandbeyond(?:\.com)?|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/i);
   if (merchantPhrase && merchantPhrase.index > 0) {
     const beforeMerchant = cleanBrowserProductCandidate(text.slice(0, merchantPhrase.index));
     if (isUsableBrowserProductCandidate(beforeMerchant)) return beforeMerchant;
@@ -298,23 +325,32 @@ function inferBrowserProductLabel(prompt = '') {
 
 function inferBrowserMissionDraft(prompt = '') {
   const shoppingItems = safeBrowserShoppingItems(prompt);
-  const merchant = inferBrowserMerchantLabel(prompt);
+  const recognizedMerchant = inferBrowserMerchantLabel(prompt);
+  const unresolvedMerchantMention = recognizedMerchant ? '' : inferUnresolvedBrowserMerchantPhrase(prompt);
+  const requestedMerchant = recognizedMerchant || unresolvedMerchantMention;
+  const amazonExcluded = hasExplicitAmazonExclusion(prompt);
   const product = inferBrowserProductLabel(prompt);
   const budget = inferBrowserBudgetLabel(prompt);
-  // Magic City currently has one deeply integrated retail lane. A concrete
-  // purchase with no named merchant should enter that Amazon lane directly,
-  // rather than falling through to generic chat or a SantaClawz recommendation.
-  const defaultToAmazon = !merchant
-    && !looksLikeCodeAuditRequest(prompt)
+  // Launch shopping is Amazon-only. Keep a named retailer as disclosure
+  // metadata, but build executable authority from the Amazon mission.
+  const useAmazonLaunchLane = !looksLikeCodeAuditRequest(prompt)
     && !looksLikeTravelBrowserMission(prompt)
     && hasExplicitBrowserPurchaseIntent(prompt)
     && Boolean(budget)
     && Boolean(product || shoppingItems.length > 1);
-  const resolvedMerchant = merchant || (defaultToAmazon ? 'amazon.com' : '');
-  const targetUrl = normalizeBrowserTargetUrlCandidate(prompt, resolvedMerchant);
+  const resolvedMerchant = useAmazonLaunchLane ? 'amazon.com' : requestedMerchant;
+  const targetUrl = useAmazonLaunchLane
+    ? 'https://www.amazon.com'
+    : normalizeBrowserTargetUrlCandidate(prompt, resolvedMerchant);
   return {
     merchant: resolvedMerchant,
     targetUrl,
+    requestedMerchant,
+    unresolvedMerchantMention,
+    amazonLaunchPolicy: useAmazonLaunchLane ? 'amazon_only_launch' : '',
+    amazonLaunchDisclosure: useAmazonLaunchLane && (requestedMerchant !== 'amazon.com' || amazonExcluded)
+      ? (amazonExcluded ? 'amazon_conflict' : requestedMerchant ? 'retailer_redirect' : 'amazon_default')
+      : '',
     product,
     budget,
     budgetScope: inferBrowserBudgetScope(prompt),
@@ -390,9 +426,20 @@ function mergeProviderBrowserMission(prompt = '', providerMission = null) {
       ? providerProduct
       : deterministic.product;
   const providerBudget = normalizeBrowserBudgetCandidate(providerMission.budget || providerMission.maxSpend || '');
+  const requestedMerchant = deterministic.unresolvedMerchantMention
+    ? providerMerchant || deterministic.requestedMerchant
+    : deterministic.requestedMerchant;
+  const amazonLaunchDisclosure = deterministic.amazonLaunchDisclosure === 'amazon_conflict'
+    ? 'amazon_conflict'
+    : deterministic.merchant === 'amazon.com' && requestedMerchant !== 'amazon.com'
+      ? (requestedMerchant ? 'retailer_redirect' : deterministic.amazonLaunchDisclosure)
+    : deterministic.amazonLaunchDisclosure;
   return {
     merchant: deterministic.merchant || providerMerchant,
     targetUrl: deterministic.targetUrl || providerTargetUrl,
+    requestedMerchant,
+    amazonLaunchPolicy: deterministic.amazonLaunchPolicy,
+    amazonLaunchDisclosure,
     product: correctedProduct || providerProduct,
     budget: deterministic.budget || providerBudget,
     budgetScope: deterministic.budgetScope || providerMission.budgetScope || inferBrowserBudgetScope(prompt),
@@ -453,6 +500,47 @@ function buildBrowserMissionGoal(prompt = '', mission = {}) {
 
 function hasRunnableBrowserMission(mission = {}) {
   return Boolean(mission.targetUrl && mission.product && mission.budget);
+}
+
+function browserMerchantDisplayName(merchant = '') {
+  const normalized = String(merchant || '').trim().toLowerCase().replace(/^www\./, '');
+  if (normalized === 'bedbathandbeyond.com') return 'Bed Bath & Beyond';
+  if (normalized === 'walmart.com') return 'Walmart';
+  if (normalized === 'target.com') return 'Target';
+  if (normalized === 'bestbuy.com') return 'Best Buy';
+  if (normalized === 'amazon.com') return 'Amazon';
+  return String(merchant || '').trim().replace(/^www\./i, '');
+}
+
+function applyAmazonLaunchDisclosure(plan, mission = {}) {
+  if (!plan || mission.amazonLaunchPolicy !== 'amazon_only_launch') return plan;
+  const routedPlan = {
+    ...plan,
+    localContext: {
+      ...(plan.localContext || {}),
+      requestedMerchant: mission.requestedMerchant || null,
+      merchantRouting: {
+        policy: 'amazon_only_launch',
+        disclosure: mission.amazonLaunchDisclosure || null,
+        requestedMerchant: mission.requestedMerchant || null,
+        executionMerchant: 'amazon.com'
+      }
+    }
+  };
+  if (!mission.amazonLaunchDisclosure) return routedPlan;
+  const product = cleanBrowserProductCandidate(mission.product || '') || 'your requested item';
+  const budgetPhrase = mission.budget ? ` within your ${mission.budget} budget` : '';
+  const requestedMerchant = browserMerchantDisplayName(mission.requestedMerchant);
+  const explanation = mission.amazonLaunchDisclosure === 'amazon_conflict'
+    ? `Your request${requestedMerchant && requestedMerchant !== 'Amazon' ? ` specified ${requestedMerchant} and` : ''} excluded Amazon. Magic Internet Agent currently supports purchases only through Amazon, so running this agent will instead search Amazon for ${product}${budgetPhrase}.`
+    : mission.amazonLaunchDisclosure === 'retailer_redirect'
+      ? `Magic Internet Agent currently supports purchases through Amazon. Your request named ${requestedMerchant}, so this run will instead search Amazon for ${product}${budgetPhrase}.`
+      : `Magic Internet Agent currently supports purchases through Amazon, so this run will search Amazon for ${product}${budgetPhrase}.`;
+  return {
+    ...routedPlan,
+    actionLabel: mission.amazonLaunchDisclosure === 'amazon_default' ? 'Amazon checkout available' : 'Shop on Amazon instead?',
+    preview: `${explanation}\n\n${plan.preview || ''}`.trim(),
+  };
 }
 
 function shouldAttemptBrowserSchemaExtraction({ agentId = '', prompt = '', privacyMode = 'private' } = {}) {
@@ -557,12 +645,13 @@ function buildBrowserWorkerPlanFromMission({ prompt, profileSummary = {}, agent,
         }
       : null
   };
-  return connector.plan({
-    prompt,
+  const plan = connector.plan({
+    prompt: mission.amazonLaunchDisclosure ? browserMission.goal : prompt,
     profileSummary,
     agent,
     browserMission
   });
+  return applyAmazonLaunchDisclosure(plan, mission);
 }
 
 function buildFoodClarification(prompt, profileSummary = {}) {

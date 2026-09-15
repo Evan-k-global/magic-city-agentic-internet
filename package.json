@@ -67,6 +67,7 @@
     "test:santaclawz-hire-autostart-ui": "node scripts/test-santaclawz-hire-autostart-ui.mjs",
     "test:santaclawz-output-ui": "node scripts/test-santaclawz-output-ui.mjs",
     "test:settings-credit-funding-ui": "node scripts/test-settings-credit-funding-ui.mjs",
+    "test:retail-beta-settings-ui": "node scripts/test-retail-beta-settings-ui.mjs",
     "test:santaclawz-status-refresh": "node scripts/test-santaclawz-status-refresh.mjs",
     "test:santaclawz-credit-reservation-lifecycle": "node scripts/test-santaclawz-credit-reservation-lifecycle.mjs",
     "test:credit-settlement-refund": "node scripts/test-credit-settlement-refund.mjs",

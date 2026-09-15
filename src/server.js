@@ -2091,6 +2091,22 @@ function hydrateBrowserExecutionSelections(session = null, selections = {}) {
   });
 }
 
+function consumerMagicInternetAmazonViolation(session = null, selections = {}, executionAgentId = '') {
+  if (String(session?.handoffData?.kind || '').trim() !== 'browser') return null;
+  if (String(session?.connectorId || '').trim() !== 'browser-worker-demo-v1') return null;
+  if (!isMagicInternetAgentPluginId(executionAgentId || session?.preferredExecutionAgentId)) return null;
+  const targetDomain = normalizeMissionDomain(selections.targetUrl || selections.inputUrl || '');
+  const allowedDomains = normalizeMissionDomainList(selections.allowedMerchants || []);
+  const invalidDomain = [targetDomain, ...allowedDomains].find((domain) => domain && domain !== 'amazon.com');
+  if (!invalidDomain) return null;
+  return {
+    error: 'magic_internet_amazon_only',
+    message: 'Magic Internet Agent currently supports Amazon checkout only. Return to the pre-run prompt to approve the Amazon target.',
+    targetDomain: invalidDomain,
+    allowedDomain: 'amazon.com'
+  };
+}
+
 function normalizeMissionActions(actions = []) {
   const source = Array.isArray(actions) ? actions : String(actions || '').split(',');
   const allowed = new Set([
@@ -18951,6 +18967,8 @@ const server = http.createServer(async (req, res) => {
         : session.localPrivateSummary ?? null;
       const rawPreferredExecutionAgentId = String(body.preferredExecutionAgentId || body.executionAgentId || '').trim();
       const preferredExecutionAgentId = resolveBrowserExecutionAgentIdForSelections(session, selections, rawPreferredExecutionAgentId);
+      const amazonOnlyViolation = consumerMagicInternetAmazonViolation(session, selections, preferredExecutionAgentId);
+      if (amazonOnlyViolation) return sendJson(res, 409, amazonOnlyViolation);
       const selectedExecutionAgent = preferredExecutionAgentId
         ? await pickPreferredExecutionAgent(session, preferredExecutionAgentId)
         : null;
@@ -19395,6 +19413,8 @@ const server = http.createServer(async (req, res) => {
           ? effectiveExecutionAgentId
           : null
       ) || null);
+      const amazonOnlyViolation = consumerMagicInternetAmazonViolation(session, selections, selectedExecutionAgentIdForRun);
+      if (amazonOnlyViolation) return sendJson(res, 409, amazonOnlyViolation);
       const santaClawzExecutionAgent = isSantaClawzExecutionAgent(preferredExecutionAgent);
       const paidSantaClawzExecutionAgent = isPaidSantaClawzExecutionAgent(preferredExecutionAgent);
       const demoSantaClawzExecutionAgent = santaClawzExecutionAgent && !paidSantaClawzExecutionAgent;

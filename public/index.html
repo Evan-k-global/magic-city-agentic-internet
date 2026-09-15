@@ -1056,10 +1056,26 @@
     }
 
 	    .action-card {
-	      margin-top: 10px;
-	      display: grid;
-	      gap: 8px;
-	    }
+      margin-top: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .action-setup-warning {
+      display: grid;
+      gap: 3px;
+      padding: 9px 10px;
+      border-left: 3px solid rgba(255, 214, 112, 0.82);
+      border-radius: 8px;
+      background: rgba(255, 214, 112, 0.08);
+      color: #fff4d1;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .action-setup-warning span {
+      color: rgba(240, 244, 251, 0.78);
+    }
 
 	    .msg-body:empty + .action-card {
 	      margin-top: 0;
@@ -1099,11 +1115,25 @@
       cursor: pointer;
     }
 
-	    .action-btn.approve {
-	      border: 0;
-	      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-	      color: #06232e;
-	    }
+    .action-btn.approve {
+      border: 0;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #06232e;
+    }
+
+    .action-required-surface {
+      display: inline-flex;
+      align-items: center;
+      width: auto;
+      min-height: 34px;
+      padding: 7px 10px;
+      border: 1px solid rgba(255, 214, 112, 0.34);
+      border-radius: 999px;
+      background: rgba(255, 214, 112, 0.08);
+      color: #fff0bc;
+      font-size: 12px;
+      font-weight: 700;
+    }
 
 	    .agent-completion-card {
 	      margin-top: 10px;
@@ -3559,6 +3589,23 @@
 	      margin-top: 12px;
 	    }
 
+    .sidebar .settings-doc-link {
+      width: fit-content;
+      max-width: 100%;
+      color: rgba(183, 239, 250, 0.96);
+      font-size: 13px;
+      font-weight: 750;
+      line-height: 1.35;
+      text-decoration: none;
+    }
+
+    .sidebar .settings-doc-link:hover,
+    .sidebar .settings-doc-link:focus-visible {
+      color: #effdff;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+
     .native-runner-card {
       display: grid;
       gap: 10px;
@@ -4662,19 +4709,16 @@
       pointer-events: none;
     }
 
-    #sendBtn::after {
-      content: "↑";
-      position: absolute;
-      inset: 0;
+    #sendBtn .send-icon {
+      position: relative;
       z-index: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #06131b;
-      font-size: 27px;
-      font-weight: 900;
-      line-height: 1;
-      transform: translate(0, 1.35px);
+      width: 27px;
+      height: 27px;
+      fill: none;
+      stroke: #06131b;
+      stroke-width: 2.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
       text-shadow: 0 1px 0 rgba(255, 255, 255, 0.22);
       pointer-events: none;
     }
@@ -5916,6 +5960,14 @@
 	            </div>
 	          </details>
 
+	      <div class="agent-deploy-card" id="settingsRetailBetaCard">
+	        <div class="agent-summary-title">Retail beta</div>
+	        <div class="settings-note">Magic City's hosted shopping agent currently completes purchases through Amazon. Developers can self-host Magic City, integrate custom browser helpers and frontends for their own sites and workflows, and add bounded local or cloud model intelligence while preserving the mission authorization, checkpoint, and receipt protocol.</div>
+	        <div class="settings-stack" style="margin-top:10px">
+	          <a class="settings-doc-link" href="https://github.com/zeko-labs/magic-city-agentic-internet/blob/main/docs/partner-white-label-quickstart.md" target="_blank" rel="noopener noreferrer">Developer integration guide</a>
+	        </div>
+	      </div>
+
 	    </aside>
 
     <main class="main">
@@ -6017,7 +6069,12 @@
           </div>
           <div class="composer-input-shell">
             <textarea id="chatPrompt" rows="1" placeholder="Ask for agent work, private inference, or a routed workflow."></textarea>
-            <button class="primary" id="sendBtn" aria-label="Submit intent">&#8593;</button>
+            <button class="primary" id="sendBtn" aria-label="Submit intent">
+              <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M12 19V5"></path>
+                <path d="M5 12l7-7 7 7"></path>
+              </svg>
+            </button>
           </div>
         </section>
         </div>
@@ -13939,6 +13996,12 @@
 	        || (connectorKind === 'browser' && label.includes('magic internet'));
 	    }
 
+      function isMobileRunnerUnsupported() {
+        const userAgent = String(navigator.userAgent || '');
+        return /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent)
+          || (/Macintosh/i.test(userAgent) && Number(navigator.maxTouchPoints || 0) > 1);
+      }
+
 	    function shouldAutoRunApprovedAction(data = {}) {
 	      if (isMagicInternetActionRun(data.actionRun || {})) return true;
 	      const session = data.connectorSession || {};
@@ -13948,6 +14011,8 @@
 
 	    function attachActionCard(target, payload) {
 	      const actionRun = payload.actionRun || {};
+	      const magicInternetAction = isMagicInternetActionRun(actionRun);
+	      const mobileRunnerUnsupported = magicInternetAction && isMobileRunnerUnsupported();
 	      target.el.classList.add('action-pending');
 	      let card = target.el.querySelector('.action-card');
 	      if (!card) {
@@ -13957,14 +14022,24 @@
 	      }
 		      card.dataset.actionRunId = actionRun.id;
 		      card.dataset.actionRunLabel = getActionAgentLabel(actionRun);
-		      card.dataset.actionMagicInternet = isMagicInternetActionRun(actionRun) ? 'true' : 'false';
+		      card.dataset.actionMagicInternet = magicInternetAction ? 'true' : 'false';
+		      card.dataset.actionMobileRunnerUnsupported = mobileRunnerUnsupported ? 'true' : 'false';
+	      if (mobileRunnerUnsupported) {
+	        setAssistantBodyContent(
+	          target.body,
+	          'Account Setup Step Needed\n\nTo continue: Open Magic City in desktop Chrome, install and pair the Magic City Runner extension, then run this task there.'
+	        );
+	      }
 		      card.innerHTML = `
 	        <div class="action-label">${escapeHtml(actionRun.actionLabel || 'Ready when you are')}</div>
 	        <div class="action-preview">${escapeHtml(actionRun.preview || actionRun.summary || '')}</div>
 	        ${(actionRun.connectorSpec?.helperAgents || []).length ? `<div class="action-tools">Helper agents: ${escapeHtml(actionRun.connectorSpec.helperAgents.join(', '))}</div>` : ''}
 	        ${(actionRun.privacyNotes || []).length ? `<div class="action-tools">${escapeHtml(summarizeActionPrivacy(actionRun.privacyNotes))}</div>` : ''}
+	        ${mobileRunnerUnsupported ? '<div class="action-setup-warning" role="alert"><strong>Desktop Chrome required</strong><span>The Magic Internet Agent uses the Magic City Runner extension, which is not available in this mobile browser.</span></div>' : ''}
 	        <div class="action-buttons">
-	          <button class="action-btn approve" data-action-approve="${escapeHtml(actionRun.id)}">${escapeHtml(actionRun.approveLabel || 'Approve')}</button>
+	          ${mobileRunnerUnsupported
+	            ? '<span class="action-required-surface">Continue on desktop Chrome</span>'
+	            : `<button class="action-btn approve" data-action-approve="${escapeHtml(actionRun.id)}">${escapeHtml(actionRun.approveLabel || 'Approve')}</button>`}
 	          <button class="action-btn reject" data-action-reject="${escapeHtml(actionRun.id)}">${escapeHtml(actionRun.rejectLabel || 'Reject')}</button>
 	        </div>
 	      `;
@@ -21579,6 +21654,23 @@
       return ['queued', 'claimed', 'executing', 'fulfilled', 'failed'].includes(String(data.connectorSession?.status || ''));
     }
 
+    function describeMagicInternetSetupError(error) {
+      const raw = [error?.message, error?.data?.error, error?.data?.message]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      const requiredAction = /auth_required|sign[ -]?in|unauthorized/.test(raw)
+        ? 'Log in to Magic City, then run the agent again.'
+        : /local_checkout_profile|local data vault|shipping address|device lock|checkout details/.test(raw)
+          ? 'Open Local Data Vault, enter your shipping address and payment-card cue, then run the agent again.'
+          : /insufficient_credits|credit balance|credits_required/.test(raw)
+            ? 'Claim your daily free credits, or add credits if you already claimed them, then run the agent again.'
+            : /native_runner|extension|pairing|runner_not_ready/.test(raw)
+              ? 'Install and pair the Magic City Runner Chrome extension, then run the agent again.'
+              : 'Complete any missing account setup steps below, then run the agent again.';
+      return `Account Setup Step Needed\n\nTo continue: ${requiredAction}\n\nCheck these steps:\n1. Log in to Magic City.\n2. Enter your Local Data Vault information.\n3. Claim your daily free credits.\n4. Install and pair the Magic City Runner Chrome extension.`;
+    }
+
     async function approveActionWithRecovery(actionRunId) {
       const path = `/actions/${encodeURIComponent(actionRunId)}/approve`;
       const request = () => api(path, { method: 'POST', body: JSON.stringify({}) });
@@ -21628,12 +21720,12 @@
       const buttons = [...card.querySelectorAll('button')];
       const buttonLabels = new Map(buttons.map((button) => [button, button.textContent]));
       const triggerButton = event.target.closest('button');
+      const magicInternetAction = card.dataset.actionMagicInternet === 'true';
       buttons.forEach((button) => { button.disabled = true; });
 
       try {
 		        if (approveId) {
 		          const actionLabel = card.dataset.actionRunLabel || 'agent';
-		          const magicInternetAction = card.dataset.actionMagicInternet === 'true';
 		          if (!magicInternetAction) {
 		            setAssistantBodyContent(messageEl.querySelector('.msg-body'), `Opening ${actionLabel}…`);
 		            setActionCardOpening(card, actionLabel, 'Opening');
@@ -21687,7 +21779,9 @@
 	          messageEl.querySelector('.msg-body'),
 	          error?.actionApprovalRecoverable
 	            ? 'Connection interrupted while confirming approval. Check this same approval again; Magic City will not create a new task.'
-	            : `Error: ${error.message}`
+	            : approveId && magicInternetAction
+	              ? describeMagicInternetSetupError(error)
+	              : `Error: ${error.message}`
 	        );
         buttons.forEach((button) => {
           button.disabled = false;
