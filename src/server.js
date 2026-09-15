@@ -140,6 +140,7 @@ import {
   createConnectorSession,
   getConnectorSession,
   updateConnectorSession,
+  updateConnectorSessionEphemeral,
   listConnectorSessions,
   createAgentSdkMission,
   getAgentSdkMission,
@@ -20974,7 +20975,7 @@ const server = http.createServer(async (req, res) => {
             reason: 'The existing product-match consultation has no completed result; Magic City will not repeat it.'
           }));
         }
-        updateConnectorSession(sessionId, {
+        updateConnectorSessionEphemeral(sessionId, {
           amazonSelectionIntelligenceAttempts: [
             ...attempts,
             {
@@ -21040,8 +21041,8 @@ const server = http.createServer(async (req, res) => {
         .map((attempt) => attempt.requestId === requestId
           ? { ...attempt, status: 'completed', completedAt: new Date().toISOString(), response }
           : attempt);
-      updateConnectorSession(sessionId, { amazonSelectionIntelligenceAttempts: latestAttempts });
       await completeAmazonSelectionIntelligenceAttempt(requestId, response);
+      updateConnectorSessionEphemeral(sessionId, { amazonSelectionIntelligenceAttempts: latestAttempts });
       if (pluginAuth.type === 'native_runner') {
         recordNativeRunnerActivity(pluginAuth.nativeRunnerDevice, {
           action: 'rank_public_candidates',

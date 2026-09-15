@@ -1289,6 +1289,17 @@ export function updateConnectorSession(id, patch) {
   return state.connectorSessions[idx];
 }
 
+export function updateConnectorSessionEphemeral(id, patch) {
+  const idx = state.connectorSessions.findIndex((row) => row.id === id);
+  if (idx < 0) return null;
+  state.connectorSessions[idx] = {
+    ...state.connectorSessions[idx],
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  return state.connectorSessions[idx];
+}
+
 export function listConnectorSessions(limit = 50) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
   return state.connectorSessions.slice(-safeLimit).reverse();
