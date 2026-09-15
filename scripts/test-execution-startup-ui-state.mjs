@@ -26,8 +26,9 @@ const context = {
   executionLocalRunnerProgress: new Map(),
   executionSessionCache: new Map(),
   executionPendingSessions: new Set(),
+  executionUiStartSessions: new Set(),
+  executionRunHandlers: new Map(),
   executionCollapsedSessions: new Set(),
-  executionMissionTabFocusIntents: new Map(),
   activeExecutionSessionId: null,
   renderExecutionDock: () => {
     executionRenderCount += 1;
@@ -47,10 +48,14 @@ vm.createContext(context);
 vm.runInContext([
   extractFunctionSource('executionLocalErrorApplies'),
   extractFunctionSource('clearExecutionStatusError'),
+  extractFunctionSource('markExecutionStartButtonStarting'),
+  extractFunctionSource('getExecutionRunButtonSessionId'),
+  extractFunctionSource('setExecutionRunControlsStarting'),
+  extractFunctionSource('resetExecutionRunControls'),
+  `async ${extractFunctionSource('startExecutionSessionFromControl')}`,
   extractFunctionSource('reconcileExecutionWakeError'),
   extractFunctionSource('runnerProgressLabel'),
   extractFunctionSource('rememberExecutionRunnerProgress'),
-  extractFunctionSource('requestNativeRunnerMissionTabFocus'),
   extractFunctionSource('getExecutionStatusModel'),
   extractFunctionSource('describeExecutionRunState'),
   extractFunctionSource('openExecutionPanel')
@@ -81,29 +86,105 @@ assert.equal(context.activeExecutionSessionId, sessionId);
 assert.equal(context.executionCollapsedSessions.has(sessionId), false);
 assert.equal(executionRenderCount, 1);
 
-let focusMessages = [];
-let focusAttempts = 0;
-context.setTimeout = (callback) => {
-  void callback();
-  return 1;
+const makeRunButton = () => {
+  const classes = new Set();
+  const attributes = new Map();
+  return {
+    disabled: false,
+    textContent: 'Run agent',
+    dataset: { executionRunSession: sessionId },
+    classList: {
+      add(value) { classes.add(value); },
+      remove(value) { classes.delete(value); }
+    },
+    setAttribute(name, value) { attributes.set(name, value); },
+    removeAttribute(name) { attributes.delete(name); },
+    classes,
+    attributes
+  };
 };
-context.sendNativeRunnerExtensionMessage = async (message) => {
-  focusMessages.push(message);
-  focusAttempts += 1;
-  return focusAttempts === 1
-    ? { ok: false, reason: 'mission_tab_not_found' }
-    : { ok: true, result: { focused: true } };
+const topRunButton = makeRunButton();
+const lowerRunButton = makeRunButton();
+let activeRunButtons = [topRunButton, lowerRunButton];
+context.getExecutionSheetScrollElement = () => ({
+  querySelectorAll: () => activeRunButtons
+});
+context.renderExecutionSheet = async () => {};
+context.executionSessionCache.set(sessionId, queuedSession);
+let manualStartCount = 0;
+context.executionRunHandlers.set(sessionId, async () => {
+  manualStartCount += 1;
+});
+assert.equal(context.getExecutionRunButtonSessionId(topRunButton), sessionId);
+assert.equal(await context.startExecutionSessionFromControl(sessionId, topRunButton), true);
+assert.equal(manualStartCount, 1, 'one manual click must invoke exactly one session-bound start');
+assert.equal(topRunButton.disabled, true);
+assert.equal(lowerRunButton.disabled, true, 'both visible Run controls must enter the same busy state');
+assert.equal(topRunButton.textContent, 'Connecting...');
+assert.equal(lowerRunButton.textContent, 'Connecting...');
+
+const retryTopRunButton = makeRunButton();
+const retryLowerRunButton = makeRunButton();
+activeRunButtons = [retryTopRunButton, retryLowerRunButton];
+context.executionRunHandlers.delete(sessionId);
+let handlerLoadCount = 0;
+let retryStartCount = 0;
+let loadingFailureMessage = '';
+context.setExecutionStatusError = (_session, error) => {
+  loadingFailureMessage = error.message;
 };
-assert.equal(context.requestNativeRunnerMissionTabFocus(sessionId), true);
-await new Promise((resolve) => setImmediate(resolve));
-await new Promise((resolve) => setImmediate(resolve));
-assert.equal(focusMessages.length, 2, 'website focus retries until the mission tab exists');
-assert.deepEqual(
-  JSON.parse(JSON.stringify(focusMessages[1])),
-  { type: 'FOCUS_MISSION_TAB', sessionId },
-  'website focus remains bound to the exact mission'
-);
-assert.equal(context.executionMissionTabFocusIntents.has(sessionId), false, 'successful focus stops retries');
+context.renderExecutionSheet = async () => {
+  handlerLoadCount += 1;
+  if (handlerLoadCount === 1) throw new Error('simulated widget load failure');
+  context.executionRunHandlers.set(sessionId, async () => {
+    retryStartCount += 1;
+  });
+};
+assert.equal(await context.startExecutionSessionFromControl(sessionId, retryTopRunButton), false);
+assert.equal(retryStartCount, 0, 'a failed handler load must never replay execution automatically');
+assert.equal(retryTopRunButton.disabled, false);
+assert.equal(retryLowerRunButton.disabled, false);
+assert.equal(retryTopRunButton.textContent, 'Run agent');
+assert.equal(retryLowerRunButton.textContent, 'Run agent');
+assert.match(loadingFailureMessage, /inputs are still saved.*Run agent to retry/i);
+assert.equal(await context.startExecutionSessionFromControl(sessionId, retryLowerRunButton), true);
+assert.equal(retryStartCount, 1, 'one explicit retry must start exactly once');
+
+const dockListeners = [];
+let delegatedSessionId = '';
+const delegatedButton = { disabled: false };
+const dock = {
+  dataset: {},
+  innerHTML: '',
+  addEventListener(type, handler) {
+    if (type === 'click') dockListeners.push(handler);
+  },
+  contains(candidate) { return candidate === delegatedButton; }
+};
+const dockContext = {
+  executionSessionOrder: [],
+  $: (id) => id === 'executionDock'
+    ? dock
+    : id === 'executionSheet'
+      ? { classList: { remove() {} } }
+      : null,
+  getExecutionRunButtonSessionId: () => sessionId,
+  startExecutionSessionFromControl: (nextSessionId) => {
+    delegatedSessionId = nextSessionId;
+  }
+};
+vm.createContext(dockContext);
+vm.runInContext(extractFunctionSource('renderExecutionDock'), dockContext);
+dockContext.renderExecutionDock();
+dockContext.renderExecutionDock();
+assert.equal(dockListeners.length, 1, 'dock redraws must retain one persistent Run listener');
+let defaultPrevented = false;
+dockListeners[0]({
+  target: { closest: () => delegatedButton },
+  preventDefault() { defaultPrevented = true; }
+});
+assert.equal(delegatedSessionId, sessionId, 'the persistent listener must start the button\'s exact session');
+assert.equal(defaultPrevented, true);
 
 context.executionPendingSessions.add(sessionId);
 context.executionLocalErrors.set(sessionId, {
@@ -192,8 +273,18 @@ assert.match(
 );
 assert.match(
   html,
-  /closest\?\.\('\[data-execution-run-agent="true"\]'\)[\s\S]*startExecutionFromSheet\(\)/,
-  'the Runner startup retry must invoke the execution start handler'
+  /dock\.dataset\.executionRunBound[\s\S]*closest\?\.\('\[data-execution-run-agent="true"\]'\)[\s\S]*startExecutionSessionFromControl\(sessionId, button\)/,
+  'redrawn Run controls must invoke the persistent session-bound start handler'
+);
+assert.match(
+  html,
+  /executionRunHandlers\.set\(session\.id, startExecutionFromSheet\)/,
+  'the persistent Run handler must resolve to the existing execution start path'
+);
+assert.match(
+  html,
+  /data-execution-run-agent="true" data-execution-run-session="\$\{escapeExecutionValue\(session\.id\)\}"/,
+  'manual and automatic Run controls must carry their exact session ID'
 );
 assert.match(
   html,
@@ -205,10 +296,11 @@ assert.match(
   /type: 'RUN_PENDING_SESSIONS',[\s\S]*extensionDispatchNonce/,
   'the website wake must pass the exact signed dispatch nonce for direct claim'
 );
-assert.match(
-  html,
-  /requestNativeRunnerMissionTabFocus\(sessionId\);[\s\S]{0,180}extension_wake_pending/,
-  'tab focus must start alongside the Runner wake without gating it'
+const missionWakeSource = extractFunctionSource('requestNativeRunnerMissionWake');
+assert.doesNotMatch(
+  missionWakeSource,
+  /FOCUS_MISSION_TAB|requestNativeRunnerMissionTabFocus/,
+  'website-started missions must leave the Magic City tab in the foreground'
 );
 assert.match(
   html,

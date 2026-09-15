@@ -2671,6 +2671,9 @@
       border-radius: 12px;
       font-weight: 900;
       cursor: pointer;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
       transition: transform 90ms ease, box-shadow 120ms ease, filter 120ms ease, opacity 120ms ease;
     }
 
@@ -2682,10 +2685,10 @@
     }
 
     .execution-agent-start:active:not(:disabled) {
-      transform: translateY(2px);
+      transform: translateY(2px) scale(0.98);
       box-shadow:
-        0 4px 12px rgba(23, 215, 255, 0.18),
-        inset 0 2px 3px rgba(0, 47, 61, 0.18);
+        0 2px 8px rgba(23, 215, 255, 0.16),
+        inset 0 3px 5px rgba(0, 47, 61, 0.28);
     }
 
     .execution-agent-start.is-starting {
@@ -3592,18 +3595,20 @@
     .sidebar .settings-doc-link {
       width: fit-content;
       max-width: 100%;
-      color: rgba(183, 239, 250, 0.96);
+      color: rgba(255, 255, 255, 0.92);
       font-size: 13px;
-      font-weight: 750;
+      font-weight: 600;
       line-height: 1.35;
-      text-decoration: none;
+      text-decoration: underline;
+      text-decoration-color: rgba(255, 255, 255, 0.48);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
     }
 
     .sidebar .settings-doc-link:hover,
     .sidebar .settings-doc-link:focus-visible {
-      color: #effdff;
-      text-decoration: underline;
-      text-underline-offset: 3px;
+      color: #fff;
+      text-decoration-color: rgba(255, 255, 255, 0.9);
     }
 
     .native-runner-card {
@@ -6221,6 +6226,8 @@
     const PROFILE_VAULT_LOCKED_NOTE = 'Save local workflow info behind device lock. Browser autofill or wallet handles final card entry; Magic City asks before unlocking exact details.';
 	    const attemptedLiveFoodDiscovery = new Set();
 	    const executionPendingSessions = new Set();
+	    const executionUiStartSessions = new Set();
+	    const executionRunHandlers = new Map();
     const executionLocalErrors = new Map();
 	    const executionLocalRunnerProgress = new Map();
 	    const executionProtocolPollingSessions = new Set();
@@ -10873,41 +10880,6 @@
 	      if (sessionId) executionLocalRunnerProgress.delete(sessionId);
 	    }
 
-	    const executionMissionTabFocusIntents = new Map();
-
-	    function requestNativeRunnerMissionTabFocus(sessionId = '') {
-	      const normalizedSessionId = String(sessionId || '').trim();
-	      if (!normalizedSessionId) return false;
-	      const existing = executionMissionTabFocusIntents.get(normalizedSessionId);
-	      if (existing?.inFlight || existing?.timer) return true;
-	      const intent = existing || {
-	        expiresAt: Date.now() + 45_000,
-	        inFlight: false,
-	        timer: null
-	      };
-	      executionMissionTabFocusIntents.set(normalizedSessionId, intent);
-	      const attempt = async () => {
-	        intent.timer = null;
-	        if (Date.now() >= intent.expiresAt) {
-	          executionMissionTabFocusIntents.delete(normalizedSessionId);
-	          return;
-	        }
-	        intent.inFlight = true;
-	        const response = await sendNativeRunnerExtensionMessage({
-	          type: 'FOCUS_MISSION_TAB',
-	          sessionId: normalizedSessionId
-	        }).catch(() => null);
-	        intent.inFlight = false;
-	        if (response?.ok && response.result?.focused === true) {
-	          executionMissionTabFocusIntents.delete(normalizedSessionId);
-	          return;
-	        }
-	        intent.timer = setTimeout(attempt, 750);
-	      };
-	      void attempt();
-	      return true;
-	    }
-
 	    function applyExecutionRunnerProgress(session, panel = null) {
 	      const status = String(session?.status || '').toLowerCase();
 	      const progress = executionLocalRunnerProgress.get(session?.id) || null;
@@ -11010,9 +10982,6 @@
 	        clientRunStartedAt: String(clientRunStartedAt || '').trim() || new Date().toISOString(),
 	        ...(dispatchNonce ? { extensionDispatchNonce: dispatchNonce } : {})
 	      });
-	      // Website-started missions should become visible without making tab
-	      // focus part of claim, execution, or checkout success.
-	      requestNativeRunnerMissionTabFocus(sessionId);
       const timeoutResult = { ok: true, pending: true, reason: 'extension_wake_pending' };
       const wake = await Promise.race([
         wakeRequest,
@@ -14636,7 +14605,12 @@
         const amount = parseSmallBudgetWords(match?.[1] || '');
         if (amount != null) return `$${amount}`;
       }
-      const standalone = value.trim().match(/^\$?\s*([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:usd|dollars?|bucks?)?$/i);
+      const standalone = value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .reverse()
+        .map((line) => line.match(/^\$?\s*([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:usd|dollars?|bucks?)?$/i))
+        .find(Boolean);
       if (standalone?.[1]) return `$${standalone[1].replace(/,/g, '')}`;
       return '';
     }
@@ -14800,7 +14774,7 @@
       if (travelTask) return travelTask;
       const direct = value.match(/\b(?:buy|purchase|order|get me|shop for|add to cart|find)\s+(.+?)(?:\s+(?:additional execution detail|from|on|at|via|under|budget|max|maximum|up to|less than|spend(?:ing)?|for)\b|$)/i);
       const candidate = cleanBrowserTaskText(direct?.[1] || '');
-      if (candidate && !/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|it|that|this|these|them|book|reserve|checkout)$/i.test(candidate)) return candidate;
+      if (candidate && !/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|it|that|this|these|those|them|one|ones|book|reserve|checkout)$/i.test(candidate)) return candidate;
       const merchantPhrase = value.match(/\b(?:from|on|at|via)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/i);
       if (merchantPhrase && merchantPhrase.index > 0) {
         const beforeMerchant = cleanBrowserTaskText(value.slice(0, merchantPhrase.index));
@@ -15075,10 +15049,40 @@
       return `${base}\n\nAdditional execution detail:\n${next}`;
     }
 
+    function resolveBrowserShoppingIntakePrompt(prompt = '', priorUserMessages = []) {
+      const detail = String(prompt || '').trim();
+      if (!detail || !hasBrowserPurchaseIntent(detail)) return detail;
+      const product = inferBrowserProductFromText(detail);
+      const productIsReference = /^(?:it|them|this|that|these|those|one|ones)$/i.test(product);
+      if ((product && !productIsReference) || extractBrowserShoppingItemsFromText(detail).length > 1) return detail;
+      if (!/\b(?:it|them|this|that|these|those|one|ones)\b/i.test(detail)) return detail;
+      const priorTurns = Array.isArray(priorUserMessages) ? priorUserMessages.slice(-4).reverse() : [];
+      for (const priorTurn of priorTurns) {
+        const prior = String(priorTurn || '').trim();
+        if (!prior || looksLikeCodeAuditExecutionRequest(prior)) continue;
+        if (!inferBrowserProductFromText(prior) && extractBrowserShoppingItemsFromText(prior).length < 2) continue;
+        return appendExecutionDetail(prior, detail);
+      }
+      return detail;
+    }
+
+    function recentUserMessagesForBrowserIntake(prompt = '', limit = 4) {
+      const rows = [...($('messages')?.children || [])]
+        .filter((element) => element.classList.contains('user'))
+        .map((element) => getMessageRawText(element).trim())
+        .filter(Boolean);
+      if (rows.at(-1) === String(prompt || '').trim()) rows.pop();
+      return rows.slice(-Math.max(1, Number(limit) || 4));
+    }
+
     function maybeStartMagicInternetAgentIntake(prompt = '') {
       const detail = String(prompt || '').trim();
       if (!detail || pendingSelectedAgentExecution || getSelectedAgentExecutionSession()) return false;
-      if (!hasPendingBrowserPurchaseContext(detail, '') || hasRunnableBrowserExecutionContext(detail, '')) return false;
+      const intakePrompt = resolveBrowserShoppingIntakePrompt(
+        detail,
+        recentUserMessagesForBrowserIntake(detail)
+      );
+      if (!hasPendingBrowserPurchaseContext(intakePrompt, '') || hasRunnableBrowserExecutionContext(intakePrompt, '')) return false;
       const browserAgent = buildHelperSavedAgent('browser') || {
         pluginId: HOSTED_BROWSER_WORKER_PLUGIN_ID,
         agentName: 'Magic Internet Agent'
@@ -15086,11 +15090,11 @@
       rememberSelectedAgentExecution({
         agent: browserAgent,
         capability: 'browser-worker-agent',
-        starterPrompt: detail,
+        starterPrompt: intakePrompt,
         context: {}
       });
       addAssistantResult(
-        buildBrowserMissingExecutionInfoMessage(detail, 'Magic Internet Agent'),
+        buildBrowserMissingExecutionInfoMessage(intakePrompt, 'Magic Internet Agent'),
         renderDetailLines([
           'Agent: Magic Internet Agent',
           'Route: gathering pre-run shopping details'
@@ -15332,11 +15336,11 @@
 	      executionCollapsedSessions.clear();
 	      executionDraftCache.clear();
 	      executionPendingSessions.clear();
+	      executionUiStartSessions.clear();
+	      executionRunHandlers.clear();
 	      executionProtocolPollingSessions.clear();
 	      executionPollingRequestsInFlight.clear();
 	      executionCancellingSessions.clear();
-	      executionMissionTabFocusIntents.forEach((intent) => clearTimeout(intent?.timer));
-	      executionMissionTabFocusIntents.clear();
 	      clearSelectedAgentExecution();
       if (executionPollHandle) {
         clearInterval(executionPollHandle);
@@ -15352,13 +15356,12 @@
 	      executionCollapsedSessions.delete(sessionId);
 	      executionDraftCache.delete(sessionId);
 	      executionPendingSessions.delete(sessionId);
+	      executionUiStartSessions.delete(sessionId);
+	      executionRunHandlers.delete(sessionId);
 	      executionProtocolPollingSessions.delete(sessionId);
 	      executionPollingRequestsInFlight.delete(sessionId);
 	      executionCancellingSessions.delete(sessionId);
 	      executionLocalErrors.delete(sessionId);
-	      const focusIntent = executionMissionTabFocusIntents.get(sessionId);
-	      if (focusIntent?.timer) clearTimeout(focusIntent.timer);
-	      executionMissionTabFocusIntents.delete(sessionId);
 	      clearSelectedAgentExecution(sessionId);
       if (activeExecutionSessionId === sessionId) {
         activeExecutionSessionId = executionSessionOrder[executionSessionOrder.length - 1] || null;
@@ -15440,11 +15443,76 @@
 
 		    function markExecutionStartButtonStarting(button, label = 'Starting') {
 		      if (!button) return false;
+		      if (button.dataset && !button.dataset.executionIdleLabel) {
+		        button.dataset.executionIdleLabel = String(button.textContent || 'Run agent').trim() || 'Run agent';
+		      }
 		      button.disabled = true;
 		      button.textContent = label;
 		      button.classList?.add('is-starting');
 		      button.setAttribute?.('aria-busy', 'true');
 		      return true;
+		    }
+
+		    function getExecutionRunButtonSessionId(button) {
+		      return String(
+		        button?.dataset?.executionRunSession
+		        || button?.closest?.('[data-session-panel]')?.dataset?.sessionPanel
+		        || ''
+		      ).trim();
+		    }
+
+		    function setExecutionRunControlsStarting(sessionId, label = 'Starting') {
+		      const root = getExecutionSheetScrollElement(sessionId);
+		      let changed = false;
+		      root?.querySelectorAll('[data-execution-run-agent="true"]').forEach((button) => {
+		        if (button.disabled) return;
+		        changed = markExecutionStartButtonStarting(button, label) || changed;
+		      });
+		      return changed;
+		    }
+
+		    function resetExecutionRunControls(sessionId) {
+		      const root = getExecutionSheetScrollElement(sessionId);
+		      root?.querySelectorAll('[data-execution-run-agent="true"]').forEach((button) => {
+		        button.disabled = false;
+		        if (button.dataset?.executionIdleLabel) button.textContent = button.dataset.executionIdleLabel;
+		        button.classList?.remove('is-starting');
+		        button.removeAttribute?.('aria-busy');
+		      });
+		    }
+
+		    async function startExecutionSessionFromControl(sessionId = '', sourceButton = null) {
+		      const normalizedSessionId = String(sessionId || '').trim();
+		      if (!normalizedSessionId || sourceButton?.disabled) return false;
+		      if (executionUiStartSessions.has(normalizedSessionId) || executionPendingSessions.has(normalizedSessionId)) return false;
+		      const session = executionSessionCache.get(normalizedSessionId);
+		      const label = session?.handoffData?.kind === 'browser' ? 'Connecting...' : 'Starting';
+		      executionUiStartSessions.add(normalizedSessionId);
+		      setExecutionRunControlsStarting(normalizedSessionId, label);
+		      try {
+		        let handler = executionRunHandlers.get(normalizedSessionId);
+		        if (!handler) {
+		          try {
+		            await renderExecutionSheet(normalizedSessionId, { focus: false });
+		            handler = executionRunHandlers.get(normalizedSessionId);
+		          } catch (error) {
+		            resetExecutionRunControls(normalizedSessionId);
+		            const retryError = new Error('Could not finish loading this run. Your inputs are still saved. Click Run agent to retry.');
+		            retryError.code = 'execution_ui_handler_load_failed';
+		            retryError.cause = error;
+		            if (session?.id) setExecutionStatusError(session, retryError);
+		            return false;
+		          }
+		        }
+		        if (!handler) {
+		          resetExecutionRunControls(normalizedSessionId);
+		          return false;
+		        }
+		        await handler();
+		        return true;
+		      } finally {
+		        executionUiStartSessions.delete(normalizedSessionId);
+		      }
 		    }
 
 		    function hasActiveSantaClawzDirectPayment(session) {
@@ -16209,6 +16277,17 @@
 		    function renderExecutionDock() {
 	      const dock = $('executionDock');
 	      if (!dock) return;
+	      if (dock.dataset.executionRunBound !== 'true') {
+	        dock.dataset.executionRunBound = 'true';
+	        dock.addEventListener('click', (event) => {
+	          const button = event.target?.closest?.('[data-execution-run-agent="true"]');
+	          if (!button || !dock.contains(button) || button.disabled) return;
+	          const sessionId = getExecutionRunButtonSessionId(button);
+	          if (!sessionId) return;
+	          event.preventDefault();
+	          void startExecutionSessionFromControl(sessionId, button);
+	        });
+	      }
 	      const sheet = $('executionSheet');
 	      if (!executionSessionOrder.length) {
 	        dock.innerHTML = '';
@@ -16305,12 +16384,12 @@
 	          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
 		          : browserNeedsFunds
 		            ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(browserFundingLabel)}</button>`
-	            : `<button class="execution-primary" id="executionAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
+	            : `<button class="execution-primary execution-agent-start" id="executionAgentBtn" data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
 	        const browserQuickButtonHtml = browserResumeButtonHtml || (browserNeedsAuth
 	          ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
 		          : browserNeedsFunds
 		            ? `<button class="execution-secondary" id="executionTopupQuickBtn" data-execution-topup="true" type="button">${escapeExecutionValue(browserFundingLabel)}</button>`
-	            : `<button class="execution-primary" id="executionQuickAgentBtn" data-execution-run-agent="true" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
+	            : `<button class="execution-primary execution-agent-start" id="executionQuickAgentBtn" data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}" type="button">${escapeExecutionValue(browserRetryLabel)}</button>`);
 	        const browserHandoffButtonHtml = isBrowserExecutionSheet && runState.actionLabel && browserActionUrl
 	          ? `<button class="execution-primary" type="button" data-native-runner-focus-tab="${escapeExecutionValue(session.id)}" data-fallback-url="${escapeExecutionValue(browserActionUrl)}">${escapeExecutionValue(runState.actionLabel)}</button>`
 	          : '';
@@ -16323,12 +16402,12 @@
 	        const browserRunSummaryActions = browserFinalSubmitButtonHtml
 	          ? `${browserFinalSubmitButtonHtml}${browserOpenTabButtonHtml}`
 	          : browserHandoffButtonHtml
-	          ? `${browserHandoffButtonHtml}${browserResumeButtonHtml || (browserCanRunNow ? `<button class="execution-secondary" type="button" data-execution-run-agent="true">Retry agent</button>` : '')}`
+	          ? `${browserHandoffButtonHtml}${browserResumeButtonHtml || (browserCanRunNow ? `<button class="execution-secondary execution-agent-start" type="button" data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}">Retry agent</button>` : '')}`
 	          : (browserCanRunNow ? browserQuickButtonHtml : '');
 	        const agentRunButtonHtml = santaClawzRetryBlocked
 	          ? '<button class="execution-secondary" type="button" disabled>Agent update required</button>'
 	          : `<button class="execution-primary execution-agent-start" type="button" data-execution-fallback-run-session="${escapeExecutionValue(session.id)}">${localExecutionError ? 'Retry agent' : 'Run agent'}</button>`;
-	        const agentAutoStartButtonHtml = `<button type="button" hidden data-execution-run-agent="true" aria-hidden="true" tabindex="-1">Run agent</button>`;
+	        const agentAutoStartButtonHtml = `<button type="button" hidden data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}" aria-hidden="true" tabindex="-1">Run agent</button>`;
 	        const hireStepDescription = isBrowserExecutionSheet
 	          ? 'Runs until login, payment, captcha, or mismatch.'
 	          : compactExecutionSentence(getExecutionSelectedAgentDescription(session) || 'Review inputs, then run.', 120);
@@ -19544,7 +19623,7 @@
 	        || santaClawzRetryBlocked
 	        || shouldShowManualAgentRunControl(session, actionLocalError);
 	      const santaClawzAutoStartControl = kind === 'agent' && !santaClawzDeliveryReady && !agentRequiresManualStart
-	        ? '<button type="button" hidden id="executionAgentBtn" data-execution-run-agent="true" aria-hidden="true" tabindex="-1">Run agent</button>'
+	        ? `<button type="button" hidden id="executionAgentBtn" data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}" aria-hidden="true" tabindex="-1">Run agent</button>`
 	        : '';
       const actionLocalErrorCode = String(actionLocalError?.code || actionLocalError?.message || '').toLowerCase();
       const actionNeedsAuth = isBrowserLane && /auth_required/.test(actionLocalErrorCode);
@@ -19554,7 +19633,7 @@
         ? `<button class="execution-secondary" type="button" disabled>Sign in in Settings</button>`
         : actionNeedsFunds
           ? `<button class="execution-primary" id="executionTopupBtn" data-execution-topup="true" type="button">${escapeExecutionValue(actionFundingLabel)}</button>`
-	          : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || executionPaused || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionPaused ? 'Paused in checkout' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
+	          : `<button class="execution-primary${kind === 'agent' || kind === 'browser' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}" type="button" ${(executionBusy || executionFulfilled || executionPaused || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionPaused ? 'Paused in checkout' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`;
 	      const providerActionLabel = squareCheckoutUrl
         ? 'Open direct Square checkout'
         : kind === 'travel'
@@ -19588,7 +19667,7 @@
 	          ? `<button class="execution-primary" id="executionSantaClawzPayBtn" type="button" ${directX402ActionPending ? 'disabled' : ''}>${directX402ActionPending ? 'Preparing wallet approval...' : directX402ButtonLabel}</button>`
 	          : isBrowserLane
 	            ? browserActionButtonHtml
-		            : `<button class="execution-primary${kind === 'agent' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`)}
+		            : `<button class="execution-primary${kind === 'agent' || kind === 'browser' ? ' execution-agent-start' : ''}" id="executionAgentBtn" data-execution-run-agent="true" data-execution-run-session="${escapeExecutionValue(session.id)}" type="button" ${(executionBusy || executionFulfilled || travelNeedsFunding || santaClawzRetryBlocked) ? 'disabled' : ''}>${santaClawzRetryBlocked ? 'Agent update required' : executionBusy ? 'Execution running…' : executionFulfilled ? 'Run complete' : executionFailed ? 'Retry agent' : (kind === 'agent' ? 'Run agent' : primaryLabel)}</button>`)}
         ${agentViewUrl ? `<a class="execution-secondary" href="${escapeExecutionValue(agentViewUrl)}" target="_blank" rel="noopener noreferrer">View Agent</a>` : ''}
         ${session.handoffData?.kind === 'food' ? `<button class="execution-secondary" id="executionDiscoverBtn" type="button" ${executionBusy ? 'disabled' : ''}>Find live local restaurants</button>` : ''}
         ${showTopup ? `<button class="execution-secondary" id="executionTopupBtn" data-execution-topup="true" type="button" ${executionBusy ? 'disabled' : ''}>${topupButtonLabel}</button>` : ''}
@@ -19937,9 +20016,10 @@
 		          await renderExecutionSheet(session.id, { focus: false });
 		          setExecutionStatusError(latestErrorSession, error);
 		        }
-      };
+	      };
+	      executionRunHandlers.set(session.id, startExecutionFromSheet);
 
-	      const resumeCheckoutReconcileFromSheet = async () => {
+		      const resumeCheckoutReconcileFromSheet = async () => {
 	        const currentSession = executionSessionCache.get(session.id) || session;
 	        const clientRunStartedAt = new Date().toISOString();
         try {
@@ -20088,14 +20168,7 @@
           setExecutionStatusError(latestSession, error);
         }
       };
-      const executionRunRoot = getExecutionSheetScrollElement(session.id);
-      executionRunRoot?.addEventListener('click', (event) => {
-	        const button = event.target?.closest?.('[data-execution-run-agent="true"]');
-	        if (!button || !executionRunRoot.contains(button) || button.disabled) return;
-	        event.preventDefault();
-        void startExecutionFromSheet();
-      });
-      bindExecutionClicks('[data-execution-final-submit]', (event) => {
+	      bindExecutionClicks('[data-execution-final-submit]', (event) => {
         event.preventDefault();
         const button = event.currentTarget;
         if (!button || button.disabled) return;

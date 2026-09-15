@@ -58,8 +58,22 @@ assert.equal(defaultAmazonPlan?.approveLabel, 'Run agent');
 assert.match(defaultAmazonPlan?.preview || '', /currently supports purchases through Amazon/i);
 assert.match(
   defaultAmazonPlan?.preview || '',
-  /search Amazon for nature valley granola bars, \$4 within your \$4 budget\./i,
+  /search Amazon for nature valley granola bars within your \$4 budget\./i,
   'default-Amazon disclosure must state the retained item and budget'
+);
+assert.doesNotMatch(defaultAmazonPlan?.preview || '', /\$4[^\n]*\$4/, 'the Amazon disclosure must state the budget once');
+
+const repeatedBudgetPrompt = 'i want to buy nature valley granola bars $4, $4 max spend';
+const repeatedBudgetPlan = buildActionPlan({ agent, prompt: repeatedBudgetPrompt });
+assert.match(
+  repeatedBudgetPlan?.preview || '',
+  /search Amazon for nature valley granola bars within your \$4 budget\./i,
+  'a budget echoed into the parsed item must be removed from the disclosure'
+);
+assert.match(
+  repeatedBudgetPlan?.localContext?.goal || '',
+  /^Buy nature valley granola bars from amazon\.com with max spend \$4$/i,
+  'a budget echoed into the parsed item must be removed from the signed goal'
 );
 assert.equal(defaultAmazonPlan?.localContext?.merchantRouting?.disclosure, 'amazon_default');
 assert.equal(isMagicInternetPurchaseRequest(defaultAmazonPrompt), true);
