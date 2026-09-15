@@ -97,13 +97,51 @@ try {
   assert.equal(hydrated.selected.asin, hydrationApproved.asin);
   assert.equal(hydrated.requiresProductPageVerification, true);
 
+  await page.setContent(card({
+    asin: 'B000SMORES',
+    title: "HERSHEY'S mores Kit Box, 14 oz"
+  }));
+  const clippedTitleEvidence = await runSelection(page, {
+    type: 'select_candidate', query: "HERSHEY'S mores kit 14 oz", maxPrice: 20, primeRequired: true
+  });
+  const clippedTitleApproved = {
+    ...clippedTitleEvidence.selected,
+    id: 'candidate-1',
+    requiresProductPageVerification: true,
+    identityStatus: 'provisional'
+  };
+  assert.equal(clippedTitleApproved?.asin, 'B000SMORES');
+  assert.equal(clippedTitleApproved?.requiresProductPageVerification, true);
+  await page.setContent([
+    '<script>window.__clicks = 0</script>',
+    card({
+      asin: 'B000SMORES',
+      title: "HERSHEY'S S'mores Kit Box, 14 oz",
+      delivery: '<span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery on $35 of qualifying items</span>',
+      clickable: true
+    })
+  ].join(''));
+  const completedTitle = await runSelection(page, {
+    type: 'select_candidate',
+    query: "HERSHEY'S s'mores kit 14 oz",
+    maxPrice: 20,
+    primeRequired: true,
+    intelligenceApprovedCandidate: clippedTitleApproved
+  }, true);
+  assert.equal(completedTitle.selectionKind, 'model_assisted_product_page_verification');
+  assert.equal(completedTitle.selected.asin, clippedTitleApproved.asin);
+  assert.equal(completedTitle.requiresProductPageVerification, true);
+  assert.equal(await page.evaluate(() => window.__clicks), 0);
+
   console.log(JSON.stringify({
     amazonSelectionIntelligenceRevalidation: 'passed',
     reorderedAsin: reordered.selected.asin,
     stalePriceClicks: 0,
     wrongVariantClicks: 0,
     hydratedAsin: hydrated.selected.asin,
-    hydratedNextStep: hydrated.selectionKind
+    hydratedNextStep: hydrated.selectionKind,
+    completedTitleAsin: completedTitle.selected.asin,
+    completedTitleNextStep: completedTitle.selectionKind
   }));
 } finally {
   await browser.close();

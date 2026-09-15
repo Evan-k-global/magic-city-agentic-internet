@@ -689,7 +689,10 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       if (candidate.conditionalShipping) rejected.conditionalShipping += 1;
     }
     if (priceInconclusive || fulfillmentInconclusive) {
-      if (exactIdentity && packageMatch.kind === 'exact' && (!bestVerificationCandidate || betterExact(candidate, bestVerificationCandidate.candidate))) {
+      if (approvedIntelligenceCandidate && packageMatch.kind === 'exact') {
+        if (approvedEvidenceMatches(candidate, packageMatch.pack)) bestExact = candidate;
+        else rejected.identity += 1;
+      } else if (exactIdentity && packageMatch.kind === 'exact' && (!bestVerificationCandidate || betterExact(candidate, bestVerificationCandidate.candidate))) {
         bestVerificationCandidate = {
           candidate,
           pack: packageMatch.pack,
@@ -697,10 +700,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
           fulfillmentInconclusive
         };
       } else if ((semanticIdentity || provisionalIdentity) && packageMatch.kind === 'exact') {
-        if (approvedIntelligenceCandidate) {
-          if (approvedEvidenceMatches(candidate, packageMatch.pack)) bestExact = candidate;
-          else rejected.identity += 1;
-        } else if (intelligenceCandidates.length < 12) {
+        if (intelligenceCandidates.length < 12) {
           intelligenceCandidates.push(summarize(candidate, packageMatch.pack, {
             requiresProductPageVerification: true,
             identityStatus: provisionalIdentity ? 'provisional' : 'semantic'
