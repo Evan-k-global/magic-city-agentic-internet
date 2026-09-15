@@ -43,6 +43,7 @@
     "test:native-runner-final-submit-lease-expiry": "MAGIC_CITY_BROWSER_SMOKE_FOCUS=final-submit-lease-expiry node scripts/smoke-native-runner-extension-browser.mjs",
     "test:native-runner-final-submit-lease-lost-checkpoint": "MAGIC_CITY_BROWSER_SMOKE_FOCUS=final-submit-lease-lost-checkpoint node scripts/smoke-native-runner-extension-browser.mjs",
     "test:native-runner-selection-intelligence": "MAGIC_CITY_BROWSER_SMOKE_FOCUS=selection-intelligence node scripts/smoke-native-runner-extension-browser.mjs",
+    "test:native-runner-same-window-focus": "MAGIC_CITY_BROWSER_SMOKE_FOCUS=same-window-focus node scripts/smoke-native-runner-extension-browser.mjs",
     "test:native-runner-liveness-fast-path": "node scripts/test-native-runner-liveness-fast-path.mjs",
     "test:amazon-selection-intelligence-provider": "node scripts/test-amazon-selection-intelligence-provider.mjs",
     "test:native-runner-extension-pairing": "node scripts/test-native-runner-extension-pairing.mjs",

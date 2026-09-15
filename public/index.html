@@ -13032,7 +13032,10 @@
 		    function inferAgentCompletionDesiredKind(context = {}) {
 	      const text = `${context.prompt || ''}\n${context.responseText || ''}`;
 	      if (looksLikeCodeAuditExecutionRequest(text)) return '';
-	      return hasRunnableBrowserExecutionContext(context.prompt || '', context.responseText || '') ? 'browser' : '';
+	      return hasRunnableBrowserExecutionContext(context.prompt || '', context.responseText || '') ||
+	        hasPendingBrowserPurchaseContext(context.prompt || '', context.responseText || '')
+	        ? 'browser'
+	        : '';
 		    }
 
 	    function getAgentCompletionKind(agent = {}) {
@@ -14573,7 +14576,17 @@
       if (/\bbooking\.com\b|\bbooking\b/.test(lower)) return 'https://www.booking.com';
       if (/\bhotels\.com\b|\bhotels\b/.test(lower)) return 'https://www.hotels.com';
       const domain = lower.match(/\b([a-z0-9-]+\.(?:com|net|org|io|ai))\b/);
-      return domain ? `https://${domain[1]}` : '';
+      if (domain) return `https://${domain[1]}`;
+      const unresolvedRetailer = /\b(?:from|on|at|via)\s+[a-z][a-z0-9&.' -]{1,48}?(?=\s+(?:for|under|below|within|with|max|maximum|budget|up to|less than|no more than|spend)\b|[,.!?]|$)/i.test(value);
+      const product = inferBrowserProductFromText(value);
+      if (
+        !unresolvedRetailer &&
+        product &&
+        hasBrowserPurchaseIntent(value)
+      ) {
+        return 'https://www.amazon.com';
+      }
+      return '';
     }
 
     function parseSmallBudgetWords(text = '') {
@@ -14785,9 +14798,9 @@
       if (shoppingItems.length > 1) return buildBrowserBasketTaskLabel(shoppingItems);
       const travelTask = inferBrowserTravelTaskFromText(value);
       if (travelTask) return travelTask;
-      const direct = value.match(/\b(?:buy|purchase|order|get me|shop for|add to cart|find)\s+(.+?)(?:\s+(?:from|on|at|via|under|budget|max|maximum|up to|less than|spend(?:ing)?|for)\b|$)/i);
+      const direct = value.match(/\b(?:buy|purchase|order|get me|shop for|add to cart|find)\s+(.+?)(?:\s+(?:additional execution detail|from|on|at|via|under|budget|max|maximum|up to|less than|spend(?:ing)?|for)\b|$)/i);
       const candidate = cleanBrowserTaskText(direct?.[1] || '');
-      if (candidate && !/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|it|that|book|reserve|checkout)$/i.test(candidate)) return candidate;
+      if (candidate && !/^(?:yes|no|something|stuff|anything|whatever|a thing|some things|it|that|this|these|them|book|reserve|checkout)$/i.test(candidate)) return candidate;
       const merchantPhrase = value.match(/\b(?:from|on|at|via)\s+(?:amazon|amazon\.com|target|target\.com|walmart|walmart\.com|best buy|bestbuy|bestbuy\.com|instacart|instacart\.com|kayak|kayak\.com|expedia|expedia\.com|booking|booking\.com|hotels|hotels\.com)\b/i);
       if (merchantPhrase && merchantPhrase.index > 0) {
         const beforeMerchant = cleanBrowserTaskText(value.slice(0, merchantPhrase.index));
@@ -14837,18 +14850,51 @@
       return /\bbefore i open magic internet helper\b|\bwhat would you like to buy\b|\bhow much are you willing to spend\b|\byour max spend\b|\btell me the site\b|\bi need the site\b/i.test(String(text || ''));
     }
 
+    function hasBrowserPurchaseIntent(text = '') {
+      const value = String(text || '');
+      const detailTurns = value.split(/\n+\s*Additional execution detail:\s*/i);
+      if (detailTurns.length > 1 && isShortExecutionConfirmation(detailTurns.at(-1))) return true;
+      const informationalQuestion = /^\s*(?:what|which|why|how|when|where|who)\b[\s\S]{0,64}?\b(?:is|are|was|were|does|do|did|would|should|can|could)\b/i.test(value)
+        || /^\s*(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:explain|describe|tell me|show me|help me understand)\b/i.test(value);
+      if (informationalQuestion) return false;
+      const intentPattern = /\b(buy|purchase|order|checkout|get me|add to cart|add\s+(?:this|these|the)\b[\s\S]{0,80}?\bto\s+(?:my\s+)?cart)\b/gi;
+      let match = null;
+      while ((match = intentPattern.exec(value))) {
+        const prefix = value.slice(Math.max(0, match.index - 64), match.index);
+        const negated = /\b(?:do not|don't|dont|did not|didn't|never|no longer)\s+(?:(?:want|need|intend|plan)(?:\s+you)?\s+to\s+)?$/i.test(prefix)
+          || /\bnot\s+(?:(?:want|need|intend|plan)(?:\s+you)?\s+to\s+)?$/i.test(prefix);
+        if (negated) continue;
+        if (String(match[1] || '').toLowerCase() === 'order'
+          && /^\s+(?:status|number|history|details?|confirmation|tracking)\b/i.test(value.slice(intentPattern.lastIndex))) continue;
+        return true;
+      }
+      return false;
+    }
+
+    function hasPendingBrowserPurchaseContext(prompt = '', responseText = '') {
+      const combined = [prompt, responseText].filter(Boolean).join('\n');
+      if (looksLikeCodeAuditExecutionRequest(combined)) return false;
+      const product = inferBrowserProductFromText(prompt);
+      return Boolean(
+        (product || extractBrowserShoppingItemsFromText(prompt).length > 1) &&
+        hasBrowserPurchaseIntent(prompt)
+      );
+    }
+
+    function isShortExecutionConfirmation(text = '') {
+      return /^(?:yes|yes please|yep|yeah|ok|okay|that(?:'s| is) okay|sounds good|confirm|confirmed|go ahead|do it|start|start it|run|run it|run agent|please proceed)[.!]?$/i.test(String(text || '').trim());
+    }
+
     function hasRunnableBrowserExecutionContext(prompt = '', responseText = '') {
       const combined = [prompt, responseText].filter(Boolean).join('\n');
       if (looksLikeCodeAuditExecutionRequest(combined)) return false;
       const promptOnly = String(prompt || '');
-      const lower = combined.toLowerCase();
-      const promptLower = promptOnly.toLowerCase();
       const hasTarget = Boolean(inferBrowserTargetUrlFromText(combined));
       const hasProduct = Boolean(inferBrowserProductFromText(combined));
       const hasShoppingItems = extractBrowserShoppingItemsFromText(combined).length > 1;
       const hasBudget = Boolean(inferBrowserBudgetFromText(combined));
-      const purchaseIntent = /\b(buy|purchase|order|checkout|get me|add to cart|add\s+(?:this|these|the)\b[\s\S]{0,80}?\bto\s+(?:my\s+)?cart)\b/.test(lower);
-      const promptHasRunnablePurchase = /\b(buy|purchase|order|checkout|get me|add to cart|add\s+(?:this|these|the)\b[\s\S]{0,80}?\bto\s+(?:my\s+)?cart)\b/.test(promptLower)
+      const purchaseIntent = hasBrowserPurchaseIntent(combined);
+      const promptHasRunnablePurchase = hasBrowserPurchaseIntent(promptOnly)
         && Boolean(inferBrowserTargetUrlFromText(promptOnly))
         && (Boolean(inferBrowserProductFromText(promptOnly)) || extractBrowserShoppingItemsFromText(promptOnly).length > 1)
         && Boolean(inferBrowserBudgetFromText(promptOnly));
@@ -14863,12 +14909,16 @@
       const budget = inferBrowserBudgetFromText(taskText);
       const lower = String(taskText || '').toLowerCase();
       const travelTask = looksLikeTravelBrowserTask(taskText);
-      const purchaseIntent = /\b(buy|purchase|order|checkout|get me|add to cart|add\s+(?:this|these|the)\b[\s\S]{0,80}?\bto\s+(?:my\s+)?cart|book|reserve|prepare)\b/.test(lower);
+      const purchaseIntent = hasBrowserPurchaseIntent(taskText) || /\b(book|reserve|prepare)\b/.test(lower);
       const missing = [];
       if (!target) missing.push('site');
       if (purchaseIntent && !product && shoppingItems.length < 2) missing.push(travelTask ? 'task' : 'item or task');
       if (purchaseIntent && !budget) missing.push('max spend');
-      if (!purchaseIntent && !/\b(open|go to|browse|search|compare|fill|prepare|use this site)\b/.test(lower)) missing.push('task');
+      if (!purchaseIntent && (product || shoppingItems.length > 1) && budget) {
+        missing.push('purchase intent (for example, “buy it”)');
+      } else if (!purchaseIntent && !/\b(open|go to|browse|search|compare|fill|prepare|use this site)\b/.test(lower)) {
+        missing.push('task');
+      }
       const known = [
         target ? `site: ${target.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0]}` : '',
         shoppingItems.length > 1 ? `items: ${shoppingItems.length}` : product ? `${travelTask ? 'task' : 'item'}: ${product}` : '',
@@ -14961,6 +15011,7 @@
       const sessionAgent = session?.preferredExecutionAgentSnapshot || session?.handoffData?.selectedAgent || null;
       const selectedAgent = pendingAgent || sessionAgent || null;
       const selectedCapability = pendingSelectedAgentExecution?.capability || session?.handoffData?.capability || session?.connectorId || '';
+      if (isShortExecutionConfirmation(value) && (getAgentCompletionKind(selectedAgent || {}) === 'browser' || isMagicInternetHelperSession(session))) return true;
       if (selectedAgent && looksLikeExecutionInputForAgent(value, selectedAgent, selectedCapability)) return true;
       const hasExecutionSignal = Boolean(
         inferExecutionInputUrlFromText(value) ||
@@ -14980,7 +15031,10 @@
       const kind = getAgentCompletionKind(agent);
       if (kind === 'browser') {
         if (looksLikeCodeAuditExecutionRequest(value)) return false;
-        return hasRunnableBrowserExecutionContext(value, '') || /\b(amazon|walmart|target|instacart|buy|purchase|order|cart|checkout|book|reserve)\b/i.test(value);
+        return hasRunnableBrowserExecutionContext(value, '') ||
+          isShortExecutionConfirmation(value) ||
+          Boolean(inferBrowserBudgetFromText(value)) ||
+          /\b(online|browser|search|amazon|walmart|target|instacart|buy|purchase|order|cart|checkout|book|reserve)\b/i.test(value);
       }
       if (isCodeAuditCompletionAgent(agent) || /\bdeveloper|coding|code\b/i.test(String(capability || ''))) {
         return Boolean(
@@ -15019,6 +15073,30 @@
       if (!base) return next;
       if (base.includes(next)) return base;
       return `${base}\n\nAdditional execution detail:\n${next}`;
+    }
+
+    function maybeStartMagicInternetAgentIntake(prompt = '') {
+      const detail = String(prompt || '').trim();
+      if (!detail || pendingSelectedAgentExecution || getSelectedAgentExecutionSession()) return false;
+      if (!hasPendingBrowserPurchaseContext(detail, '') || hasRunnableBrowserExecutionContext(detail, '')) return false;
+      const browserAgent = buildHelperSavedAgent('browser') || {
+        pluginId: HOSTED_BROWSER_WORKER_PLUGIN_ID,
+        agentName: 'Magic Internet Agent'
+      };
+      rememberSelectedAgentExecution({
+        agent: browserAgent,
+        capability: 'browser-worker-agent',
+        starterPrompt: detail,
+        context: {}
+      });
+      addAssistantResult(
+        buildBrowserMissingExecutionInfoMessage(detail, 'Magic Internet Agent'),
+        renderDetailLines([
+          'Agent: Magic Internet Agent',
+          'Route: gathering pre-run shopping details'
+        ])
+      );
+      return true;
     }
 
     function buildSelectedAgentSelectionsFromExecutionDetail(session = {}, detail = '', pending = null) {
@@ -20709,6 +20787,7 @@
         addMessage('assistant', `Execution sheet needs attention: ${normalizeExecutionErrorMessage(error)}`);
         return;
       }
+      if (maybeStartMagicInternetAgentIntake(prompt)) return;
       const capability = $('intentCapability').value.trim() || 'general-chat';
       const effectivePrompt = prompt;
       const addAgentIntent = isAddAgentIntent(prompt);

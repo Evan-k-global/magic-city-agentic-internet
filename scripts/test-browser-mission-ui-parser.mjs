@@ -24,7 +24,8 @@ assert.match(html, /agent-completion-primary-actions/, 'SantaClawz match cards m
 assert.match(html, /agent-completion-inline-links/, 'SantaClawz match cards must keep browsing and publishing actions compact and inline');
 assert.match(html, /agent-completion-status:empty/, 'SantaClawz match cards must not reserve space before a status exists');
 assert.match(html, /View \$\{matchCount\} match/, 'SantaClawz alternate-agent control must state how many matches are available');
-assert.match(serverSource, /const NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_MIN_EXTENSION_VERSION;/, 'the latest published Runner must equal the minimum accepted Runner');
+assert.match(serverSource, /let NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = NATIVE_RUNNER_CONFIGURED_EXTENSION_VERSION;/, 'the published Runner policy must start at the configured minimum');
+assert.match(serverSource, /NATIVE_RUNNER_MIN_EXTENSION_VERSION = effectiveVersion;\s*NATIVE_RUNNER_LATEST_PUBLISHED_VERSION = effectiveVersion;/, 'store discovery must advance the published and minimum Runner versions together');
 assert.match(serverSource, /latestPublishedVersion: NATIVE_RUNNER_LATEST_PUBLISHED_VERSION/, 'runner readiness must expose the published release');
 assert.match(serverSource, /extensionUpdateAvailable,/, 'runner readiness must expose whether the published Runner update is required');
 assert.match(html, /id="nativeRunnerUpdateBtn" hidden>Update Runner</, 'Runner settings must provide a hidden-until-needed update action');
@@ -182,7 +183,16 @@ assert.match(localRunnerBackground, /resumeActiveRun/, 'the lean gateway must re
 assert.match(localRunnerBackground, /A heartbeat may resume only a short-lived, user-authorized dispatch/, 'the lean heartbeat must not become an autonomous fresh-mission executor');
 assert.match(localRunnerBackground, /Preserve recovery across a service-worker restart/, 'an authorized run must retain recovery across worker restarts');
 assert.match(localRunnerBackground, /Keep the external message open through the exact-session claim/, 'an external runner wake must stay alive until it has begun the exact approved mission');
-assert.match(localRunnerBackground, /return dispatch\(message, \{ origin \}\);/, 'an external runner wake must execute the requested session directly');
+assert.match(
+  localRunnerBackground,
+  /return dispatch\(message, externalSenderContext\(sender, origin\)\);/,
+  'an external runner wake must execute directly while preserving Chrome-trusted sender context'
+);
+assert.match(
+  localRunnerBackground,
+  /dispatch\(message, externalSenderContext\(port\.sender, origin\)\)/,
+  'the external live-run channel must preserve the same trusted sender context'
+);
 assert.doesNotMatch(localRunnerBackground, /queueExplicitMissionWake|dispatchExplicitMissionWake|EXPLICIT_WAKE_ALARM/, 'the runner must not detach startup into an MV3 one-shot alarm');
 assert.match(localRunnerLegacyBackground, /async function pollAndExecute\(requestedSessionId = '', requestedDispatchNonce = '', clientRunStartedAt = ''\)/, 'the runner must support an exact approved session and dispatch target');
 assert.match(localRunnerLegacyBackground, /String\(session\?\.id \|\| ''\) === normalizedSessionId/, 'a targeted runner wake must not execute a different queued session');
@@ -227,7 +237,9 @@ assert.doesNotMatch(
 function extractFunctionSource(name) {
   const start = html.indexOf(`function ${name}`);
   assert.notEqual(start, -1, `missing inline function ${name}`);
-  const braceStart = html.indexOf('{', start);
+  const signatureEnd = html.indexOf(') {', start);
+  assert.notEqual(signatureEnd, -1, `missing function body for ${name}`);
+  const braceStart = signatureEnd + 2;
   assert.notEqual(braceStart, -1, `missing function body for ${name}`);
   let depth = 0;
   for (let index = braceStart; index < html.length; index += 1) {
@@ -261,8 +273,12 @@ const functionNames = [
   'looksLikeCodeAuditExecutionRequest',
   'isCodeAuditAgentChatRequest',
   'isBrowserClarificationResponse',
+  'hasBrowserPurchaseIntent',
+  'hasPendingBrowserPurchaseContext',
+  'isShortExecutionConfirmation',
   'hasRunnableBrowserExecutionContext',
-  'buildBrowserMissingExecutionInfoMessage'
+  'buildBrowserMissingExecutionInfoMessage',
+  'inferAgentCompletionDesiredKind'
 ];
 
 const context = {};
@@ -330,5 +346,62 @@ const codeAuditRepoPrompt = [
 assert.equal(context.looksLikeCodeAuditExecutionRequest(codeAuditRepoPrompt), true);
 assert.equal(context.hasRunnableBrowserExecutionContext(codeAuditRepoPrompt, ''), false);
 assert.equal(context.isCodeAuditAgentChatRequest('I want a code audit'), true);
+
+const incompletePurchasePrompt = 'i want to buy nature valley granola bars';
+const budgetFollowUp = '1. open the browser, $4 max';
+const accumulatedPurchasePrompt = `${incompletePurchasePrompt}\n\nAdditional execution detail:\n${budgetFollowUp}`;
+assert.equal(context.hasPendingBrowserPurchaseContext(incompletePurchasePrompt, ''), true);
+assert.equal(context.inferAgentCompletionDesiredKind({ prompt: incompletePurchasePrompt }), 'browser');
+assert.equal(context.inferBrowserTargetUrlFromText(accumulatedPurchasePrompt), 'https://www.amazon.com');
+assert.equal(context.inferBrowserBudgetFromText(accumulatedPurchasePrompt), '$4');
+assert.equal(context.inferBrowserProductFromText(accumulatedPurchasePrompt), 'nature valley granola bars');
+assert.equal(context.hasRunnableBrowserExecutionContext(accumulatedPurchasePrompt, ''), true);
+assert.equal(context.isShortExecutionConfirmation('confirm'), true);
+assert.equal(context.isShortExecutionConfirmation("that's okay"), true);
+assert.equal(context.isShortExecutionConfirmation('what does this cost?'), false);
+assert.equal(
+  context.inferBrowserTargetUrlFromText('buy dryer sheets from Acme Shop for $10 max'),
+  '',
+  'an unresolved named retailer must not be silently defaulted to Amazon'
+);
+
+const productAndBudgetSeed = 'nature valley granola bars, $4 max';
+assert.equal(context.inferBrowserProductFromText(productAndBudgetSeed), 'nature valley granola bars');
+assert.equal(context.inferBrowserBudgetFromText(productAndBudgetSeed), '$4');
+assert.equal(context.hasBrowserPurchaseIntent(productAndBudgetSeed), false);
+assert.equal(context.hasPendingBrowserPurchaseContext(productAndBudgetSeed, ''), false);
+assert.equal(context.hasPendingBrowserPurchaseContext('What does nature valley granola bars, $4 max mean?', ''), false);
+assert.equal(context.inferAgentCompletionDesiredKind({ prompt: productAndBudgetSeed }), '');
+assert.equal(context.inferBrowserTargetUrlFromText(productAndBudgetSeed), '');
+assert.equal(context.hasRunnableBrowserExecutionContext(productAndBudgetSeed, ''), false);
+assert.match(
+  context.buildBrowserMissingExecutionInfoMessage(productAndBudgetSeed, 'Magic Internet Agent'),
+  /purchase intent.*buy it/i
+);
+const completedFromLaterIntent = `${productAndBudgetSeed}\n\nAdditional execution detail:\nyes i want to buy them`;
+assert.equal(context.hasBrowserPurchaseIntent(completedFromLaterIntent), true);
+assert.equal(context.inferBrowserProductFromText(completedFromLaterIntent), 'nature valley granola bars');
+assert.equal(context.hasRunnableBrowserExecutionContext(completedFromLaterIntent, ''), true);
+const completedFromConfirmation = `${productAndBudgetSeed}\n\nAdditional execution detail:\nthat's okay`;
+assert.equal(context.hasBrowserPurchaseIntent(completedFromConfirmation), true);
+assert.equal(context.hasRunnableBrowserExecutionContext(completedFromConfirmation, ''), true);
+
+for (const nonShoppingPrompt of [
+  'What is a purchase order?',
+  'I do not want to buy granola bars',
+  'Can you explain how to buy granola bars on Amazon?',
+  'How much should I budget to buy granola bars?'
+]) {
+  assert.equal(context.hasBrowserPurchaseIntent(nonShoppingPrompt), false, `${nonShoppingPrompt} must not express affirmative shopping intent`);
+  assert.equal(context.hasPendingBrowserPurchaseContext(nonShoppingPrompt, ''), false, `${nonShoppingPrompt} must remain in normal chat`);
+  assert.equal(context.hasRunnableBrowserExecutionContext(nonShoppingPrompt, ''), false, `${nonShoppingPrompt} must not open a browser execution`);
+  assert.equal(context.inferAgentCompletionDesiredKind({ prompt: nonShoppingPrompt }), '', `${nonShoppingPrompt} must not select MIA`);
+}
+const directShoppingRequest = 'Can you buy granola bars from Amazon for $4 max?';
+assert.equal(context.hasBrowserPurchaseIntent(directShoppingRequest), true);
+assert.equal(context.hasPendingBrowserPurchaseContext(directShoppingRequest, ''), true);
+assert.equal(context.hasRunnableBrowserExecutionContext(directShoppingRequest, ''), true);
+assert.equal(context.inferAgentCompletionDesiredKind({ prompt: directShoppingRequest }), 'browser');
+assert.equal(context.hasPendingBrowserPurchaseContext('I want to buy granola bars', ''), true);
 
 console.log('browser mission UI parser ok');

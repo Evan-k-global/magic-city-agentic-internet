@@ -56,6 +56,11 @@ assert.equal(defaultAmazonPlan?.localContext?.budget, '$4');
 assert.equal(defaultAmazonPlan?.actionLabel, 'Amazon checkout available');
 assert.equal(defaultAmazonPlan?.approveLabel, 'Run agent');
 assert.match(defaultAmazonPlan?.preview || '', /currently supports purchases through Amazon/i);
+assert.match(
+  defaultAmazonPlan?.preview || '',
+  /search Amazon for nature valley granola bars, \$4 within your \$4 budget\./i,
+  'default-Amazon disclosure must state the retained item and budget'
+);
 assert.equal(defaultAmazonPlan?.localContext?.merchantRouting?.disclosure, 'amazon_default');
 assert.equal(isMagicInternetPurchaseRequest(defaultAmazonPrompt), true);
 assert.equal(inferCapabilityFromPrompt(defaultAmazonPrompt), 'browser-worker-agent');
