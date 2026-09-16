@@ -347,6 +347,114 @@ function storefront(pathname, searchParams = new URLSearchParams()) {
       '</main>'
     ].join('');
   }
+  if (pathname === '/selection-fulfillment-retry-search') {
+    const card = (asin, title, delivery = '') => [
+      `<div data-component-type="s-search-result" data-asin="${asin}">`,
+      `<h2><a href="/dp/${asin}">${title}</a></h2>`,
+      '<span class="a-price"><span class="a-offscreen">$2.97</span></span>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      delivery,
+      '<button>Add to cart</button>',
+      '</div>'
+    ].join('');
+    return [
+      '<main><h1>Results for fruity Nature Valley granola bars</h1>',
+      card('B000COND01', 'Nature Valley Trail Mix Chewy Fruit & Nut Granola Bar, 6 ct, 7.4 oz'),
+      card('B000FREE02', 'Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz'),
+      card('B000DROP03', 'Nature Valley Cranberry Pomegranate Chewy Fruit & Nut Granola Bar, 6 ct', '<span>3 hour delivery for $4.99 or Prime FREE delivery Overnight 7 AM - 11 AM on $25 of qualifying items</span>'),
+      '<a id="nav-cart" href="/cart"><span id="nav-cart-count">0</span> Cart</a>',
+      '</main>'
+    ].join('');
+  }
+  const backupFailureFixtures = [
+    {
+      key: 'delivery',
+      asin: 'B000FAILD1',
+      title: 'Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz',
+      productTitle: 'Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz',
+      price: '$2.97',
+      delivery: 'FREE delivery on $25 of qualifying items'
+    },
+    {
+      key: 'identity',
+      asin: 'B000FAILI2',
+      title: 'Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz',
+      productTitle: 'Great Value Strawberry Granola Bars, 5 ct, 4.6 oz',
+      price: '$2.97',
+      delivery: 'FREE delivery Tomorrow'
+    },
+    {
+      key: 'budget',
+      asin: 'B000FAILB3',
+      title: 'Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz',
+      productTitle: 'Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz',
+      price: '$5.97',
+      delivery: 'FREE delivery Tomorrow'
+    }
+  ];
+  const backupFailureSearch = backupFailureFixtures.find((fixture) => pathname === `/selection-backup-${fixture.key}-failure-search`);
+  if (backupFailureSearch) {
+    const card = (asin, title) => [
+      `<div data-component-type="s-search-result" data-asin="${asin}">`,
+      `<h2><a href="/dp/${asin}">${title}</a></h2>`,
+      '<span class="a-price"><span class="a-offscreen">$2.97</span></span>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      '<button>Add to cart</button>',
+      '</div>'
+    ].join('');
+    return [
+      '<main><h1>Results for fruity Nature Valley granola bars</h1>',
+      card('B000COND01', 'Nature Valley Trail Mix Chewy Fruit & Nut Granola Bar, 6 ct, 7.4 oz'),
+      card(backupFailureSearch.asin, backupFailureSearch.title),
+      card('B000THIRD3', 'Nature Valley Cranberry Pomegranate Chewy Fruit & Nut Granola Bar, 6 ct'),
+      '</main>'
+    ].join('');
+  }
+  const backupFailureProduct = backupFailureFixtures.find((fixture) => pathname === `/dp/${fixture.asin}`);
+  if (backupFailureProduct) {
+    return [
+      `<main><h1 id="productTitle">${backupFailureProduct.productTitle}</h1>`,
+      `<div id="corePrice_feature_div"><span class="a-offscreen">${backupFailureProduct.price}</span></div>`,
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      `<div id="deliveryBlockMessage">${backupFailureProduct.delivery}</div>`,
+      '<div id="merchant-info">Ships from Amazon.com. Sold by Amazon.com.</div>',
+      `<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="sessionStorage.setItem('selection-backup-${backupFailureProduct.key}-clicks', String(Number(sessionStorage.getItem('selection-backup-${backupFailureProduct.key}-clicks') || 0) + 1))" />`,
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/dp/B000THIRD3') {
+    return [
+      '<main><h1 id="productTitle">Nature Valley Cranberry Pomegranate Chewy Fruit & Nut Granola Bar, 6 ct</h1>',
+      '<div id="corePrice_feature_div"><span class="a-offscreen">$2.97</span></div>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      '<div id="deliveryBlockMessage">FREE delivery Tomorrow</div>',
+      '<div id="merchant-info">Ships from Amazon.com. Sold by Amazon.com.</div>',
+      '<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="sessionStorage.setItem(\'selection-backup-third-clicks\', String(Number(sessionStorage.getItem(\'selection-backup-third-clicks\') || 0) + 1))" />',
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/dp/B000COND01') {
+    return [
+      '<main><h1 id="productTitle">Nature Valley Trail Mix Chewy Fruit & Nut Granola Bar, 6 ct, 7.4 oz</h1>',
+      '<div id="corePrice_feature_div"><span class="a-offscreen">$2.97</span></div>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      '<div id="deliveryBlockMessage">FREE delivery on $25 of qualifying items</div>',
+      '<div id="merchant-info">Ships from Amazon.com. Sold by Amazon.com.</div>',
+      '<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="sessionStorage.setItem(\'selection-fulfillment-primary-clicks\', String(Number(sessionStorage.getItem(\'selection-fulfillment-primary-clicks\') || 0) + 1))" />',
+      '</main>'
+    ].join('');
+  }
+  if (pathname === '/dp/B000FREE02') {
+    return [
+      '<main><h1 id="productTitle">Nature Valley Mixed Berry Peanut-Free Chewy Granola Bar, 5 ct, 4.6 oz</h1>',
+      '<div id="corePrice_feature_div"><span class="a-offscreen">$2.97</span></div>',
+      '<span aria-label="Amazon Prime">Prime delivery</span>',
+      '<div id="deliveryBlockMessage">FREE delivery Tomorrow</div>',
+      '<div id="merchant-info">Ships from Amazon.com. Sold by Amazon.com.</div>',
+      '<input id="add-to-cart-button" type="submit" value="Add to Cart" onclick="sessionStorage.setItem(\'selection-fulfillment-backup-clicks\', String(Number(sessionStorage.getItem(\'selection-fulfillment-backup-clicks\') || 0) + 1))" />',
+      '</main>'
+    ].join('');
+  }
   if (pathname === '/selection-explicit-identity-search') {
     const card = (asin, brand, title, price) => [
       `<div data-component-type="s-search-result" data-asin="${asin}">`,
@@ -1247,6 +1355,10 @@ async function main() {
       if (req.method === 'POST' && url.pathname.endsWith('/rank-candidates')) {
         selectionRankRequestCount += 1;
         selectionRankRequestBody = body;
+        const rankedCandidateIds = (Array.isArray(body.candidates) ? body.candidates : [])
+          .map((candidate) => String(candidate?.id || ''))
+          .filter(Boolean)
+          .slice(0, 2);
         return json(res, 200, {
           schema: 'magic-city-amazon-selection-advice-v1',
           sessionId: session.id,
@@ -1255,7 +1367,8 @@ async function main() {
           requestId: body.requestId,
           observationHash: body.observationHash,
           decision: 'select',
-          selectedCandidateId: 'candidate-1',
+          selectedCandidateId: rankedCandidateIds[0] || null,
+          alternativeCandidateIds: rankedCandidateIds.slice(1),
           reason: 'Observed fruit-flavored Nature Valley match.'
         });
       }
@@ -1638,6 +1751,96 @@ async function main() {
         rankRequests: selectionRankRequestCount
       });
       await merchantPage.close();
+      const rankRequestsBeforeFulfillmentRetry = selectionRankRequestCount;
+      const { merchantPage: fulfillmentRetryPage } = await prepareSelectionOnlySession('/selection-fulfillment-retry-search', {
+        goal: 'buy fruity Nature Valley granola bars',
+        selectionIntelligence: { enabled: true, maxCandidates: 12, timeoutMs: 3000 }
+      });
+      const fulfillmentRetryWake = await runSelectionFocus('browser-smoke-selection-fulfillment-retry');
+      const fulfillmentRetryCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+        && checkpoint.planActionStatus !== 'waiting');
+      const fulfillmentRetryCandidates = Array.isArray(selectionRankRequestBody?.candidates)
+        ? selectionRankRequestBody.candidates
+        : [];
+      const fulfillmentRetryClicks = await fulfillmentRetryPage.evaluate(() => ({
+        primary: Number(sessionStorage.getItem('selection-fulfillment-primary-clicks') || '0'),
+        backup: Number(sessionStorage.getItem('selection-fulfillment-backup-clicks') || '0')
+      }));
+      if (fulfillmentRetryCheckpoint?.browser?.runnerStep?.selectionKind !== 'model_assisted_product_page_verification'
+        || fulfillmentRetryCheckpoint?.browser?.runnerStep?.productPageVerified !== true
+        || fulfillmentRetryCheckpoint?.browser?.runnerStep?.selectedCandidate?.asin !== 'B000FREE02'
+        || fulfillmentRetryCheckpoint?.browser?.runnerStep?.fallbackAttempts !== 1
+        || selectionRankRequestCount !== rankRequestsBeforeFulfillmentRetry + 1
+        || fulfillmentRetryCandidates.length !== 2
+        || fulfillmentRetryCandidates.some((candidate) => candidate.asin === 'B000DROP03')
+        || fulfillmentRetryClicks.primary !== 0
+        || fulfillmentRetryClicks.backup !== 0) {
+        fail(`browser_extension_selection_fulfillment_retry_failed:${JSON.stringify({
+          fulfillmentRetryCheckpoint,
+          fulfillmentRetryCandidates,
+          fulfillmentRetryClicks,
+          selectionRankRequestCount,
+          rankRequestsBeforeFulfillmentRetry,
+          fulfillmentRetryWake
+        })}`);
+      }
+      recordPurchaseScenario('Conditional-only cards are screened out and one ranked backup receives read-only verification', {
+        cartClicks: fulfillmentRetryClicks.primary + fulfillmentRetryClicks.backup,
+        candidateCount: fulfillmentRetryCandidates.length,
+        selectedAsin: fulfillmentRetryCheckpoint.browser.runnerStep.selectedCandidate.asin,
+        fallbackAttempts: fulfillmentRetryCheckpoint.browser.runnerStep.fallbackAttempts,
+        rankRequests: selectionRankRequestCount - rankRequestsBeforeFulfillmentRetry
+      });
+      await fulfillmentRetryPage.close();
+      const rejectedBackupCases = [
+        { key: 'delivery', asin: 'B000FAILD1', reason: /paid or conditional Prime delivery/i },
+        { key: 'identity', asin: 'B000FAILI2', reason: /full product identity did not match/i },
+        { key: 'budget', asin: 'B000FAILB3', reason: /costs \$5\.97, above the approved \$4\.00 item budget/i }
+      ];
+      for (const rejectedBackup of rejectedBackupCases) {
+        const rankRequestsBeforeRejectedBackup = selectionRankRequestCount;
+        const { merchantPage: rejectedBackupPage } = await prepareSelectionOnlySession(`/selection-backup-${rejectedBackup.key}-failure-search`, {
+          goal: 'buy fruity Nature Valley granola bars',
+          selectionIntelligence: { enabled: true, maxCandidates: 12, timeoutMs: 3000 }
+        });
+        const rejectedBackupWake = await runSelectionFocus(`browser-smoke-selection-backup-${rejectedBackup.key}-failure`);
+        const rejectedBackupCheckpoint = checkpoints.find((checkpoint) => checkpoint.planActionId === 'select-match'
+          && checkpoint.browser?.runnerStep?.actionId === 'select-match');
+        const rejectedBackupClicks = await rejectedBackupPage.evaluate((key) => ({
+          primary: Number(sessionStorage.getItem('selection-fulfillment-primary-clicks') || '0'),
+          backup: Number(sessionStorage.getItem(`selection-backup-${key}-clicks`) || '0'),
+          third: Number(sessionStorage.getItem('selection-backup-third-clicks') || '0')
+        }), rejectedBackup.key);
+        const rejectedBackupState = session.extensionMissionPlanState;
+        if (rejectedBackupCheckpoint?.planActionStatus !== 'waiting'
+          || rejectedBackupCheckpoint?.browser?.runnerStep?.productPageVerified !== false
+          || rejectedBackupCheckpoint?.browser?.runnerStep?.fallbackAttempts !== 1
+          || !rejectedBackup.reason.test(String(rejectedBackupCheckpoint?.browser?.runnerStep?.reason || ''))
+          || rejectedBackupCheckpoint?.verifiedMilestones?.includes('candidate_selected')
+          || Number(rejectedBackupState?.nextActionIndex || 0) !== 0
+          || selectionRankRequestCount !== rankRequestsBeforeRejectedBackup + 1
+          || !rejectedBackupPage.url().includes(`/dp/${rejectedBackup.asin}`)
+          || Object.values(rejectedBackupClicks).some((count) => count !== 0)) {
+          fail(`browser_extension_rejected_selection_backup_failed:${JSON.stringify({
+            rejectedBackup,
+            rejectedBackupCheckpoint,
+            rejectedBackupClicks,
+            rejectedBackupState,
+            selectionRankRequestCount,
+            rankRequestsBeforeRejectedBackup,
+            rejectedBackupUrl: rejectedBackupPage.url(),
+            rejectedBackupWake
+          })}`);
+        }
+        recordPurchaseScenario(`Rejected ${rejectedBackup.key} backup stops cleanly without another candidate`, {
+          cartClicks: 0,
+          checkpointStatus: rejectedBackupCheckpoint.planActionStatus,
+          fallbackAttempts: rejectedBackupCheckpoint.browser.runnerStep.fallbackAttempts,
+          nextActionIndex: rejectedBackupState.nextActionIndex,
+          rankRequests: selectionRankRequestCount - rankRequestsBeforeRejectedBackup
+        });
+        await rejectedBackupPage.close();
+      }
       const rankRequestsBeforeExplicitIdentity = selectionRankRequestCount;
       const { merchantPage: explicitIdentityPage } = await prepareSelectionOnlySession('/selection-explicit-identity-search', {
         goal: 'buy Nature Valley Strawberry granola bars',

@@ -306,12 +306,7 @@ try {
     primeRequired: true,
     intelligenceApprovedCandidate: approved
   }), { tabId: regressionTab, approved: hydrationApproved });
-  assert.equal(
-    output.selectionIntelligenceHydrationFixture?.selectionKind,
-    'model_assisted_product_page_verification',
-    'hydrated delivery evidence advances only to bounded product-page verification'
-  );
-  assert.equal(output.selectionIntelligenceHydrationFixture?.selected?.asin, hydrationApproved.asin, 'hydration remains bound to the approved ASIN');
+  assert.equal(output.selectionIntelligenceHydrationFixture?.intelligenceRevalidationFailed, true, 'confirmed conditional-only hydration is rejected on the search page');
 
   await worker.evaluate(({ tabId, html }) => globalThis.setSelectionFixture(tabId, html), {
     tabId: regressionTab,

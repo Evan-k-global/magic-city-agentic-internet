@@ -93,9 +93,8 @@ try {
     primeRequired: true,
     intelligenceApprovedCandidate: hydrationApproved
   });
-  assert.equal(hydrated.selectionKind, 'model_assisted_product_page_verification');
-  assert.equal(hydrated.selected.asin, hydrationApproved.asin);
-  assert.equal(hydrated.requiresProductPageVerification, true);
+  assert.equal(hydrated.intelligenceRevalidationFailed, true);
+  assert.equal(hydrated.completed, false);
 
   await page.setContent(card({
     asin: 'B000SMORES',
@@ -117,7 +116,7 @@ try {
     card({
       asin: 'B000SMORES',
       title: "HERSHEY'S S'mores Kit Box, 14 oz",
-      delivery: '<span aria-label="Amazon Prime">Prime delivery</span><span>FREE delivery on $35 of qualifying items</span>',
+      delivery: '<span aria-label="Amazon Prime">Prime delivery</span>',
       clickable: true
     })
   ].join(''));
@@ -138,8 +137,7 @@ try {
     reorderedAsin: reordered.selected.asin,
     stalePriceClicks: 0,
     wrongVariantClicks: 0,
-    hydratedAsin: hydrated.selected.asin,
-    hydratedNextStep: hydrated.selectionKind,
+    conditionalHydrationBlocked: hydrated.intelligenceRevalidationFailed,
     completedTitleAsin: completedTitle.selected.asin,
     completedTitleNextStep: completedTitle.selectionKind
   }));

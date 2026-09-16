@@ -60,6 +60,10 @@ const server = http.createServer(async (req, res) => {
     ? { decision: 'request_user', selectedId: null, reason: 'Preference is ambiguous.' }
     : mode === 'invented'
       ? { decision: 'select', selectedId: 'candidate-99', reason: 'Invented.' }
+      : mode === 'duplicate-ranked'
+        ? { decision: 'select', rankedIds: ['candidate-1', 'candidate-1'], reason: 'Repeated candidate.' }
+      : mode === 'ranked'
+        ? { decision: 'select', rankedIds: ['candidate-1', 'candidate-2'], reason: 'Observed matches in best-first order.' }
       : { decision: 'select', selectedId: 'candidate-1', reason: 'Observed semantic match.' };
   res.end(JSON.stringify({
     model: 'selection-test',
@@ -203,6 +207,34 @@ try {
   assert.equal(JSON.stringify(providerInput).includes('TEST_SECRET'), false);
   assert.equal(JSON.stringify(providerInput).includes('private@example.com'), false);
   assert.equal(JSON.stringify(providerInput).includes('6383'), false);
+
+  mode = 'ranked';
+  const ranked = await rankAmazonCandidatesWithProvider({
+    request: 'fruity Nature Valley granola bars',
+    primeRequired: true,
+    candidates: [
+      candidate({
+        price: null,
+        primeEligible: false,
+        freeShipping: false,
+        requiresProductPageVerification: true
+      }),
+      candidate({ id: 'candidate-2', asin: 'B000FRUIT2' })
+    ],
+    timeoutMs: 1000
+  });
+  assert.equal(ranked?.selectedCandidateId, 'candidate-2', 'a model-approved unconditional search offer is preferred');
+  assert.deepEqual(ranked?.alternativeCandidateIds, ['candidate-1']);
+
+  mode = 'duplicate-ranked';
+  const duplicateRanked = await rankAmazonCandidatesWithProvider({
+    request: 'fruity Nature Valley granola bars',
+    primeRequired: true,
+    candidates: [candidate(), candidate({ id: 'candidate-2', asin: 'B000FRUIT2' })],
+    timeoutMs: 1000
+  });
+  assert.equal(duplicateRanked, null, 'duplicate ranked candidate IDs fail closed');
+  mode = 'select';
 
   const callsBeforeDuplicate = calls;
   const duplicate = await rankAmazonCandidatesWithProvider({

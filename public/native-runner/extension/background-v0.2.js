@@ -1464,12 +1464,11 @@ function normalizeSelectionIntelligenceCandidate(candidate = null) {
 async function consultAmazonSelectionIntelligence(session, plan, action, quickOutcome, tabId) {
   if (session?.selectionIntelligence?.enabled !== true
     || quickOutcome?.selectionKind !== 'no_verified_candidate') return null;
-  const candidates = (Array.isArray(quickOutcome.intelligenceCandidates)
+  const observedCandidates = (Array.isArray(quickOutcome.intelligenceCandidates)
     ? quickOutcome.intelligenceCandidates
     : [])
-    .slice(0, Math.min(12, Number(session.selectionIntelligence.maxCandidates) || 12))
-    .map(normalizeSelectionIntelligenceCandidate)
-    .filter(Boolean);
+    .slice(0, Math.min(12, Number(session.selectionIntelligence.maxCandidates) || 12));
+  const candidates = observedCandidates.map(normalizeSelectionIntelligenceCandidate).filter(Boolean);
   if (!candidates.length || new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) return null;
   const observationHash = await hashPlan({
     schema: 'magic-city-amazon-candidate-observation-v1',
@@ -1518,6 +1517,20 @@ async function consultAmazonSelectionIntelligence(session, plan, action, quickOu
   }
   const selected = candidates.find((candidate) => candidate.id === advice.selectedCandidateId);
   if (!selected) return null;
+  const alternativeIds = Array.isArray(advice.alternativeCandidateIds)
+    ? [...new Set(advice.alternativeCandidateIds.map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 1)
+    : [];
+  if (alternativeIds.includes(selected.id)
+    || alternativeIds.some((id) => !candidates.some((candidate) => candidate.id === id))) return null;
+  const intelligenceAlternatives = alternativeIds.map((id) => {
+    const normalized = candidates.find((candidate) => candidate.id === id);
+    const observed = observedCandidates.find((candidate) => String(candidate?.id || '') === id);
+    const url = String(observed?.url || '').trim();
+    if (!normalized || !url || domainForUrl(url) !== plan.targetDomain) return null;
+    if (plan.targetDomain === 'amazon.com'
+      && (!isAmazonRetailProductUrl(url) || amazonProductAsin(url) !== normalized.asin)) return null;
+    return { ...normalized, url };
+  }).filter(Boolean);
   const revalidated = await amazonSearchCardAddToCart(tabId, {
     ...action,
     intelligenceApprovedCandidate: selected
@@ -1528,7 +1541,52 @@ async function consultAmazonSelectionIntelligence(session, plan, action, quickOu
     intelligenceConsulted: true,
     intelligenceDecision: 'select',
     intelligenceRequestId: requestId,
-    intelligenceObservationHash: observationHash
+    intelligenceObservationHash: observationHash,
+    intelligenceAlternatives
+  };
+}
+
+function verifyAmazonProductPageState(selectedState = null, action = {}) {
+  const summary = selectedState?.checkoutSummary || {};
+  const productIdentityVerified = amazonProductIdentityMatches(
+    action.query || action.selectionBrief || '',
+    summary.productTitle || '',
+    summary.productPackageEvidence || ''
+  );
+  const selectedProductPrice = parseUsdAmount(summary.productPrice);
+  const priceVerified = Number.isFinite(selectedProductPrice) && selectedProductPrice > 0;
+  const priceWithinCap = priceVerified && (
+    !Number.isFinite(Number(action.maxPrice))
+    || Number(action.maxPrice) <= 0
+    || selectedProductPrice <= Number(action.maxPrice) + 0.005
+  );
+  const fulfillmentVerified = action.primeRequired !== true || (
+    summary.productPrimeEligible === true
+    && summary.productShippingKnown === true
+    && summary.productPrimeFreeShippingEligible === true
+  );
+  const addToCartAvailable = selectedState?.addToCartAvailable === true;
+  const verified = productIdentityVerified && addToCartAvailable && priceWithinCap && fulfillmentVerified;
+  const reason = verified
+    ? ''
+    : !productIdentityVerified
+      ? 'Amazon opened the selected product page, but its full product identity did not match the approved request.'
+      : !addToCartAvailable
+        ? 'Amazon opened the matching product page, but no verified Add to Cart control was available.'
+        : !priceVerified
+          ? 'Amazon opened the matching product page, but its one-time purchase price could not be verified.'
+          : !priceWithinCap
+            ? `The matching product costs $${selectedProductPrice.toFixed(2)}, above the approved $${Number(action.maxPrice).toFixed(2)} item budget.`
+            : productFulfillmentFailureReason(selectedState, action) || 'The matching product page did not verify Prime and unconditional free delivery.';
+  return {
+    verified,
+    productIdentityVerified,
+    selectedProductPrice,
+    priceVerified,
+    priceWithinCap,
+    fulfillmentVerified,
+    fulfillmentOnlyFailure: productIdentityVerified && addToCartAvailable && priceWithinCap && !fulfillmentVerified,
+    reason
   };
 }
 
@@ -1553,7 +1611,7 @@ async function completeAmazonSelectionOutcome(tabId, plan, action, outcome, chec
   if (!navigation.confirmed) {
     return { ...outcome, completed: false, navigationConfirmed: false, reason: 'The exact selected product page did not open.' };
   }
-  const selectedState = await waitForPurchasableProduct(tabId, checkoutProfile);
+  let selectedState = await waitForPurchasableProduct(tabId, checkoutProfile);
   if (outcome.requiresProductPageVerification !== true) {
     return {
       ...outcome,
@@ -1562,49 +1620,66 @@ async function completeAmazonSelectionOutcome(tabId, plan, action, outcome, chec
       state: selectedState
     };
   }
-  const summary = selectedState?.checkoutSummary || {};
-  const productIdentityVerified = amazonProductIdentityMatches(
-    action.query || action.selectionBrief || '',
-    summary.productTitle || '',
-    summary.productPackageEvidence || ''
-  );
-  const selectedProductPrice = parseUsdAmount(summary.productPrice);
-  const priceVerified = Number.isFinite(selectedProductPrice) && selectedProductPrice > 0;
-  const priceWithinCap = priceVerified && (
-    !Number.isFinite(Number(action.maxPrice))
-    || Number(action.maxPrice) <= 0
-    || selectedProductPrice <= Number(action.maxPrice) + 0.005
-  );
-  const fulfillmentVerified = action.primeRequired !== true || (
-    summary.productPrimeEligible === true
-    && summary.productShippingKnown === true
-    && summary.productPrimeFreeShippingEligible === true
-  );
-  if (!productIdentityVerified || !selectedState?.addToCartAvailable || !priceWithinCap || !fulfillmentVerified) {
-    const reason = !productIdentityVerified
-      ? 'Amazon opened the selected product page, but its full product identity did not match the approved request.'
-      : !selectedState?.addToCartAvailable
-        ? 'Amazon opened the matching product page, but no verified Add to Cart control was available.'
-        : !priceVerified
-          ? 'Amazon opened the matching product page, but its one-time purchase price could not be verified.'
-          : !priceWithinCap
-            ? `The matching product costs $${selectedProductPrice.toFixed(2)}, above the approved $${Number(action.maxPrice).toFixed(2)} item budget.`
-            : productFulfillmentFailureReason(selectedState, action) || 'The matching product page did not verify Prime and unconditional free delivery.';
+  let verification = verifyAmazonProductPageState(selectedState, action);
+  if (!verification.verified && verification.fulfillmentOnlyFailure) {
+    const alternative = Array.isArray(outcome.intelligenceAlternatives)
+      ? outcome.intelligenceAlternatives.find((candidate) => candidate?.asin && candidate.asin !== outcome.selected?.asin)
+      : null;
+    if (alternative?.url
+      && domainForUrl(alternative.url) === plan.targetDomain
+      && (plan.targetDomain !== 'amazon.com'
+        || isAmazonRetailProductUrl(alternative.url) && amazonProductAsin(alternative.url) === alternative.asin)) {
+      const previous = await chrome.tabs.get(tabId).catch(() => ({ url: '' }));
+      const fallbackNavigation = await confirmCandidateNavigation(tabId, plan, alternative.url, previous.url);
+      if (fallbackNavigation.confirmed) {
+        const fallbackState = await waitForPurchasableProduct(tabId, checkoutProfile);
+        const fallbackVerification = verifyAmazonProductPageState(fallbackState, action);
+        if (fallbackVerification.verified) {
+          return {
+            ...outcome,
+            productPageVerified: true,
+            productIdentityVerified: true,
+            selected: { ...alternative, price: fallbackVerification.selectedProductPrice },
+            navigationConfirmed: true,
+            observedNavigationUrl: fallbackNavigation.observedUrl,
+            fallbackAttempts: 1,
+            excludedCandidateAsins: [outcome.selected?.asin].filter(Boolean),
+            intelligenceAlternatives: [],
+            state: fallbackState
+          };
+        }
+        selectedState = fallbackState;
+        verification = fallbackVerification;
+        outcome = {
+          ...outcome,
+          selected: alternative,
+          navigationConfirmed: true,
+          observedNavigationUrl: fallbackNavigation.observedUrl,
+          fallbackAttempts: 1,
+          excludedCandidateAsins: [outcome.selected?.asin].filter(Boolean),
+          intelligenceAlternatives: []
+        };
+      }
+    }
+  }
+  if (!verification.verified) {
     return {
       ...outcome,
       completed: false,
       selectionKind: 'no_verified_candidate',
+      productPageVerified: false,
+      productIdentityVerified: verification.productIdentityVerified,
       navigationConfirmed: true,
-      observedNavigationUrl: navigation.observedUrl,
+      observedNavigationUrl: outcome.observedNavigationUrl || navigation.observedUrl,
       state: selectedState,
-      reason
+      reason: verification.reason
     };
   }
   return {
     ...outcome,
     productPageVerified: true,
     productIdentityVerified: true,
-    selected: { ...outcome.selected, price: selectedProductPrice },
+    selected: { ...outcome.selected, price: verification.selectedProductPrice },
     navigationConfirmed: true,
     observedNavigationUrl: navigation.observedUrl,
     state: selectedState

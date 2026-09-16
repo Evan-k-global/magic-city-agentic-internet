@@ -7585,6 +7585,11 @@ function amazonSelectionIntelligenceResponse({
   reason = ''
 } = {}) {
   const selectedCandidateId = String(rank?.selectedCandidateId || '').trim() || null;
+  const alternativeCandidateIds = [...new Set((Array.isArray(rank?.alternativeCandidateIds)
+    ? rank.alternativeCandidateIds
+    : [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => value && value !== selectedCandidateId))].slice(0, 1);
   const decision = selectedCandidateId
     ? 'select'
     : rank?.decision === 'request_user'
@@ -7599,6 +7604,7 @@ function amazonSelectionIntelligenceResponse({
     observationHash,
     decision,
     selectedCandidateId,
+    alternativeCandidateIds,
     reason: String(rank?.reason || reason || 'Product-match intelligence was unavailable.').slice(0, 160)
   };
 }
