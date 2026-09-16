@@ -1548,10 +1548,12 @@ async function consultAmazonSelectionIntelligence(session, plan, action, quickOu
 
 function verifyAmazonProductPageState(selectedState = null, action = {}) {
   const summary = selectedState?.checkoutSummary || {};
+  const productTitle = String(summary.productTitle || '').trim();
+  const packageEvidence = String(summary.productPackageEvidence || '').trim();
   const productIdentityVerified = amazonProductIdentityMatches(
     action.query || action.selectionBrief || '',
-    summary.productTitle || '',
-    summary.productPackageEvidence || ''
+    productTitle,
+    packageEvidence
   );
   const selectedProductPrice = parseUsdAmount(summary.productPrice);
   const priceVerified = Number.isFinite(selectedProductPrice) && selectedProductPrice > 0;
@@ -1566,10 +1568,19 @@ function verifyAmazonProductPageState(selectedState = null, action = {}) {
     && summary.productPrimeFreeShippingEligible === true
   );
   const addToCartAvailable = selectedState?.addToCartAvailable === true;
+  const unreadableProductPage = !productTitle
+    && !packageEvidence
+    && !priceVerified
+    && summary.productShippingKnown !== true
+    && !addToCartAvailable
+    && selectedState?.providerChallenge !== true
+    && selectedState?.loginRequired !== true;
   const verified = productIdentityVerified && addToCartAvailable && priceWithinCap && fulfillmentVerified;
   const reason = verified
     ? ''
-    : !productIdentityVerified
+    : unreadableProductPage
+      ? 'Amazon opened the selected product URL, but did not expose verifiable product details.'
+      : !productIdentityVerified
       ? 'Amazon opened the selected product page, but its full product identity did not match the approved request.'
       : !addToCartAvailable
         ? 'Amazon opened the matching product page, but no verified Add to Cart control was available.'
@@ -1585,6 +1596,7 @@ function verifyAmazonProductPageState(selectedState = null, action = {}) {
     priceVerified,
     priceWithinCap,
     fulfillmentVerified,
+    unreadableProductPage,
     fulfillmentOnlyFailure: productIdentityVerified && addToCartAvailable && priceWithinCap && !fulfillmentVerified,
     reason
   };
@@ -1621,7 +1633,7 @@ async function completeAmazonSelectionOutcome(tabId, plan, action, outcome, chec
     };
   }
   let verification = verifyAmazonProductPageState(selectedState, action);
-  if (!verification.verified && verification.fulfillmentOnlyFailure) {
+  if (!verification.verified && (verification.fulfillmentOnlyFailure || verification.unreadableProductPage)) {
     const alternative = Array.isArray(outcome.intelligenceAlternatives)
       ? outcome.intelligenceAlternatives.find((candidate) => candidate?.asin && candidate.asin !== outcome.selected?.asin)
       : null;
