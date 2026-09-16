@@ -681,6 +681,7 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
     const priceInconclusive = candidate.priceConflict || !Number.isFinite(candidate.price) || candidate.price <= 0;
     if (!priceInconclusive && Number.isFinite(maxPrice) && candidate.price > maxPrice + 0.005) { rejected.budget += 1; continue; }
     const fulfillmentInconclusive = requiresFulfillment && !(candidate.prime && candidate.freeShipping);
+    const conditionalOnlyFulfillment = requiresFulfillment && candidate.conditionalShipping && !candidate.freeShipping;
     if (priceInconclusive) rejected.price += 1;
     if (fulfillmentInconclusive) {
       rejected.fulfillment += 1;
@@ -688,6 +689,9 @@ export function selectAmazonSearchCard(rawAction = {}, performClick = true) {
       if (!candidate.freeShipping) rejected.freeShipping += 1;
       if (candidate.conditionalShipping) rejected.conditionalShipping += 1;
     }
+    // A complete threshold message is conclusive search-card evidence. Do not
+    // ask the model to rescue an offer that is free only after a minimum order.
+    if (conditionalOnlyFulfillment) continue;
     if (priceInconclusive || fulfillmentInconclusive) {
       if (approvedIntelligenceCandidate && packageMatch.kind === 'exact') {
         if (approvedEvidenceMatches(candidate, packageMatch.pack)) bestExact = candidate;
