@@ -1,3 +1,5 @@
+import { filterModelObservation } from './model-privacy.js';
+
 const MODEL_REQUEST_SCHEMA = 'magic-city-helper-model-request-v1';
 const MODEL_RESPONSE_SCHEMA = 'magic-city-helper-model-response-v1';
 const MODEL_DECISIONS = new Set(['select_candidate', 'abstain', 'request_user']);
@@ -182,6 +184,7 @@ export async function consultPartnerModel({
   session,
   planAction,
   observation,
+  modelConsent = '',
   purpose = 'select_observed_candidate',
   fetchImpl = fetch
 }) {
@@ -193,7 +196,8 @@ export async function consultPartnerModel({
   const endpoint = new URL(String(config.path || ''), origin);
   if (endpoint.origin !== origin) throw new Error('model_adapter_origin_mismatch');
   const binding = missionBinding(session, planAction);
-  const safeObservation = boundedObservation(observation, config.allowedQueryParameters || []);
+  const filtered = filterModelObservation(observation, { ...config, controlPlaneOrigin: origin }, modelConsent);
+  const safeObservation = boundedObservation(filtered, config.allowedQueryParameters || []);
   const observationHash = await sha256(stableJson(safeObservation));
   const request = {
     schema: MODEL_REQUEST_SCHEMA,
@@ -202,6 +206,7 @@ export async function consultPartnerModel({
     observationHash,
     purpose: compact(purpose, 80),
     modelId: compact(config.modelId, 120),
+    dataRouting: config.dataRouting,
     observation: safeObservation
   };
   const timeoutMs = Math.max(1000, Math.min(20000, Number(config.timeoutMs) || 15000));
@@ -218,6 +223,7 @@ export async function consultPartnerModel({
         'x-magic-city-helper-model-schema': MODEL_REQUEST_SCHEMA
       },
       body: JSON.stringify(request),
+      redirect: 'error',
       signal: controller.signal
     });
     data = await readBoundedJson(response, controller.signal);

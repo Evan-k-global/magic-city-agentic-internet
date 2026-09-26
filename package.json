@@ -5,6 +5,10 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "check:deployment-security": "node scripts/check-deployment-security.mjs",
+    "test:deployment-security": "node scripts/test-deployment-security.mjs",
+    "test:custom-helper-privacy-controls": "node scripts/test-custom-helper-privacy-controls.mjs",
+    "test:production-security-integration": "node scripts/test-production-security-integration.mjs",
     "start": "node --env-file=.env src/server.js",
     "dev": "node --env-file=.env --watch src/server.js",
     "start:food-plugin": "node --env-file=.env src/localFoodPlugin.js",

@@ -14,13 +14,18 @@ node scripts/package-custom-helper-extension.mjs \
   --profile release
 npm run test:custom-helper-extension-packaging
 npm run test:custom-helper-model-adapter
+npm run test:custom-helper-privacy-controls
 npm run smoke:custom-helper-extension-package
 ```
 
-The smoke test must pass against the packaged zip, not the source folder. It
-loads the unzipped release artifact in Chromium, pairs the helper, registers the
-custom plugin ID, starts a Magic Internet Agent mission, polls it, claims it,
-emits a holder-signed checkpoint, and fulfills the session with a proof trail.
+The smoke test builds and extracts a development-profile ZIP for loopback
+fixtures. It pairs the helper, registers the custom plugin ID, starts a Magic
+Internet Agent mission, polls it, claims it and emits holder-signed checkpoints.
+The read-only starter then hands off before unsupported shopping actions; this
+does not demonstrate a completed purchase. Packaging tests separately verify
+the release manifest has exact optional merchant permissions and no loopback
+access. Before publishing, test the actual partner release ZIP against its
+HTTPS staging service as well.
 
 ## Manifest
 
@@ -41,6 +46,11 @@ emits a holder-signed checkpoint, and fulfills the session with a proof trail.
   `eval`, `new Function`, or model-supplied JavaScript programs.
 - Model access is disabled unless an authenticated partner control-plane adapter
   is configured. Provider keys never enter extension config or browser storage.
+- Model routing, observation origins and fields are explicit. Popup consent is
+  required and changing that policy invalidates consent. Content scripts cannot
+  grant model consent through the popup-only message handler.
+- The popup shows granted optional sites and can revoke each one. Required
+  development permissions are labelled as required, not falsely revocable.
 
 ## Protocol Contract
 

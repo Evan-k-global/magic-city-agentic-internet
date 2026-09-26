@@ -58,6 +58,14 @@ custom helper must keep:
 
 5. Pair, grant the configured page access, register, and poll from the popup.
 
+The popup lists granted page origins with individual revoke controls. Revocation
+removes future extension access; it does not undo completed actions or erase data
+already sent to a service. The control-plane permission is required for pairing
+and is not removed by these page-access buttons.
+Development fixture origins are required manifest permissions and are shown as
+required rather than offering a revoke button Chrome cannot honor. Release
+merchant permissions remain optional and revocable.
+
 Polling is a recovery/discovery mechanism, not purchase authorization. A user
 must start the mission in Magic City first. The returned session contains a
 short-lived `extensionRunDispatch.nonce`; the starter presents that same nonce
@@ -97,6 +105,11 @@ Release docs:
   disabled by default and calls only an authenticated route on the configured
   control plane. The model can select an observed candidate or abstain; it
   cannot return executable code or expand mission authority.
+- Starter 0.3.2 requires explicit local/cloud routing, an exact observation-origin
+  and field allowlist, and popup opt-in before model calls. Read the model-access
+  guide for the new `modelConsent` argument and page classification. Do not
+  silently migrate enabled 0.3.1 adapters: package validation intentionally asks
+  for the privacy policy. Defaults remain disabled.
 - Advertise only implemented capabilities. The checked-in example intentionally
   has no cart, checkout, credential, or purchase capability.
 - Test the final zip artifact before submission.

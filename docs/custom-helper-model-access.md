@@ -34,6 +34,12 @@ Enable the packaged adapter in the partner build configuration:
     "mode": "control_plane",
     "path": "/partner/model/consult",
     "modelId": "partner-selection-model",
+    "dataRouting": "local",
+    "observationPolicy": {
+      "allowedOrigins": ["https://shop.example.com"],
+      "pageFields": ["url", "title"],
+      "candidateFields": ["id", "title", "price", "currency", "availability"]
+    },
     "timeoutMs": 15000,
     "allowedQueryParameters": ["q"]
   }
@@ -46,6 +52,26 @@ body. Responses larger than 64 KiB are rejected. Query parameters default to
 none; list only the exact keys the model needs. URL credentials and fragments
 are always removed. The starter does not contain a provider API key, general
 model proxy or implementation of that partner-owned server route.
+
+Starter 0.3.2 also requires an explicit `local` or `cloud` routing declaration,
+exact HTTPS observation origins drawn from the helper's launch origins, and user
+opt-in in the extension popup. It sends nothing without the saved consent for
+that exact destination, model, path, origin/field policy and query allowlist.
+Changing those settings invalidates the previous opt-in. Redirects are rejected.
+Unlisted fields are removed before hashing or transmission; the default is only
+page URL and candidate ID/title. Disabled helpers add no model request.
+
+Only `search`, `product` and `catalog` observations explicitly classified as
+non-sensitive are accepted. Login, account, wallet, cart, checkout and payment
+paths are denied even when mistakenly classified as a catalog page. This is a
+conservative starter guard, **not automatic personal-data detection**. Use only
+public catalog facts, including on a signed-in page. Never set the flag below
+without examining and redacting the extracted facts.
+
+`local` means local to the operator's model service, not necessarily the user's
+computer: observations still travel to the configured control plane. The backend
+must enforce local-only routing and prohibit silent cloud fallback. The popup
+does not attest where the backend actually runs inference.
 
 ## Packaged Client Contract
 
@@ -61,11 +87,12 @@ const consultation = await consultPartnerModel({
   config: PARTNER_CONFIG.modelAdapter,
   controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
   bearer: config.deviceToken,
+  modelConsent: config.modelConsent,
   session,
   planAction,
   purpose: 'select_observed_candidate',
   observation: {
-    page: { url, title, heading, description },
+    page: { url, title, kind: 'product', containsSensitiveData: false },
     candidates: observedCandidates
   }
 });
@@ -127,6 +154,9 @@ The authenticated partner route should:
 4. Construct a provider-specific prompt from the bounded schema.
 5. Require a structured response and return the response envelope above.
 6. Log timing and redacted identifiers, never raw secrets or full page content.
+7. Enforce the routing declaration, configured provider and observation policy
+   again server-side; add per-user quotas, one in-flight request per action and a
+   bounded deadline. Never treat a client routing flag as provider authorization.
 
 The route may call Ollama, another local inference server, or a hosted model.
 Provider credentials belong in the control plane or its secret manager. Do not

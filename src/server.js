@@ -1,3 +1,6 @@
+import './securityBootstrap.js';
+import { createRequestSecurity, deploymentIsProduction, productionAdminAccount } from './deploymentSecurity.js';
+import { createRequestLimiter } from './requestRateLimits.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -338,32 +341,11 @@ import {
 } from './foodCatalog94107.js';
 import { getWorkflowDefinition, listWorkflowDefinitionsForClient } from './workflowRegistry.js';
 
-function loadEnvFileWithOverride(filePath) {
-  try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const match = trimmed.match(/^([A-Z0-9_]+)=(.*)$/);
-      if (!match) continue;
-      const [, key, value] = match;
-      // Deployment secrets must override local convenience env files.
-      if (typeof process.env[key] === 'undefined' || process.env[key] === '') process.env[key] = value;
-    }
-  } catch {
-    // ignore missing local env file
-  }
-}
-
-loadEnvFileWithOverride(path.resolve(process.cwd(), '.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'providers.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'stripe.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'square.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'google.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'github.env'));
-
 const PORT = Number(process.env.PORT ?? 4411);
 const HOST = process.env.HOST ?? '0.0.0.0';
+const requestSecurity = createRequestSecurity();
+const productionProfile = deploymentIsProduction();
+const requestLimiter = createRequestLimiter();
 const MAGIC_CITY_SAFE_HTTP_STARTUP = process.env.MAGIC_CITY_SAFE_HTTP_STARTUP !== 'false';
 const MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE = String(process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE || '').toLowerCase() === 'true';
 const MAGIC_CITY_SANTACLAWZ_MODE = ['disabled', 'read_only', 'live'].includes(String(process.env.MAGIC_CITY_SANTACLAWZ_MODE || 'disabled').trim().toLowerCase())
@@ -584,9 +566,9 @@ const AUTH_EMAIL_FROM = process.env.AUTH_EMAIL_FROM || process.env.RESEND_FROM_E
 const AUTH_EMAIL_REPLY_TO = process.env.AUTH_EMAIL_REPLY_TO || '';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || process.env.AUTH_EMAIL_API_KEY || '';
 const AUTH_PASSWORD_RESET_DEV_LINKS =
-  process.env.AUTH_PASSWORD_RESET_DEV_LINKS === 'true' ||
-  (process.env.NODE_ENV !== 'production' && process.env.AUTH_PASSWORD_RESET_DEV_LINKS !== 'false');
-const MAGIC_CITY_PUBLIC_BASE_URL = String(process.env.MAGIC_CITY_PUBLIC_BASE_URL || 'https://magic-city.ai')
+  !productionProfile && (process.env.AUTH_PASSWORD_RESET_DEV_LINKS === 'true' ||
+  (process.env.NODE_ENV !== 'production' && process.env.AUTH_PASSWORD_RESET_DEV_LINKS !== 'false'));
+const MAGIC_CITY_PUBLIC_BASE_URL = String(process.env.MAGIC_CITY_CANONICAL_ORIGIN || process.env.MAGIC_CITY_PUBLIC_BASE_URL || 'https://magic-city.ai')
   .trim()
   .replace(/\/+$/, '') || 'https://magic-city.ai';
 const MAGIC_CITY_PUBLIC_DOMAIN = (() => {
@@ -601,10 +583,10 @@ const MAGIC_CITY_GOOGLE_PRODUCTION_HOSTS = new Set(['magic-city.ai']);
 const MAGIC_CITY_MCP_SCOPE = process.env.MAGIC_CITY_MCP_SCOPE || 'magiccity.mcp';
 const MCP_OAUTH_SECRET =
   process.env.MCP_OAUTH_SECRET ||
-  process.env.GOOGLE_CONNECTOR_SECRET ||
+  (productionProfile ? '' : process.env.GOOGLE_CONNECTOR_SECRET ||
   process.env.ADMIN_TOKEN ||
   process.env.STRIPE_SECRET_KEY ||
-  'magic-city-staging-oauth-secret';
+  'magic-city-staging-oauth-secret');
 const MISSION_BOUND_AUTH_SECRET =
   process.env.MISSION_BOUND_AUTH_SECRET ||
   process.env.MAGIC_CITY_MISSION_AUTH_SECRET ||
@@ -646,19 +628,18 @@ const MAGIC_CITY_CREDIT_BACKED_X402_MAX_USD_CENTS = Math.max(
 );
 const EVM_ERC20_INTERFACE = new Interface(['function transfer(address to, uint256 value) returns (bool)']);
 const EVM_TRANSFER_EVENT_INTERFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
-const requestRateLimitState = new Map();
 const GOOGLE_CONNECTOR_SECRET =
   process.env.GOOGLE_CONNECTOR_SECRET ||
-  process.env.AUTH_CONNECTOR_SECRET ||
+  (productionProfile ? '' : process.env.AUTH_CONNECTOR_SECRET ||
   process.env.ADMIN_TOKEN ||
   process.env.STRIPE_SECRET_KEY ||
-  '';
+  '');
 const GITHUB_CONNECTOR_SECRET =
   process.env.GITHUB_CONNECTOR_SECRET ||
-  process.env.AUTH_CONNECTOR_SECRET ||
+  (productionProfile ? '' : process.env.AUTH_CONNECTOR_SECRET ||
   process.env.GITHUB_CLIENT_SECRET ||
   process.env.ADMIN_TOKEN ||
-  '';
+  '');
 const LOCAL_ADMIN_REQUESTER_IDS = new Set(
   String(process.env.LOCAL_ADMIN_REQUESTER_IDS || 'evan,local-admin,magic-city-admin')
     .split(',')
@@ -1126,11 +1107,7 @@ function getMissionVerifierKeyPair() {
 }
 
 function buildRequestBaseUrl(req) {
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  const proto = forwardedProto || (req.socket?.encrypted ? 'https' : 'http');
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-  const host = forwardedHost || String(req.headers.host || '').trim() || `127.0.0.1:${PORT}`;
-  return `${proto}://${host}`.replace(/\/+$/, '');
+  return requestSecurity.baseUrl(req);
 }
 
 function getRequestHostname(req) {
@@ -1142,11 +1119,7 @@ function getRequestHostname(req) {
 }
 
 function isSecureRequest(req) {
-  try {
-    return new URL(buildRequestBaseUrl(req)).protocol === 'https:';
-  } catch {
-    return false;
-  }
+  return requestSecurity.secure(req);
 }
 
 function resolveSessionCookieDomain(req) {
@@ -1361,22 +1334,6 @@ function createHttpError(message, statusCode = 500, options = {}) {
   return error;
 }
 
-function consumeRateLimit(key, { windowMs, max }) {
-  const now = Date.now();
-  const entry = requestRateLimitState.get(key) ?? { timestamps: [] };
-  const timestamps = entry.timestamps.filter((value) => now - value < windowMs);
-  if (timestamps.length >= max) {
-    const retryAfterMs = Math.max(1000, windowMs - (now - timestamps[0]));
-    return {
-      allowed: false,
-      retryAfterMs
-    };
-  }
-  timestamps.push(now);
-  requestRateLimitState.set(key, { timestamps });
-  return { allowed: true, retryAfterMs: 0 };
-}
-
 function buildRateLimitKey(req, bucket, { auth = null, extra = '' } = {}) {
   const subject =
     auth?.oauthAccessToken?.id
@@ -1387,8 +1344,13 @@ function buildRateLimitKey(req, bucket, { auth = null, extra = '' } = {}) {
   return [bucket, subject, extra].filter(Boolean).join(':');
 }
 
-function enforceRateLimit(req, { bucket, max, windowMs, auth = null, extra = '' }) {
-  const result = consumeRateLimit(buildRateLimitKey(req, bucket, { auth, extra }), { max, windowMs });
+async function enforceRateLimit(req, { bucket, max, windowMs, auth = null, extra = '' }) {
+  let result;
+  try {
+    result = await requestLimiter.consume(buildRateLimitKey(req, bucket, { auth, extra }), { max, windowMs });
+  } catch {
+    throw createHttpError('rate_limit_service_unavailable', 503);
+  }
   if (result.allowed) return true;
   throw createHttpError('rate_limit_exceeded', 429, {
     headers: { 'Retry-After': String(Math.ceil(result.retryAfterMs / 1000)) },
@@ -1584,7 +1546,7 @@ function serializeAuthUser(authUser, authSession = null) {
       github: buildGitHubConnectorStatus(authUser),
       evmWallets: buildEvmWalletStatus(authUser)
     },
-    adminAccount: isLocalAdminRequester(authUser.requesterId) || LOCAL_ADMIN_EMAILS.has(String(authUser.email || '').trim().toLowerCase()),
+    adminAccount: productionProfile ? productionAdminAccount(authUser) : isLocalAdminRequester(authUser.requesterId) || LOCAL_ADMIN_EMAILS.has(String(authUser.email || '').trim().toLowerCase()),
     createdAt: authUser.createdAt,
     lastLoginAt: authUser.lastLoginAt
   };
@@ -7979,6 +7941,7 @@ function requirePluginApiKeyOrNativeRunner(req, options = {}) {
   if (nativeRunnerDevice) {
     return { type: 'native_runner', nativeRunnerDevice };
   }
+  if (!PUBLIC_API_KEYS.size) throw createHttpError('plugin_auth_not_configured', 503);
   assertPublicApiKey(req);
   return { type: 'api_key', nativeRunnerDevice: null };
 }
@@ -11554,20 +11517,17 @@ function maybeAutoTopupRequester(userHash, amountUnitsNeeded) {
 }
 
 function isLocalAdminRequester(requesterId) {
+  if (productionProfile) return false;
   if (!requesterId) return false;
   return LOCAL_ADMIN_REQUESTER_IDS.has(String(requesterId).trim().toLowerCase());
 }
 
 function getRequestIp(req) {
-  const forwarded = String(req.headers['x-forwarded-for'] || '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean)[0];
-  const remote = forwarded || req.socket?.remoteAddress || '';
-  return String(remote || '').trim().toLowerCase();
+  return requestSecurity.clientIp(req);
 }
 
 function hasAdminAccess(req, authUser = null) {
+  if (productionProfile) return productionAdminAccount(authUser);
   if (authUser) {
     const requesterId = String(authUser.requesterId || '').trim().toLowerCase();
     const email = String(authUser.email || '').trim().toLowerCase();
@@ -16515,11 +16475,12 @@ function finalizeActionForIntent({ intent, actionRun, execution, candidateAgent,
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || '/', buildRequestBaseUrl(req));
-  const urlPath = url.pathname;
-  const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
-
   try {
+    requestSecurity.setHeaders(req, res);
+    const url = new URL(req.url || '/', buildRequestBaseUrl(req));
+    requestSecurity.validateBrowserMutation(req);
+    const urlPath = url.pathname;
+    const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
     if (req.method === 'GET' && urlPath === '/health') {
       const persistence = getPublicPersistenceStatus();
       const persistenceReady = persistence.ready
@@ -16611,7 +16572,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/mission-auth/capabilities') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'mission_auth_issue_capability',
         max: 40,
         windowMs: 60 * 1000,
@@ -16683,7 +16644,7 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const auth = getAuthenticatedContext(req);
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'mission_auth_create_receipt',
         max: auth?.authUser ? 30 : 10,
         windowMs: 60 * 1000,
@@ -17082,7 +17043,7 @@ const server = http.createServer(async (req, res) => {
       const auth = getAuthenticatedContext(req);
       const agentId = String(url.searchParams.get('agentId') || req.headers['x-magic-city-agent-id'] || '').trim();
       const requesterHash = auth?.authUser ? getAuthUserRequesterHash(auth.authUser) : '';
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_list_missions',
         max: auth?.authUser ? 60 : 20,
         windowMs: 60 * 1000,
@@ -17105,7 +17066,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/agent-sdk/v1/missions') {
       const { auth } = requireAgentSdkWriteAuth(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_propose_mission',
         max: auth?.authUser ? 40 : 16,
         windowMs: 60 * 1000,
@@ -17159,7 +17120,7 @@ const server = http.createServer(async (req, res) => {
       if (!mission) return notFound(res);
       const caller = resolveAgentSdkCaller(req, body, auth);
       assertAgentSdkMissionAccess(req, auth?.authUser || null, caller, mission);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_submit_options',
         max: 60,
         windowMs: 60 * 1000,
@@ -17199,7 +17160,7 @@ const server = http.createServer(async (req, res) => {
       if (!mission) return notFound(res);
       const caller = resolveAgentSdkCaller(req, body, auth);
       assertAgentSdkMissionAccess(req, auth?.authUser || null, caller, mission);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_submit_artifact',
         max: 40,
         windowMs: 60 * 1000,
@@ -17249,7 +17210,7 @@ const server = http.createServer(async (req, res) => {
       if (!mission) return notFound(res);
       const caller = resolveAgentSdkCaller(req, body, auth);
       assertAgentSdkMissionAccess(req, auth?.authUser || null, caller, mission);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_browser_worker_request',
         max: 20,
         windowMs: 60 * 1000,
@@ -17489,7 +17450,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/connectors/sessions/start') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'connector_session_start',
         max: auth?.authUser ? 40 : 16,
         windowMs: 60 * 1000,
@@ -18490,7 +18451,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/helper/pairing/start') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_helper_pairing_start',
         max: 12,
         windowMs: 60 * 1000,
@@ -18561,7 +18522,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/extension/pairing/start') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_extension_pairing_start',
         max: 12,
         windowMs: 60 * 1000,
@@ -18624,7 +18585,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/native-runner/extension/pairing/claim') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_extension_pairing_claim',
         max: 30,
         windowMs: 60 * 1000,
@@ -18754,7 +18715,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/setup') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_setup',
         max: 12,
         windowMs: 60 * 1000,
@@ -18819,7 +18780,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/rotate') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_rotate',
         max: 10,
         windowMs: 60 * 1000,
@@ -18873,7 +18834,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/revoke') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_revoke',
         max: 20,
         windowMs: 60 * 1000,
@@ -22045,7 +22006,7 @@ const server = http.createServer(async (req, res) => {
 
     if ((req.method === 'POST' || req.method === 'DELETE') && /^\/agent-hub\/agents\/[^/]+\/saved$/.test(urlPath)) {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_saved_signal',
         max: auth?.authUser ? 80 : 30,
         windowMs: 60 * 1000,
@@ -23560,7 +23521,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/proofs/verify') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'proof_verify',
         max: auth?.authUser ? 30 : 8,
         windowMs: 60 * 1000,
@@ -23873,7 +23834,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/zeko/settlement-registry/challenge') {
       const auth = getAuthenticatedContext(req);
       if (!auth) assertPublicApiKey(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'settlement_registry_challenge',
         max: auth?.authUser ? 30 : 12,
         windowMs: 60 * 1000,
@@ -23958,7 +23919,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/zeko/settlement-registry/register') {
       const auth = getAuthenticatedContext(req);
       if (!auth) assertPublicApiKey(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'settlement_registry_register',
         max: auth?.authUser ? 60 : 24,
         windowMs: 60 * 1000,
@@ -24456,7 +24417,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/challenge') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_challenge',
         max: 8,
         windowMs: 60 * 1000,
@@ -24508,7 +24469,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/verify') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_verify',
         max: 12,
         windowMs: 60 * 1000,
@@ -24561,7 +24522,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/disconnect') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_disconnect',
         max: 20,
         windowMs: 60 * 1000,
@@ -24588,7 +24549,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/payment-request') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_payment_request',
         max: 20,
         windowMs: 10 * 60 * 1000,
@@ -24694,7 +24655,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/payment-submitted') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_payment_submitted',
         max: 30,
         windowMs: 10 * 60 * 1000,
@@ -24943,7 +24904,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && urlPath === '/auth/google/start') {
       if (!isGoogleAuthAllowedForRequest(req)) return sendJson(res, 404, { error: 'google_signin_only_on_production' });
-      enforceRateLimit(req, { bucket: 'auth_google_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_google_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       if (!isGoogleConfigured()) return sendJson(res, 503, { error: 'google_not_configured' });
       const scopes = getScopesForPreset('sign_in');
       const stateToken = signGoogleOauthState({
@@ -24965,7 +24926,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/auth/github/start') {
-      enforceRateLimit(req, { bucket: 'auth_github_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_github_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       if (!isGitHubConfigured()) return sendJson(res, 503, { error: 'github_not_configured' });
       const scopes = ['read:user', 'user:email'];
       const stateToken = signGitHubOauthState({
@@ -25459,7 +25420,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/register') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_register',
         max: 20,
         windowMs: 10 * 60 * 1000
@@ -25511,7 +25472,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && urlPath === '/oauth/mcp/authorize') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_authorize_get',
         max: 90,
         windowMs: 10 * 60 * 1000,
@@ -25558,7 +25519,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/authorize') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_authorize_post',
         max: 45,
         windowMs: 10 * 60 * 1000,
@@ -25634,7 +25595,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/token') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_token',
         max: 120,
         windowMs: 10 * 60 * 1000
@@ -25732,7 +25693,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/revoke') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_revoke',
         max: 120,
         windowMs: 10 * 60 * 1000
@@ -25773,7 +25734,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/mcp') {
       res.setHeader('access-control-allow-origin', '*');
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'remote_mcp_post',
         max: auth?.authUser ? 240 : 60,
         windowMs: 60 * 1000,
@@ -25863,7 +25824,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/auth/evm-wallet/challenge') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'auth_evm_wallet_challenge_ip',
         max: 20,
         windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS
@@ -25911,7 +25872,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/auth/evm-wallet/verify') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'auth_evm_wallet_verify_ip',
         max: 30,
         windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS
@@ -25997,13 +25958,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/register') {
       const body = await readBody(req);
       requireFields(body, ['email', 'passphrase']);
-      enforceRateLimit(req, { bucket: 'auth_register_ip', max: 8, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_register_ip', max: 8, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS });
       const email = normalizeAuthEmail(body.email);
       const passphrase = String(body.passphrase || '');
       const displayName = String(body.displayName || '').trim();
       const referralCode = String(body.referralCode || '').trim();
       if (!email.includes('@')) return sendJson(res, 400, { error: 'invalid_email' });
-      enforceRateLimit(req, { bucket: 'auth_register_email', max: 3, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS, extra: email });
+      await enforceRateLimit(req, { bucket: 'auth_register_email', max: 3, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS, extra: email });
       if (passphrase.length < 8) return sendJson(res, 400, { error: 'passphrase_too_short', minLength: 8 });
       if (getAuthUserByEmail(email)) return sendJson(res, 409, { error: 'account_already_exists' });
       const salt = crypto.randomBytes(16).toString('hex');
@@ -26071,10 +26032,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/login') {
       const body = await readBody(req);
       requireFields(body, ['email', 'passphrase']);
-      enforceRateLimit(req, { bucket: 'auth_login_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_login_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       const email = normalizeAuthEmail(body.email);
       const passphrase = String(body.passphrase || '');
-      enforceRateLimit(req, { bucket: 'auth_login_email', max: 10, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS, extra: email || 'blank' });
+      await enforceRateLimit(req, { bucket: 'auth_login_email', max: 10, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS, extra: email || 'blank' });
       const authUser = getAuthUserByEmail(email);
       if (!authUser) return sendJson(res, 401, { error: 'invalid_credentials' });
       if (!passwordMatches(passphrase, authUser.passwordSalt, authUser.passwordHash)) {
@@ -26092,9 +26053,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/password-reset/request') {
       const body = await readBody(req);
       const email = normalizeAuthEmail(body.email);
-      enforceRateLimit(req, { bucket: 'auth_password_reset_ip', max: 8, windowMs: AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_password_reset_ip', max: 8, windowMs: AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS });
       if (email) {
-        enforceRateLimit(req, {
+        await enforceRateLimit(req, {
           bucket: 'auth_password_reset_email',
           max: 3,
           windowMs: AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS,
@@ -26135,7 +26096,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const token = String(body.token || '').trim();
       const passphrase = String(body.passphrase || body.newPassphrase || '');
-      enforceRateLimit(req, { bucket: 'auth_password_reset_confirm_ip', max: 15, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_password_reset_confirm_ip', max: 15, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       if (!token) return sendJson(res, 400, { error: 'missing_reset_token' });
       if (passphrase.length < 8) return sendJson(res, 400, { error: 'passphrase_too_short', minLength: 8 });
       const tokenHash = hashOpaqueValue(token);
@@ -26172,7 +26133,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/password/change') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'auth_password_change_user',
         max: 8,
         windowMs: AUTH_PASSWORD_CHANGE_RATE_LIMIT_WINDOW_MS,
@@ -26364,7 +26325,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/billing/stripe/checkout-session') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'billing_stripe_checkout_session',
         max: 12,
         windowMs: 60 * 1000,
@@ -27267,6 +27228,7 @@ function assertProductionPersistenceReady() {
 }
 
 assertProductionPersistenceReady();
+await requestLimiter.initialize();
 
 const artifactMigration = migrateLegacyExecutionArtifacts();
 if (artifactMigration.migrated) {

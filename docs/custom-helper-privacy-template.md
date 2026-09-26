@@ -64,6 +64,25 @@ The extension sends Magic City:
 Magic City should not receive raw credentials, raw payment secrets, or full page
 content.
 
+## Optional Model Processing (include only if enabled)
+
+[Operator] may send the explicitly allowlisted public catalog facts to
+[control-plane origin], which routes them to [local service or cloud provider].
+Specify the exact fields, provider, location, retention, logging and training
+policy; do not promise local-only processing solely because the extension's
+configuration says `local`. That service must enforce the configured route.
+
+Model access requires the user's opt-in in the helper popup. Changing the
+destination/model or observation policy requires renewed consent. Disabling it
+prevents subsequent consultations; it does not retract data already processed.
+Login, account, wallet, payment, checkout and other sensitive observations are
+not eligible for this public-catalog adapter. The helper must redact remaining
+personal data from otherwise eligible text before calling it.
+
+Granted optional page permissions can be revoked in the popup. This prevents
+future access, not reversal of completed actions. Removal of already-held data
+follows [operator deletion procedure].
+
 ## Local Storage
 
 The extension stores on the user's device:

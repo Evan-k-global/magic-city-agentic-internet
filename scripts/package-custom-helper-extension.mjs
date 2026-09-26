@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { normalizeModelPrivacy } from '../examples/custom-helper-extension-starter/model-privacy.js';
 
 const rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const starterDir = path.join(rootDir, 'examples/custom-helper-extension-starter');
@@ -85,7 +86,10 @@ function normalizeModelAdapter(value = {}) {
     || allowedQueryParameters.some((entry) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(entry))) {
     fail('modelAdapter.allowedQueryParameters must contain at most 20 explicit query keys');
   }
-  return { mode, path: adapterPath, modelId, timeoutMs, allowedQueryParameters };
+  let privacy;
+  try { privacy = normalizeModelPrivacy(value); } catch (error) { fail(error.message); }
+  if (mode === 'control_plane' && (privacy.dataRouting === 'disabled' || !privacy.observationPolicy.allowedOrigins.length)) fail('enabled model requires explicit dataRouting and observation origins');
+  return { mode, path: adapterPath, modelId, timeoutMs, allowedQueryParameters, ...privacy };
 }
 
 function assertNoRemoteCode(filePath) {
@@ -126,6 +130,7 @@ const helperOwnerAgentId = validateId(rawConfig.helperOwnerAgentId, 'helperOwner
 const extensionName = String(rawConfig.extensionName || '').trim();
 const extensionDescription = String(rawConfig.extensionDescription || '').trim();
 const modelAdapter = normalizeModelAdapter(rawConfig.modelAdapter);
+if (modelAdapter.observationPolicy.allowedOrigins.some((origin) => !launchOrigins.includes(origin))) fail('model observation origins must be approved launch origins');
 if (!extensionName || extensionName.length > 75) fail('extensionName must be 1-75 characters');
 if (!extensionDescription || extensionDescription.length > 132) fail('extensionDescription must be 1-132 characters');
 
@@ -147,11 +152,11 @@ for (const permission of ['storage', 'tabs', 'scripting']) {
 }
 if (permissions.includes('debugger') || permissions.includes('webRequest')) fail('starter must not ship debugger or webRequest permissions');
 
-const staticFiles = ['background.js', 'model-adapter.js', 'popup.html', 'popup.js', 'README.md', 'LICENSE'];
+const staticFiles = ['background.js', 'model-adapter.js', 'model-privacy.js', 'popup.html', 'popup.js', 'README.md', 'LICENSE'];
 for (const relativePath of staticFiles) {
   const sourcePath = path.join(starterDir, relativePath);
   if (!fs.existsSync(sourcePath)) fail(`missing ${relativePath}`);
-  if (['background.js', 'model-adapter.js', 'popup.html', 'popup.js'].includes(relativePath)) assertNoRemoteCode(sourcePath);
+  if (['background.js', 'model-adapter.js', 'model-privacy.js', 'popup.html', 'popup.js'].includes(relativePath)) assertNoRemoteCode(sourcePath);
 }
 
 const slug = helperPluginId.replace(/[^a-z0-9._-]/g, '-');
