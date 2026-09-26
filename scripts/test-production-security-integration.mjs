@@ -7,7 +7,7 @@ import net from 'node:net';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import pg from 'pg';
-import { createRequestLimiter } from '../src/requestRateLimits.js';
+import { createRequestLimiter, runLimiterQuery } from '../src/requestRateLimits.js';
 
 // Uses only a new temporary database. No DATABASE_URL from the caller is used.
 const bin = process.env.TEST_POSTGRES_BIN;
@@ -40,6 +40,11 @@ try {
   pgCommand('pg_ctl', ['-D', dataDir, '-l', log, '-o', `-h 127.0.0.1 -p ${dbPort} -k ${dir}`, '-w', 'start']);
   dbStarted = true;
   pool = new pg.Pool({ connectionString });
+  const timeoutStarted = Date.now();
+  await assert.rejects(runLimiterQuery(pool, 'SELECT pg_sleep(5)'), /statement timeout/);
+  assert.ok(Date.now() - timeoutStarted < 4500, 'database timeout must cancel work');
+  assert.equal((await pool.query('SHOW statement_timeout')).rows[0].statement_timeout, '0', 'SET LOCAL must not leak');
+  assert.equal((await runLimiterQuery(pool, 'SELECT 1 AS ok')).rows[0].ok, 1, 'new transaction works after timeout');
   const limiterEnv = { DATABASE_URL: connectionString, MAGIC_CITY_RATE_LIMIT_STORE: 'postgres' };
   for (let i = 0; i < 2; i++) {
     const limiter = createRequestLimiter({ env: limiterEnv });

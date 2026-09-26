@@ -105,6 +105,12 @@ snapshot multi-writer-safe: retain one application writer.
 
 ## Existing deployment: do not flip every setting at once
 
+For a deployment that historically reused the Google key for mission HMAC/MCP
+configuration, use the [bounded key-separation transition](mission-key-separation-migration.md).
+It preserves connector keys and opaque login/MCP sessions; only explicitly
+inventoried, still-valid legacy mission tokens receive temporary acceptance.
+It is not an automatic secret rotation or permission to bypass startup checks.
+
 Also apply the [release remediation checklist](enterprise-security-remediation-2026-09-26.md).
 Owner authentication now covers billing, private intent aliases and agent receipt
 lists; operator authentication covers attestation, slash and dispute resolution.

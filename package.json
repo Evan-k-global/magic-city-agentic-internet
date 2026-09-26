@@ -5,6 +5,8 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "test:mission-key-transition": "node scripts/test-mission-key-transition.mjs",
+    "test:mission-key-transition-http": "node scripts/test-mission-key-transition-http.mjs",
     "test:release-security": "node scripts/test-release-security.mjs",
     "test:release-route-authorization": "MAGIC_CITY_AUDIT_RELEASE_ROUTES=1 node scripts/test-production-security-integration.mjs",
     "test:native-runner-active-port-recovery": "MAGIC_CITY_BROWSER_SMOKE_FOCUS=active-port-recovery node scripts/smoke-native-runner-extension-browser.mjs",

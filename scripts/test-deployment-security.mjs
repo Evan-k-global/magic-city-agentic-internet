@@ -39,6 +39,15 @@ const production = {
 };
 for (const key of ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY']) production[key] = crypto.randomBytes(32).toString('hex');
 validateDeployment(production);
+const retainedConnectorKey = crypto.randomBytes(32).toString('hex');
+const transitionConfig = { ...production, GOOGLE_CONNECTOR_SECRET: retainedConnectorKey,
+  MISSION_BOUND_AUTH_LEGACY_SECRET: retainedConnectorKey,
+  MISSION_BOUND_AUTH_LEGACY_TOKEN_SHA256: 'a'.repeat(64),
+  MISSION_BOUND_AUTH_LEGACY_CUTOVER_AT: new Date(Date.now() - 1000).toISOString(),
+  MISSION_BOUND_AUTH_LEGACY_ACCEPT_UNTIL: new Date(Date.now() + 60000).toISOString() };
+validateDeployment(transitionConfig);
+assert.throws(() => validateDeployment({ ...transitionConfig, MISSION_BOUND_AUTH_SECRET: retainedConnectorKey }), /transition_invalid_secret|distinct_secrets/);
+assert.throws(() => validateDeployment({ ...transitionConfig, MCP_OAUTH_SECRET: retainedConnectorKey }), /distinct_secrets/);
 for (const flag of ['ETHEREUM_CONFIRMATION_INDEXER_AUTO_CONFIRM', 'ETHEREUM_SHADOW_RELAYER_LIVE_EXECUTION']) assert.throws(() => validateDeployment({ ...production, [flag]: 'true' }));
 for (const key of ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY', 'MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY', 'DATABASE_URL', 'MAGIC_CITY_CANONICAL_ORIGIN', 'MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE', 'MAGIC_CITY_REQUIRE_STATE_ENCRYPTION', 'MAGIC_CITY_REQUIRE_ARTIFACT_ENCRYPTION', 'MAGIC_CITY_POSTGRES_SINGLE_WRITER', 'MAGIC_CITY_RATE_LIMIT_STORE']) {
   assert.throws(() => validateDeployment({ ...production, [key]: '' }), undefined, `missing ${key}`);
@@ -58,7 +67,7 @@ await limits.consume('bob', { windowMs: 100, max: 2 });
 await assert.rejects(limits.consume('charlie', { windowMs: 100, max: 2 }), /capacity/);
 now = 201;
 assert.equal((await limits.consume('charlie', { windowMs: 100, max: 2 })).allowed, true);
-const outage = createRequestLimiter({ env: { MAGIC_CITY_RATE_LIMIT_STORE: 'postgres' }, pool: { query: async () => { throw new Error('db down'); } } });
+const outage = createRequestLimiter({ env: { MAGIC_CITY_RATE_LIMIT_STORE: 'postgres' }, pool: { connect: async () => { throw new Error('db down'); } } });
 await assert.rejects(outage.consume('alice', { windowMs: 100, max: 2 }), /db down/);
 
 const config = { mode: 'control_plane', path: '/model', modelId: 'local-catalog', dataRouting: 'local', observationPolicy: { allowedOrigins: ['https://shop.example'] } };

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { BlockList, isIP } from 'node:net';
+import { readMissionKeyTransition } from './missionKeyTransition.js';
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const enabled = (value) => String(value).toLowerCase() === 'true';
@@ -26,6 +27,7 @@ export function canonicalOrigin(env = process.env) {
 }
 
 export function validateDeployment(env = process.env) {
+  readMissionKeyTransition(env);
   if (env.DEPLOYMENT_PROFILE && !['development', 'production'].includes(env.DEPLOYMENT_PROFILE)) throw fail('invalid_deployment_profile');
   const origin = canonicalOrigin(env);
   if (!deploymentIsProduction(env)) return;

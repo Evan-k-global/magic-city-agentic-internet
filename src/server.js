@@ -1,4 +1,5 @@
 import './securityBootstrap.js';
+import { readMissionKeyTransition, verifyMissionTokenSignature } from './missionKeyTransition.js';
 import { createRequestSecurity, deploymentIsProduction, productionAdminAccount } from './deploymentSecurity.js';
 import { createRequestLimiter } from './requestRateLimits.js';
 import { futureExpiry, equalSecret, verifiedProviderIdentity, assertProviderAccountLink, assertOauthBrowserBinding } from './accountSecurity.js';
@@ -598,6 +599,7 @@ const MISSION_BOUND_AUTH_SECRET =
   process.env.MAGIC_CITY_MISSION_AUTH_SECRET ||
   MCP_OAUTH_SECRET;
 const MISSION_BOUND_AUTH_PUBLIC_KEY_ID = process.env.MISSION_BOUND_AUTH_PUBLIC_KEY_ID || 'magic-city-mission-bound-auth-v1';
+const MISSION_KEY_TRANSITION = readMissionKeyTransition();
 const MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY =
   process.env.MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY ||
   process.env.MAGIC_CITY_MISSION_AUTH_ED25519_PRIVATE_KEY ||
@@ -2541,10 +2543,7 @@ function verifyMissionCapabilityToken(token, {
   if (prefix !== 'mcap' || !payloadPart || !signaturePart) {
     throw createHttpError('invalid_mission_capability', 401);
   }
-  const expectedSignature = crypto.createHmac('sha256', normalizedSecret).update(payloadPart).digest('base64url');
-  const actual = Buffer.from(signaturePart);
-  const expected = Buffer.from(expectedSignature);
-  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+  if (!verifyMissionTokenSignature(String(token).trim(), normalizedSecret, MISSION_KEY_TRANSITION)) {
     throw createHttpError('invalid_mission_capability_signature', 401);
   }
   let payload = null;
