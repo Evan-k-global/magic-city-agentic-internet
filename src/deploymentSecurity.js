@@ -29,6 +29,9 @@ export function validateDeployment(env = process.env) {
   if (env.DEPLOYMENT_PROFILE && !['development', 'production'].includes(env.DEPLOYMENT_PROFILE)) throw fail('invalid_deployment_profile');
   const origin = canonicalOrigin(env);
   if (!deploymentIsProduction(env)) return;
+  for (const name of ['ETHEREUM_CONFIRMATION_INDEXER_AUTO_CONFIRM', 'ETHEREUM_SHADOW_RELAYER_LIVE_EXECUTION']) {
+    if (['true', '1', 'yes'].includes(String(env[name] || '').toLowerCase())) throw fail(`production_disallows_${name}`);
+  }
   if (!origin.startsWith('https://')) throw fail('production_requires_https_canonical_origin');
   if (!/^postgres(?:ql)?:\/\//.test(env.DATABASE_URL || '')) throw fail('production_requires_postgres');
   for (const name of ['MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE', 'MAGIC_CITY_REQUIRE_STATE_ENCRYPTION', 'MAGIC_CITY_REQUIRE_ARTIFACT_ENCRYPTION', 'MAGIC_CITY_POSTGRES_SINGLE_WRITER']) {

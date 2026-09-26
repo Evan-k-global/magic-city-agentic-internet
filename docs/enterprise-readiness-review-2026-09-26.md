@@ -94,7 +94,11 @@ corrections.
    [SheetJS ReDoS](https://github.com/advisories/GHSA-5pgg-2g8v-p4x9).
    Dependency versions were not silently changed in this compatibility-focused
    patch; a clean audit is not claimed.
-2. **Identity lifecycle needs a dedicated follow-up.** Static review shows public
+2. **Identity lifecycle follow-up:** the local
+   [account/session/funding pass](enterprise-security-followup-2026-09-26.md)
+   now corrects provider-linking and session revocation with unit and HTTP
+   regressions. Not deployed; public email verification and organization
+   provisioning remain open. Original finding: static review shows public
    password signup does not prove email ownership, and provider sign-in can
    merge into an account by email. Google sign-in lacks an explicit
    `email_verified` check here; GitHub can fall back to profile email. Before an

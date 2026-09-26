@@ -39,6 +39,7 @@ const production = {
 };
 for (const key of ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY']) production[key] = crypto.randomBytes(32).toString('hex');
 validateDeployment(production);
+for (const flag of ['ETHEREUM_CONFIRMATION_INDEXER_AUTO_CONFIRM', 'ETHEREUM_SHADOW_RELAYER_LIVE_EXECUTION']) assert.throws(() => validateDeployment({ ...production, [flag]: 'true' }));
 for (const key of ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY', 'MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY', 'DATABASE_URL', 'MAGIC_CITY_CANONICAL_ORIGIN', 'MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE', 'MAGIC_CITY_REQUIRE_STATE_ENCRYPTION', 'MAGIC_CITY_REQUIRE_ARTIFACT_ENCRYPTION', 'MAGIC_CITY_POSTGRES_SINGLE_WRITER', 'MAGIC_CITY_RATE_LIMIT_STORE']) {
   assert.throws(() => validateDeployment({ ...production, [key]: '' }), undefined, `missing ${key}`);
 }

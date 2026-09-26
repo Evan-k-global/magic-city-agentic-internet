@@ -5,6 +5,8 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "test:account-payment-security": "node scripts/test-account-payment-security.mjs",
+    "test:account-payment-security-http": "node scripts/test-account-payment-security-http.mjs",
     "check:deployment-security": "node scripts/check-deployment-security.mjs",
     "test:deployment-security": "node scripts/test-deployment-security.mjs",
     "test:custom-helper-privacy-controls": "node scripts/test-custom-helper-privacy-controls.mjs",

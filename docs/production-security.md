@@ -105,6 +105,12 @@ snapshot multi-writer-safe: retain one application writer.
 
 ## Existing deployment: do not flip every setting at once
 
+Also review the [account/session/funding follow-up](enterprise-security-followup-2026-09-26.md):
+it changes refresh rotation, password revocation, provider linking and payout API
+requirements. Strict production profile also rejects
+`ETHEREUM_CONFIRMATION_INDEXER_AUTO_CONFIRM=true` and
+`ETHEREUM_SHADOW_RELAYER_LIVE_EXECUTION=true`.
+
 1. Record the working server/Runner versions. Back up encrypted state and
    artifacts with separately recoverable key material; prove restore in an
    isolated database. Do not import real user data into a public test instance.
