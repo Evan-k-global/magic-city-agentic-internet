@@ -5,6 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "test:security-boundary-http": "node scripts/test-security-boundary-http.mjs",
     "test:mission-key-transition": "node scripts/test-mission-key-transition.mjs",
     "test:mission-key-transition-http": "node scripts/test-mission-key-transition-http.mjs",
     "test:release-security": "node scripts/test-release-security.mjs",

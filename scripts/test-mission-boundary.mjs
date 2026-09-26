@@ -46,12 +46,13 @@ async function getAvailablePort() {
   });
 }
 
-async function request(baseUrl, pathName, { method = 'GET', body = null, key = '', cookie = '' } = {}) {
+async function request(baseUrl, pathName, { method = 'GET', body = null, key = '', cookie = '', bearer = '' } = {}) {
   const response = await fetch(`${baseUrl}${pathName}`, {
     method,
     headers: {
       ...(body ? { 'content-type': 'application/json' } : {}),
       ...(key ? { 'x-api-key': key } : {}),
+      ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
       ...(cookie ? { cookie } : {})
     },
     body: body ? JSON.stringify(body) : undefined
@@ -150,9 +151,12 @@ async function main() {
     });
     if (!auth.response.ok || !auth.cookie) throw new Error(`auth_failed:${auth.response.status}:${JSON.stringify(auth.data)}`);
     const cookie = auth.cookie;
+    const paired = await request(baseUrl, '/native-runner/setup', { method: 'POST', cookie, body: { trustMode: 'local_runner', setupMode: 'security_test' } });
+    if (!paired.response.ok) throw new Error(`pairing_failed:${paired.response.status}`);
+    const runnerToken = paired.data.setup.deviceToken;
     await request(baseUrl, '/plugins/register', {
       method: 'POST',
-      key: apiKey,
+      bearer: runnerToken,
       body: {
         pluginId: 'local-authenticated-browser-plugin',
         ownerAgentId: 'local-authenticated-browser-agent',
@@ -183,7 +187,7 @@ async function main() {
     const keyPair = crypto.generateKeyPairSync('ed25519');
     const claimed = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(started.data.session.id)}/claim`, {
       method: 'POST',
-      key: apiKey,
+      bearer: runnerToken,
       body: {
         pluginId: 'local-authenticated-browser-plugin',
         holderPublicKeyJwk: keyPair.publicKey.export({ format: 'jwk' })
@@ -203,7 +207,7 @@ async function main() {
 
     const unsigned = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(session.id)}/checkpoint`, {
       method: 'POST',
-      key: apiKey,
+      bearer: runnerToken,
       body: {
         pluginId: 'local-authenticated-browser-plugin',
         label: 'Unsigned read',
@@ -224,7 +228,7 @@ async function main() {
     });
     const signed = await request(baseUrl, `/connectors/sessions/${encodeURIComponent(session.id)}/checkpoint`, {
       method: 'POST',
-      key: apiKey,
+      bearer: runnerToken,
       body: {
         pluginId: 'local-authenticated-browser-plugin',
         label: 'Signed read',

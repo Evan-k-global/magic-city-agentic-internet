@@ -77,6 +77,11 @@ try {
     MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY: crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' })
   };
   for (const name of ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY', 'PUBLIC_API_KEYS']) env[name] = crypto.randomBytes(32).toString('hex');
+  env.PUBLIC_API_KEYS += ',' + crypto.randomBytes(32).toString('hex');
+  env.RELAYER_TOKEN = crypto.randomBytes(32).toString('hex');
+  env.MAGIC_CITY_PLUGIN_API_KEY = crypto.randomBytes(32).toString('hex');
+  env.MAGIC_CITY_PLUGIN_ALLOWED_IDS = 'boundary-plugin';
+  env.LOCAL_ADMIN_EMAILS += ',boundary-admin@example.test';
   if (process.env.MAGIC_CITY_AUDIT_RELEASE_ROUTES === '1') env.STRIPE_WEBHOOK_SECRET = crypto.randomBytes(32).toString('hex');
   const serverFile = path.join(root, 'src/server.js');
   // Demonstrate startup fails before opening storage/listening with placeholders.
@@ -126,6 +131,8 @@ try {
   assert.equal((await register.clone().json()).user.adminAccount, false, 'publicly asserted email must not grant production admin');
   assert.match(register.headers.get('set-cookie'), /Secure/);
   const cookie = register.headers.get('set-cookie').split(';')[0];
+  const { testSecurityBoundaries } = await import('./security-boundary-cases.mjs');
+  await testSecurityBoundaries({ request, env, ownerCookie: cookie });
   if (process.env.MAGIC_CITY_AUDIT_RELEASE_ROUTES === '1') {
     const { auditReleaseRoutes } = await import('./audit-release-route-authorization.mjs');
     await auditReleaseRoutes({ request, env, ownerCookie: cookie, root });

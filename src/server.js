@@ -1006,7 +1006,28 @@ function assertPluginApiKey(req) {
     err.statusCode = 401;
     throw err;
   }
+  if (PUBLIC_API_KEYS.has(MAGIC_CITY_PLUGIN_API_KEY)) {
+    throw createHttpError('plugin_credential_must_be_separate', 503);
+  }
   return true;
+}
+
+function assertScopedPlugin(req, { pluginId = '', body = {}, session = null } = {}) {
+  assertPluginApiKey(req);
+  const allowed = new Set(String(process.env.MAGIC_CITY_PLUGIN_ALLOWED_IDS || '').split(',').map((v) => v.trim()).filter(Boolean));
+  if (!allowed.has(pluginId)) throw createHttpError('plugin_scope_denied', 403);
+  // Service credentials never impersonate paired browser devices.
+  if (isNativeRunnerExecutionAgentId(pluginId) || isDeclarativeExtensionExecutionAgentId(pluginId)) {
+    throw createHttpError('native_runner_device_required', 403);
+  }
+  const owners = JSON.parse(process.env.MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS || '{}');
+  const ownerAgentId = Object.hasOwn(owners, pluginId) ? owners[pluginId] : pluginId;
+  if (body.ownerAgentId && body.ownerAgentId !== ownerAgentId) throw createHttpError('plugin_owner_mismatch', 403);
+  if (session && (!session.preferredExecutionAgentId
+    || !canExecutionPluginActForPreferredAgent({ session, pluginId })
+    || (session.claimedByPluginId && session.claimedByPluginId !== pluginId))) {
+    throw createHttpError('plugin_session_scope_denied', 403);
+  }
 }
 
 function parseCookies(req) {
@@ -1583,7 +1604,7 @@ function serializeAuthUser(authUser, authSession = null) {
       github: buildGitHubConnectorStatus(authUser),
       evmWallets: buildEvmWalletStatus(authUser)
     },
-    adminAccount: productionProfile ? productionAdminAccount(authUser) : isLocalAdminRequester(authUser.requesterId) || LOCAL_ADMIN_EMAILS.has(String(authUser.email || '').trim().toLowerCase()),
+    adminAccount: productionAdminAccount(authUser),
     createdAt: authUser.createdAt,
     lastLoginAt: authUser.lastLoginAt
   };
@@ -7978,9 +7999,8 @@ function requirePluginApiKeyOrNativeRunner(req, options = {}) {
   if (nativeRunnerDevice) {
     return { type: 'native_runner', nativeRunnerDevice };
   }
-  if (!PUBLIC_API_KEYS.size) throw createHttpError('plugin_auth_not_configured', 503);
-  assertPublicApiKey(req);
-  return { type: 'api_key', nativeRunnerDevice: null };
+  assertScopedPlugin(req, options);
+  return { type: 'plugin_key', nativeRunnerDevice: null };
 }
 
 function requireAuthenticatedOwnedResource(req, authUser, allowed, resourceName = 'resource') {
@@ -8275,7 +8295,10 @@ function resolvePersonalAgentRuntimeFromRequest(req, body = null) {
   })();
   const token = headerToken || bodyToken || queryToken;
   if (!token) return null;
-  return getPersonalAgentRuntimeByToken(token);
+  const runtime = getPersonalAgentRuntimeByToken(token);
+  if (!runtime || runtime.revokedAt || ['revoked', 'disabled'].includes(runtime.status)
+    || (runtime.expiresAt && !(Date.parse(runtime.expiresAt) > Date.now()))) return null;
+  return runtime;
 }
 
 function updateSessionJobLedgerFromAgent(session, updates = [], runtime = null, note = '') {
@@ -9943,11 +9966,12 @@ function resolveAgentSdkCaller(req, body = {}, auth = null) {
         : 'external';
   const agent = getAgent(agentId) || (agentId.startsWith('santaclawz:') ? getSantaClawzAgentRowByMagicId(agentId) : null);
   return {
+    credentialHash: !auth?.authUser && !runtime ? authenticatedSdkCredentialHash(req) : null,
     agentId,
     runtimeId: runtime?.id || null,
     authUserId: auth?.authUser?.id || null,
-    requesterId: auth?.authUser?.requesterId || String(body.requesterId || '').trim() || null,
-    requesterHash: auth?.authUser?.requesterId ? hashIdentifier(auth.authUser.requesterId) : body.requesterId ? hashIdentifier(body.requesterId) : null,
+    requesterId: auth?.authUser?.requesterId || runtime?.requesterId || null,
+    requesterHash: auth?.authUser?.requesterId ? hashIdentifier(auth.authUser.requesterId) : runtime?.requesterId ? hashIdentifier(runtime.requesterId) : null,
     source,
     registry: source === 'santaclawz'
       ? {
@@ -9964,8 +9988,20 @@ function requireAgentSdkWriteAuth(req, body = {}) {
   const auth = getAuthenticatedContext(req);
   const runtime = resolvePersonalAgentRuntimeFromRequest(req, body);
   if (auth?.authUser || runtime) return { auth, runtime };
-  assertPublicApiKey(req);
+  if (!authenticatedSdkCredentialHash(req)) throw createHttpError('auth_required', 401);
   return { auth: null, runtime: null };
+}
+
+function authenticatedSdkCredentialHash(req) {
+  const key = String(req.headers['x-api-key'] || '');
+  return key && PUBLIC_API_KEYS.has(key) ? hashHex(`agent-sdk-credential:${key}`) : null;
+}
+
+function assertReceiptIntentBinding(intentId, agentId) {
+  if (!intentId) return;
+  const intent = getIntent(intentId);
+  const provider = intent?.routedAgentId || intent?.providerAgentId;
+  if (!intent || !provider || provider !== agentId) throw createHttpError('receipt_intent_provider_mismatch', 409);
 }
 
 function canAccessAgentSdkMission(req, authUser, caller, mission) {
@@ -9974,7 +10010,8 @@ function canAccessAgentSdkMission(req, authUser, caller, mission) {
   if (authUser?.id && mission.authUserId && authUser.id === mission.authUserId) return true;
   const requesterHash = authUser ? getAuthUserRequesterHash(authUser) : '';
   if (requesterHash && mission.requesterHash && requesterHash === mission.requesterHash) return true;
-  if (caller?.agentId && mission.agentId && caller.agentId === mission.agentId) return true;
+  if (caller?.runtimeId && mission.runtimeId === caller.runtimeId) return true;
+  if (caller?.credentialHash && mission.credentialHash === caller.credentialHash) return true;
   return false;
 }
 
@@ -11554,9 +11591,8 @@ function maybeAutoTopupRequester(userHash, amountUnitsNeeded) {
 }
 
 function isLocalAdminRequester(requesterId) {
-  if (productionProfile) return false;
-  if (!requesterId) return false;
-  return LOCAL_ADMIN_REQUESTER_IDS.has(String(requesterId).trim().toLowerCase());
+  // A client-supplied email/requester string is not proof of admin identity.
+  return false;
 }
 
 function getRequestIp(req) {
@@ -11564,15 +11600,7 @@ function getRequestIp(req) {
 }
 
 function hasAdminAccess(req, authUser = null) {
-  if (productionProfile) return productionAdminAccount(authUser);
-  if (authUser) {
-    const requesterId = String(authUser.requesterId || '').trim().toLowerCase();
-    const email = String(authUser.email || '').trim().toLowerCase();
-    if ((requesterId && LOCAL_ADMIN_REQUESTER_IDS.has(requesterId)) || (email && LOCAL_ADMIN_EMAILS.has(email))) {
-      return true;
-    }
-    return false;
-  }
+  if (authUser || productionProfile) return productionAdminAccount(authUser);
   if (!ALLOW_LOCAL_IP_ADMIN) return false;
   const requestIp = getRequestIp(req);
   return Boolean(requestIp && LOCAL_ADMIN_IPS.has(requestIp));
@@ -17085,8 +17113,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/agent-sdk/v1/missions') {
-      const auth = getAuthenticatedContext(req);
+      const { auth } = requireAgentSdkWriteAuth(req);
       const agentId = String(url.searchParams.get('agentId') || req.headers['x-magic-city-agent-id'] || '').trim();
+      const caller = resolveAgentSdkCaller(req, { agentId }, auth);
       const requesterHash = auth?.authUser ? getAuthUserRequesterHash(auth.authUser) : '';
       await enforceRateLimit(req, {
         bucket: 'agent_sdk_list_missions',
@@ -17100,7 +17129,6 @@ const server = http.createServer(async (req, res) => {
         requesterHash: agentId ? '' : requesterHash,
         limit: url.searchParams.get('limit') || 50
       }).filter((mission) => {
-        const caller = { agentId: agentId || mission.agentId };
         return canAccessAgentSdkMission(req, auth?.authUser || null, caller, mission);
       });
       return sendJson(res, 200, {
@@ -17122,6 +17150,7 @@ const server = http.createServer(async (req, res) => {
       const goal = String(body.goal || body.mission?.goal || body.prompt || '').trim();
       if (!goal) return sendJson(res, 400, { error: 'missing_goal' });
       const mission = createAgentSdkMission({
+        credentialHash: caller.credentialHash,
         agentId: caller.agentId,
         runtimeId: caller.runtimeId,
         authUserId: caller.authUserId,
@@ -17404,12 +17433,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && urlPath === '/connectors/sessions') {
       const pluginId = String(url.searchParams.get('pluginId') || '').trim();
       if (pluginId) {
-        assertPluginApiKey(req);
+        assertScopedPlugin(req, { pluginId });
         if (pluginId !== HOSTED_BROWSER_WORKER_PLUGIN_ID) {
           return sendJson(res, 403, { error: 'plugin_queue_not_allowed' });
         }
         await sweepConnectorSessionExecutionWatchdog();
         const sessions = listConnectorSessions(100)
+          .filter((session) => session.preferredExecutionAgentId && (!session.claimedByPluginId || session.claimedByPluginId === pluginId))
           .filter((session) => canExecutionPluginActForPreferredAgent({ session, pluginId }))
           .filter((session) => String(session.handoffData?.kind || '').trim() === 'browser')
           .filter((session) => ['confirmed', 'queued', 'claimed', 'executing'].includes(String(session.status || '').trim()))
@@ -21900,7 +21930,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/agents/register') {
-      assertPublicApiKey(req);
+      // Registry ownership/key changes are operator provisioning, not a public
+      // API-key capability. User-facing agents are registered internally.
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId', 'owner', 'publicKey']);
 
@@ -21930,7 +21962,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/quickstart/register-demo-agent') {
-      assertPublicApiKey(req);
+      if (productionProfile) return sendJson(res, 403, { error: 'demo_registration_disabled_in_production' });
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       const capability = String(body.capability || 'general-chat');
       const requesterId = body.requesterId ? String(body.requesterId) : null;
@@ -22299,7 +22332,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/receipts') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId', 'taskId', 'outcome']);
 
@@ -22309,6 +22342,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const normalized = normalizeReceiptPayload(body);
+      assertReceiptIntentBinding(normalized.intentId, body.agentId);
       if ((normalized.proofType && !normalized.proofHash) || (!normalized.proofType && normalized.proofHash)) {
         return sendJson(res, 400, { error: 'proof_type_and_proof_hash_must_be_paired' });
       }
@@ -22357,25 +22391,14 @@ const server = http.createServer(async (req, res) => {
         metadata: sanitizeMetadata(body.metadata ?? {})
       });
 
-      if (row.intentId) {
-        const intent = getIntent(row.intentId);
-        const lock = getEscrowLock(row.intentId);
-        if (intent?.requesterHash && lock?.status === 'locked') {
-          if (row.outcome === 'success') {
-            settleLockedCredits(row.intentId, row.agentId, PROTOCOL_FEE_BPS);
-            updateIntent(row.intentId, { status: 'settled', settledAt: new Date().toISOString(), linkedReceiptId: row.id });
-          } else {
-            releaseLockedCredits(row.intentId, 'receipt_failed');
-            updateIntent(row.intentId, { status: 'released', releasedAt: new Date().toISOString(), linkedReceiptId: row.id });
-          }
-        }
-      }
+      // Import evidence only. Completion/credit capture must come from the
+      // validated execution path; a reported outcome cannot settle a lock.
 
       return sendJson(res, 201, { receipt: row, agent: buildAgentView(agent) });
     }
 
     if (req.method === 'POST' && urlPath === '/integrations/acp/intent-sync') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['externalRequestId', 'providerAgentId', 'paymentMode']);
 
@@ -22408,7 +22431,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/integrations/acp/fulfill-sync') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['externalRequestId', 'serviceId', 'status']);
 
@@ -22418,6 +22441,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const intent = findIntentByExternalRequestId(body.externalRequestId);
+      assertReceiptIntentBinding(intent?.id, body.serviceId);
       const normalized = normalizeReceiptPayload({
         ...body,
         intentId: intent?.id ?? null,
@@ -22468,16 +22492,7 @@ const server = http.createServer(async (req, res) => {
           status: body.status === 'completed' ? 'fulfilled' : 'failed',
           linkedReceiptId: row.id
         });
-        const lock = getEscrowLock(intent.id);
-        if (intent.requesterHash && lock?.status === 'locked') {
-          if (body.status === 'completed') {
-            settleLockedCredits(intent.id, body.serviceId, PROTOCOL_FEE_BPS);
-            updateIntent(intent.id, { status: 'settled', settledAt: new Date().toISOString() });
-          } else {
-            releaseLockedCredits(intent.id, 'acp_fulfill_failed');
-            updateIntent(intent.id, { status: 'released', releasedAt: new Date().toISOString() });
-          }
-        }
+        // Imported reports do not authorize credit settlement or release.
       }
 
       if (body.attestation && (body.executionAgentId || body.pluginId)) {
@@ -27005,6 +27020,7 @@ const server = http.createServer(async (req, res) => {
       const agent = getAgent(body.agentId);
       if (!agent) return sendJson(res, 404, { error: 'agent_not_found', agentId: body.agentId });
       const normalized = normalizeReceiptPayload(body);
+      assertReceiptIntentBinding(normalized.intentId, body.agentId);
       const row = addReceipt({
         agentId: body.agentId,
         taskId: body.taskId,
@@ -27031,19 +27047,7 @@ const server = http.createServer(async (req, res) => {
           : { mode: 'credits', amount: 0, amountUnits: 0 },
         metadata: sanitizeMetadata(body.metadata ?? {})
       });
-      if (row.intentId) {
-        const intent = getIntent(row.intentId);
-        const lock = getEscrowLock(row.intentId);
-        if (intent?.requesterHash && lock?.status === 'locked') {
-          if (row.outcome === 'success') {
-            settleLockedCredits(row.intentId, row.agentId, PROTOCOL_FEE_BPS);
-            updateIntent(row.intentId, { status: 'settled', settledAt: new Date().toISOString(), linkedReceiptId: row.id });
-          } else {
-            releaseLockedCredits(row.intentId, 'relayed_receipt_failed');
-            updateIntent(row.intentId, { status: 'released', releasedAt: new Date().toISOString(), linkedReceiptId: row.id });
-          }
-        }
-      }
+      // Relayers attest evidence; only validated execution captures credits.
       return sendJson(res, 201, { relayed: true, receipt: row });
     }
 
@@ -27135,7 +27139,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/acp/intent') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['requesterAgentId', 'providerAgentId', 'action', 'paymentMode']);
 

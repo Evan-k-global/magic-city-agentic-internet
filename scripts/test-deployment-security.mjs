@@ -57,6 +57,13 @@ assert.throws(() => validateDeployment({ ...production, ADMIN_TOKEN: 'change-me'
 assert.throws(() => validateDeployment({ ...production, GOOGLE_CLIENT_ID: 'configured' }));
 assert.throws(() => validateDeployment({ ...production, GOOGLE_CONNECTOR_SECRET: production.ADMIN_TOKEN }));
 validateDeployment({});
+assert.throws(() => validateDeployment({ MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS: 'null' }), /invalid_plugin_owner_mapping/);
+assert.throws(() => validateDeployment({ MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS: '{bad' }), /invalid_plugin_owner_mapping/);
+assert.throws(() => validateDeployment({ MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS: '{"worker":42}' }), /invalid_plugin_owner_mapping/);
+assert.throws(() => validateDeployment({ ...production, MAGIC_CITY_PLUGIN_API_KEY: production.PUBLIC_API_KEYS, MAGIC_CITY_PLUGIN_ALLOWED_IDS: 'worker' }), /plugin_credential_reused/);
+const pluginKey = crypto.randomBytes(32).toString('hex');
+assert.throws(() => validateDeployment({ ...production, MAGIC_CITY_PLUGIN_API_KEY: pluginKey }), /requires_plugin_scope/);
+validateDeployment({ ...production, MAGIC_CITY_PLUGIN_API_KEY: pluginKey, MAGIC_CITY_PLUGIN_ALLOWED_IDS: 'worker', MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS: '{"worker":"provider"}' });
 
 let now = 100;
 const limits = createRequestLimiter({ env: {}, clock: () => now, maxEntries: 2 });

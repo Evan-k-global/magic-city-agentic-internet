@@ -28,6 +28,12 @@ export function canonicalOrigin(env = process.env) {
 
 export function validateDeployment(env = process.env) {
   readMissionKeyTransition(env);
+  if (env.MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS) {
+    let owners;
+    try { owners = JSON.parse(env.MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS); } catch { throw fail('invalid_plugin_owner_mapping'); }
+    if (!owners || Array.isArray(owners) || typeof owners !== 'object'
+      || Object.entries(owners).some(([id, owner]) => !id.trim() || typeof owner !== 'string' || !owner.trim())) throw fail('invalid_plugin_owner_mapping');
+  }
   if (env.DEPLOYMENT_PROFILE && !['development', 'production'].includes(env.DEPLOYMENT_PROFILE)) throw fail('invalid_deployment_profile');
   const origin = canonicalOrigin(env);
   if (!deploymentIsProduction(env)) return;
@@ -45,6 +51,11 @@ export function validateDeployment(env = process.env) {
   if (env.MAGIC_CITY_RATE_LIMIT_STORE !== 'postgres') throw fail('production_requires_postgres_rate_limits');
   if (!list(env.PUBLIC_API_KEYS).length || list(env.PUBLIC_API_KEYS).some((key) => key.length < 32 || /change[-_ ]?me/i.test(key))) throw fail('production_requires_strong_public_api_keys');
   const secrets = ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY'];
+  if (env.MAGIC_CITY_PLUGIN_API_KEY) {
+    secrets.push('MAGIC_CITY_PLUGIN_API_KEY');
+    if (list(env.PUBLIC_API_KEYS).includes(env.MAGIC_CITY_PLUGIN_API_KEY)) throw fail('production_plugin_credential_reused');
+    if (!list(env.MAGIC_CITY_PLUGIN_ALLOWED_IDS).length) throw fail('production_requires_plugin_scope');
+  }
   for (const provider of ['GOOGLE', 'GITHUB']) {
     if (env[`${provider}_CLIENT_ID`] || env[`${provider}_CLIENT_SECRET`] || env[`${provider}_CONNECTOR_SECRET`]) secrets.push(`${provider}_CONNECTOR_SECRET`);
   }

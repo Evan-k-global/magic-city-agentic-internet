@@ -19,16 +19,16 @@ export async function auditReleaseRoutes({ request, env, ownerCookie, root }) {
     return body;
   };
   const admin = { 'x-admin-token': env.ADMIN_TOKEN };
-  const service = { 'x-api-key': env.PUBLIC_API_KEYS };
+  const service = { 'x-api-key': env.PUBLIC_API_KEYS.split(',')[0] };
   const agentId = 'release-audit-synthetic-agent';
-  const registered = await post('/agents/register', { agentId, owner: 'synthetic-owner', publicKey: 'audit-only-public-key', capabilities: ['release-audit'], supportedLanes: ['release-audit'], privacyModes: ['private'], pricingModel: { basePrice: 0 } }, service);
+  const registered = await post('/agents/register', { agentId, owner: 'synthetic-owner', publicKey: 'audit-only-public-key', capabilities: ['release-audit'], supportedLanes: ['release-audit'], privacyModes: ['private'], pricingModel: { basePrice: 0 } }, admin);
   assert.equal(registered.status, 201, await registered.text());
   const staked = await record('anonymous stake creation', await post(`/agents/${agentId}/stake`, { amount: 10 }));
   if (staked.stake !== undefined) results.at(-1).observedStakeCredits = staked.stake;
   const slashed = await record('anonymous stake destruction', await post(`/agents/${agentId}/slash`, { amount: 3, reason: 'synthetic-audit' }));
   if (slashed.slashedCredits !== undefined) results.at(-1).observedSlashedCredits = slashed.slashedCredits;
   await record('anonymous provenance attestation creation', await post(`/agents/${agentId}/attestations`, { type: 'synthetic-test', issuer: 'arbitrary-asserted-issuer', commitmentHash: 'synthetic-not-a-proof' }));
-  const receiptResponse = await post('/receipts', { agentId, taskId: 'synthetic-audit-task', outcome: 'success', privacy: { mode: 'private' }, metadata: { privateAuditMarker: 'AUDIT_ONLY_PRIVATE_RECEIPT' } }, service);
+  const receiptResponse = await post('/receipts', { agentId, taskId: 'synthetic-audit-task', outcome: 'success', privacy: { mode: 'private' }, metadata: { privateAuditMarker: 'AUDIT_ONLY_PRIVATE_RECEIPT' } }, admin);
   assert.equal(receiptResponse.status, 201, await receiptResponse.clone().text());
   const receiptId = (await receiptResponse.json()).receipt.id;
   const receiptList = await record('agent receipt list bypasses private receipt ownership', await request(`/agents/${agentId}/receipts`));
@@ -78,7 +78,7 @@ export async function auditReleaseRoutes({ request, env, ownerCookie, root }) {
   assert.equal(account.lockedCredits, 0, 'denied requests must not reserve victim credits');
   const ownRead = await request(`/acp/intent/${ownIntent.id}`, { headers: { cookie: ownerCookie } });
   assert.equal(ownRead.status, 200, 'owner must retain ACP intent access');
-  const ownReceiptResponse = await post('/receipts', { agentId, taskId: 'owned-task', intentId: ownIntent.id, outcome: 'success', privacy: { mode: 'private' }, metadata: { privateAuditMarker: 'OWNER_ONLY_REPORT' } }, service);
+  const ownReceiptResponse = await post('/receipts', { agentId, taskId: 'owned-task', intentId: ownIntent.id, outcome: 'success', privacy: { mode: 'private' }, metadata: { privateAuditMarker: 'OWNER_ONLY_REPORT' } }, admin);
   assert.equal(ownReceiptResponse.status, 201, await ownReceiptResponse.clone().text());
   const ownReceiptId = (await ownReceiptResponse.json()).receipt.id;
   const ownedList = await request(`/agents/${agentId}/receipts`, { headers: { cookie: ownerCookie } });

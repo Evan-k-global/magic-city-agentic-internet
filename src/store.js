@@ -997,10 +997,8 @@ export function addReceipt(receipt) {
   };
   state.receipts.push(row);
 
-  const price = Number(row.payment?.amountUnits ?? 0);
-  if (Number.isFinite(price) && price > 0 && row.agentId) {
-    state.balances[row.agentId] = (state.balances[row.agentId] ?? 0) + price;
-  }
+  // Receipts are evidence, never funding. Platform credit capture is performed
+  // by settleLockedCredits against an existing lock, not a reported amount.
 
   persistState();
   return row;
