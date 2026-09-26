@@ -6,7 +6,7 @@ import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';
 import vm from 'node:vm';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 // Disposable file store; all provider HTTP in the child is mocked. Never load
 // the repository .env or inherit RPC, payment, database or signing credentials.
@@ -55,8 +55,16 @@ try {
   });
   await new Promise((resolve) => rpc.listen(0, '127.0.0.1', resolve));
   const mock = path.join(dir, 'provider-fixture.mjs');
-  fs.writeFileSync(mock, `globalThis.fetch = async (input, options = {}) => {
+  fs.writeFileSync(mock, `const checkouts = new Map(); globalThis.fetch = async (input, options = {}) => {
     const url = String(input);
+    if (url === 'https://api.stripe.com/v1/checkout/sessions') {
+      const params = new URLSearchParams(options.body);
+      const id = 'cs_fixture_' + (checkouts.size + 1);
+      const session = { id, mode: 'payment', livemode: false, currency: 'usd', amount_total: Number(params.get('line_items[0][price_data][unit_amount]')), metadata: { requesterId: params.get('metadata[requesterId]'), amountCredits: params.get('metadata[amountCredits]') }, payment_status: 'paid', status: 'complete', url: 'https://checkout.stripe.test/' + id };
+      checkouts.set(id, session);
+      return Response.json(session);
+    }
+    if (url.startsWith('https://api.stripe.com/v1/checkout/sessions/')) return Response.json(checkouts.get(url.split('/').pop()));
     if (url === 'https://oauth2.googleapis.com/token') {
       const code = new URLSearchParams(options.body).get('code');
       if (code === 'provider-error') throw new Error('</script><script>globalThis.injected=true</script>');
@@ -71,6 +79,7 @@ try {
   const env = {
     PATH: process.env.PATH, NODE_ENV: 'test', HOST: '127.0.0.1', PORT: String(port),
     ADMIN_TOKEN: 'test-only-admin-token', PRIVACY_SALT: 'test-only-privacy-salt', PUBLIC_API_KEYS: 'test-only-api-key',
+    STRIPE_SECRET_KEY: 'sk_test_fixture_only', STRIPE_WEBHOOK_SECRET: 'test-only-webhook-secret', STRIPE_CONNECT_WEBHOOK_SECRET: 'test-only-connect-webhook-secret',
     MAGIC_CITY_CANONICAL_ORIGIN: `http://127.0.0.1:${port}`,
     AUTO_START_LOCAL_EXECUTION_AGENTS: 'false', AUTO_SEED_DEFAULT_AGENTS: 'false', MAGIC_CITY_SAFE_HTTP_STARTUP: 'true',
     AUTO_PREPARE_EXECUTION_PROOFS: 'false', AUTO_DRAIN_SPONSORED_PROOF_QUEUE: 'false', AUTO_RECOVER_SPONSORED_PROOF_QUEUE: 'false',
@@ -146,6 +155,44 @@ try {
   assert.equal(beforeReplay.availableCredits, 50);
   assert.equal(afterReplay.availableCredits, 50);
   assert.equal((await waitForPayment((state) => state.authorization.confirmationState === 'confirmed')).authorization.confirmationState, 'confirmed');
+  const checkout = await request('/billing/stripe/checkout-session', { token: 'owner-one', body: { amountCredits: 2500, successUrl: 'https://app.test/success', cancelUrl: 'https://app.test/cancel' } });
+  assert.equal(checkout.status, 200, await checkout.clone().text());
+  const stripeSessionId = (await checkout.json()).sessionId;
+  // Preparation must survive a fresh store process before any payment arrives.
+  const reload = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    const store = await import(${JSON.stringify(path.join(root, 'src/store.js'))});
+    const terms = store.getStripeCheckoutTerms(${JSON.stringify(`stripe:${stripeSessionId}`)});
+    if (!terms || terms.userId !== ${JSON.stringify(user.id)} || terms.credits !== 2500 || terms.amountUsdCents !== 2500) process.exit(1);
+    try { store.saveStripeCheckoutTerms({ ...terms, credits: 99999 }); process.exit(2); }
+    catch (error) { if (error.message !== 'stripe_checkout_terms_conflict') throw error; }
+  `], { cwd: dir, env: { PATH: process.env.PATH, NODE_ENV: 'test' }, encoding: 'utf8', timeout: 10000 });
+  assert.equal(reload.status, 0, reload.stderr || reload.stdout);
+  const stripeSession = { id: stripeSessionId, mode: 'payment', livemode: false, currency: 'usd', amount_total: 2500, metadata: { requesterId: user.requesterId, amountCredits: '2500' }, status: 'complete', payment_status: 'paid' };
+  let stripeEvent = 0;
+  const stripeWebhook = async (session, extra = {}, secret = env.STRIPE_WEBHOOK_SECRET) => {
+    const event = { id: `evt_fixture_${++stripeEvent}`, type: 'checkout.session.completed', livemode: false, data: { object: session }, ...extra };
+    const raw = JSON.stringify(event);
+    const timestamp = Math.floor(Date.now() / 1000);
+    const signature = crypto.createHmac('sha256', secret).update(`${timestamp}.${raw}`).digest('hex');
+    return request('/billing/stripe/webhook', { body: event, headers: { 'stripe-signature': `t=${timestamp},v1=${signature}` } });
+  };
+  const currentCredits = async () => (await (await request('/billing/account', { token: 'owner-one' })).json()).account.availableCredits;
+  assert.equal((await request(`/billing/stripe/session-status?sessionId=${stripeSessionId}`)).status, 401);
+  assert.equal((await request(`/billing/stripe/session-status?sessionId=${stripeSessionId}`, { token: 'other' })).status, 404);
+  for (const changes of [
+    { id: 'cs_not_prepared' }, { amount_total: 1 }, { currency: 'eur' }, { livemode: true },
+    { status: 'open' }, { mode: 'subscription' }, { metadata: { ...stripeSession.metadata, requesterId: other.requesterId } },
+    { metadata: { ...stripeSession.metadata, amountCredits: '99999' } }
+  ]) assert.equal((await stripeWebhook({ ...stripeSession, ...changes })).status, 409);
+  assert.equal((await stripeWebhook({ ...stripeSession, payment_status: 'unpaid', amount_total: 0 })).status, 200);
+  assert.equal((await stripeWebhook(stripeSession, { account: 'acct_connected' })).status, 200);
+  assert.equal((await stripeWebhook(stripeSession, {}, env.STRIPE_CONNECT_WEBHOOK_SECRET)).status, 200);
+  assert.equal(await currentCredits(), 50, 'invalid or unpaid events cannot create credits');
+  const successes = await Promise.all([stripeWebhook(stripeSession), stripeWebhook(stripeSession, { type: 'checkout.session.async_payment_succeeded' })]);
+  assert.ok(successes.every((response) => response.status === 200));
+  assert.equal(await currentCredits(), 2550, 'distinct valid events for one checkout credit exactly once');
+  assert.equal((await request(`/billing/stripe/session-status?sessionId=${stripeSessionId}`, { token: 'owner-one' })).status, 200);
+  assert.equal(await currentCredits(), 2550, 'browser return cannot credit webhook settlement twice');
   const refresh = await request('/oauth/mcp/token', { form: true, body: { client_id: 'fixture-client', grant_type: 'refresh_token', refresh_token: 'initial-refresh' } });
   assert.equal(refresh.status, 200, await refresh.clone().text());
   const tokens = await refresh.json();

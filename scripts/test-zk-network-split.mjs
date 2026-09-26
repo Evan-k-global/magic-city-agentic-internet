@@ -79,11 +79,11 @@ assert.equal(registryAnchor.networkId, 'zeko:sepolia');
 
 const envExample = fs.readFileSync(path.join(rootDir, '.env.example'), 'utf8');
 assert.match(envExample, /^MAGIC_CITY_MISSION_PROOF_NETWORK_ID=zeko:sepolia$/m);
-assert.match(envExample, /^SANTACLAWZ_PROOF_NETWORK=zeko:testnet$/m);
+assert.match(envExample, /^SANTACLAWZ_PROOF_NETWORK=zeko:sepolia$/m);
 
 const flyToml = fs.readFileSync(path.join(rootDir, 'fly.toml'), 'utf8');
 assert.match(flyToml, /MAGIC_CITY_MISSION_PROOF_NETWORK_ID = "zeko:sepolia"/);
-assert.match(flyToml, /SANTACLAWZ_PROOF_NETWORK = "zeko:testnet"/);
+assert.match(flyToml, /SANTACLAWZ_PROOF_NETWORK = "zeko:sepolia"/);
 assert.match(flyToml, /ZEKO_SUBMIT_MODE = "relay"/);
 assert.doesNotMatch(flyToml, /ZEKO_OFFCHAIN_PROOF_TARGET_NETWORK = "zeko:sepolia"/);
 

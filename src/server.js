@@ -2,7 +2,7 @@ import './securityBootstrap.js';
 import { createRequestSecurity, deploymentIsProduction, productionAdminAccount } from './deploymentSecurity.js';
 import { createRequestLimiter } from './requestRateLimits.js';
 import { futureExpiry, equalSecret, verifiedProviderIdentity, assertProviderAccountLink, assertOauthBrowserBinding } from './accountSecurity.js';
-import { assertPreparedPaymentSubmission, validTopupTransfer } from './paymentSecurity.js';
+import { assertPreparedPaymentSubmission, validTopupTransfer, assertStripeCheckoutTerms } from './paymentSecurity.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -126,6 +126,8 @@ import {
   updateSettlementRegistryEntry,
   upsertPlatformSettlementRegistryEntry,
   createPaymentAuthorization,
+  saveStripeCheckoutTerms,
+  getStripeCheckoutTerms,
   getPaymentAuthorization,
   findPaymentAuthorizationByRequestId,
   findPaymentAuthorizationByTxHash,
@@ -1474,6 +1476,9 @@ function getAuthenticatedContext(req) {
 function resolveRequesterIdentity(req, explicitRequesterId = null) {
   const auth = getAuthenticatedContext(req);
   const provided = String(explicitRequesterId || '').trim();
+  // An asserted email is never authority over an existing account. Anonymous
+  // development demos remain available only outside the production profile.
+  if (productionProfile && !auth && provided) throw createHttpError('auth_required', 401);
   if (auth && provided && provided !== auth.authUser.requesterId) {
     const err = new Error('requester_id_mismatch');
     err.statusCode = 409;
@@ -22213,10 +22218,13 @@ const server = http.createServer(async (req, res) => {
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
+      const auth = getAuthenticatedContext(req);
+      if (!auth?.authUser) throw createHttpError('auth_required', 401);
+      const receipts = listAgentReceipts(agentId).filter((receipt) => canAuthUserAccessReceipt(req, auth.authUser, receipt));
       return sendJson(res, 200, {
         agentId,
-        count: listAgentReceipts(agentId).length,
-        receipts: listAgentReceipts(agentId)
+        count: receipts.length,
+        receipts
       });
     }
 
@@ -22232,6 +22240,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && matchDynamicPath(urlPath, 'attestations')) {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
@@ -22252,6 +22261,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && matchDynamicPath(urlPath, 'stake')) {
+      if (productionProfile) return sendJson(res, 403, { error: 'demo_stake_disabled_in_production' });
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
@@ -22267,6 +22278,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && matchDynamicPath(urlPath, 'slash')) {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
@@ -22504,6 +22516,7 @@ const server = http.createServer(async (req, res) => {
       }
       const budgetUnits = toUnits(budget);
       const requesterIdentity = resolveRequesterIdentity(req, body.requesterId ?? null);
+      if (productionProfile && budgetUnits > 0 && !requesterIdentity.auth) throw createHttpError('auth_required', 401);
       const requesterHash = requesterIdentity.requesterId
         ? hashIdentifier(requesterIdentity.requesterId)
         : hashIdentifier(`ephemeral:${body.ephemeralSessionId ?? crypto.randomUUID()}`);
@@ -23005,6 +23018,7 @@ const server = http.createServer(async (req, res) => {
       const budgetUnits = toUnits(budget);
 
       const requesterIdentity = resolveRequesterIdentity(req, body.requesterId ?? null);
+      if (productionProfile && budgetUnits > 0 && !requesterIdentity.auth) throw createHttpError('auth_required', 401);
       const requesterHash = requesterIdentity.requesterId
         ? hashIdentifier(requesterIdentity.requesterId)
         : hashIdentifier(`ephemeral:${body.ephemeralSessionId ?? crypto.randomUUID()}`);
@@ -26352,7 +26366,7 @@ const server = http.createServer(async (req, res) => {
       }
       requireFields(body, ['amountCredits', 'successUrl', 'cancelUrl']);
       const amountCredits = Number(body.amountCredits);
-      if (!Number.isFinite(amountCredits) || amountCredits <= 0) {
+      if (!Number.isSafeInteger(amountCredits) || amountCredits <= 0 || !Number.isSafeInteger(toUnits(amountCredits)) || !Number.isSafeInteger(creditsToUsdCents(amountCredits))) {
         return sendJson(res, 400, { error: 'invalid_amountCredits' });
       }
       if (amountCredits < STRIPE_MIN_TOPUP_CREDITS) {
@@ -26370,6 +26384,15 @@ const server = http.createServer(async (req, res) => {
         amountCredits,
         successUrl: String(body.successUrl),
         cancelUrl: String(body.cancelUrl)
+      });
+      if (!session.id || typeof session.livemode !== 'boolean') throw createHttpError('invalid_stripe_checkout_response', 502);
+      saveStripeCheckoutTerms({
+        requestId: `stripe:${session.id}`, mode: 'stripe_credit_topup',
+        userId: auth.authUser.id, requesterId, credits: amountCredits,
+        amountUsdCents: creditsToUsdCents(amountCredits),
+        currency: String(process.env.STRIPE_CURRENCY || 'usd').toLowerCase(),
+        livemode: session.livemode, authorizationState: 'requested',
+        metadata: { source: 'stripe_checkout' }
       });
       return sendJson(res, 200, {
         sessionId: session.id,
@@ -26543,20 +26566,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/billing/stripe/session-status') {
+      const auth = getAuthenticatedContext(req);
+      if (!auth?.authUser) throw createHttpError('auth_required', 401);
       if (!process.env.STRIPE_SECRET_KEY) {
         return sendJson(res, 503, { error: 'stripe_not_configured' });
       }
       const sessionId = String(url.searchParams.get('sessionId') || '').trim();
       if (!sessionId) return sendJson(res, 400, { error: 'missing_session_id' });
+      const prepared = getStripeCheckoutTerms(`stripe:${sessionId}`);
+      if (!prepared || prepared.userId !== auth.authUser.id) throw createHttpError('stripe_checkout_not_found', 404);
 	      const session = await getCheckoutSession(sessionId);
-	      const requesterId = String(session?.metadata?.requesterId || '').trim();
-	      const amountCredits = Number(session?.metadata?.amountCredits || 0);
+	      const requesterId = prepared.requesterId;
+	      const amountCredits = prepared.credits;
 	      let credited = false;
 	      let creditPosted = false;
 	      let alreadyProcessed = false;
 	      let account = null;
 	      let userHash = '';
 	      if (session?.payment_status === 'paid' && requesterId && amountCredits > 0) {
+          assertStripeCheckoutTerms(session, prepared);
 	        const completionEventId = `stripe_session:${session.id}`;
 	        userHash = hashIdentifier(requesterId);
 	        alreadyProcessed = hasProcessedStripeEvent(completionEventId);
@@ -26633,23 +26661,33 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/billing/stripe/webhook') {
       const rawBody = await readRawBody(req);
+      let connectWebhook = false;
       try {
         verifyStripeWebhookSignature(rawBody, req.headers['stripe-signature']);
       } catch (err) {
         if (!STRIPE_CONNECT_WEBHOOK_SECRET) throw err;
         verifyStripeWebhookSignature(rawBody, req.headers['stripe-signature'], STRIPE_CONNECT_WEBHOOK_SECRET);
+        connectWebhook = true;
       }
       const body = JSON.parse(rawBody);
       const eventType = body.type ?? '';
       const eventId = body.id ?? null;
+      // Connected-account events may reconcile transfers, never the platform's
+      // customer-credit ledger (including refund/debit events).
+      if ((connectWebhook || body.account) && !eventType.startsWith('transfer.')) {
+        return sendJson(res, 200, { accepted: true, ignored: true, reason: 'not_platform_event' });
+      }
       if (eventId && hasProcessedStripeEvent(eventId)) {
         return sendJson(res, 200, { accepted: true, deduped: true, eventId });
       }
 
-	      if (eventType === 'checkout.session.completed') {
+	      if (eventType === 'checkout.session.completed' || eventType === 'checkout.session.async_payment_succeeded') {
 	        const checkoutSession = body.data?.object ?? {};
-	        const requesterId = checkoutSession.metadata?.requesterId;
-	        const amountCredits = Number(checkoutSession.metadata?.amountCredits ?? 0);
+          if (connectWebhook || body.account) return sendJson(res, 200, { accepted: true, ignored: true, reason: 'not_platform_checkout' });
+          if (checkoutSession.payment_status !== 'paid') return sendJson(res, 200, { accepted: true, pending: true });
+          const prepared = assertStripeCheckoutTerms(checkoutSession, getStripeCheckoutTerms(`stripe:${checkoutSession.id}`), { account: body.account, eventLivemode: body.livemode });
+	        const requesterId = prepared.requesterId;
+	        const amountCredits = prepared.credits;
 	        if (!requesterId || !Number.isFinite(amountCredits) || amountCredits <= 0) {
 	          return sendJson(res, 400, { error: 'invalid_webhook_payload' });
 	        }
@@ -26770,6 +26808,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/billing/account') {
+      if (!getAuthenticatedContext(req)?.authUser) throw createHttpError('auth_required', 401);
       const requesterIdentity = resolveRequesterIdentity(req, url.searchParams.get('requesterId'));
       const requesterId = requesterIdentity.requesterId;
       if (!requesterId) return sendJson(res, 400, { error: 'missing_requesterId' });
@@ -26837,6 +26876,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/billing/account/release-stale-locks') {
+      if (!getAuthenticatedContext(req)?.authUser) throw createHttpError('auth_required', 401);
       const body = await readBody(req);
       const requesterIdentity = resolveRequesterIdentity(req, body.requesterId ?? null);
       const requesterId = requesterIdentity.requesterId;
@@ -27013,6 +27053,8 @@ const server = http.createServer(async (req, res) => {
       requireFields(body, ['receiptId', 'openedBy', 'reason']);
       const receipt = getReceipt(body.receiptId);
       if (!receipt) return sendJson(res, 404, { error: 'receipt_not_found' });
+      const auth = getAuthenticatedContext(req);
+      requireOwnedResource(req, auth?.authUser, canAuthUserAccessReceipt(req, auth?.authUser, receipt), 'receipt');
       if (receipt.dispute?.status === 'open') {
         return sendJson(res, 409, { error: 'dispute_already_open' });
       }
@@ -27020,7 +27062,7 @@ const server = http.createServer(async (req, res) => {
       const updated = updateReceipt(body.receiptId, {
         dispute: {
           status: 'open',
-          openedBy: body.openedBy,
+          openedBy: auth?.authUser?.id || 'authenticated_operator',
           reason: body.reason,
           openedAt: new Date().toISOString()
         }
@@ -27029,6 +27071,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/disputes/resolve') {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['receiptId', 'resolvedBy', 'resolution']);
       const receipt = getReceipt(body.receiptId);
@@ -27052,7 +27095,7 @@ const server = http.createServer(async (req, res) => {
           ...receipt.dispute,
           status: 'resolved',
           resolution: body.resolution,
-          resolvedBy: body.resolvedBy,
+          resolvedBy: 'authenticated_operator',
           resolvedAt: new Date().toISOString(),
           notes: body.notes ?? null
         }
@@ -27124,10 +27167,14 @@ const server = http.createServer(async (req, res) => {
       const id = urlPath.split('/').filter(Boolean)[2];
       const intent = getIntent(id);
       if (!intent) return notFound(res);
+      const auth = getAuthenticatedContext(req);
+      requireAuthenticatedOwnedResource(req, auth?.authUser, canAuthUserAccessIntent(auth?.authUser, intent), 'intent');
       return sendJson(res, 200, { intent });
     }
 
     if (req.method === 'POST' && urlPath === '/faucet/request') {
+      if (productionProfile) return sendJson(res, 403, { error: 'demo_faucet_disabled_in_production' });
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId']);
 

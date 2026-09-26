@@ -89,6 +89,7 @@ const defaultState = () => ({
   },
   unitScale: CREDIT_SCALE,
   processedStripeEvents: {},
+  stripeCheckoutTerms: {},
   payoutByTransferId: {}
 });
 
@@ -163,6 +164,7 @@ function withDefaults(raw = {}) {
     lastSettlementId: null
   };
   raw.processedStripeEvents = raw.processedStripeEvents ?? {};
+  raw.stripeCheckoutTerms = raw.stripeCheckoutTerms ?? {};
   raw.payoutByTransferId = raw.payoutByTransferId ?? {};
   raw.unitScale = raw.unitScale ?? CREDIT_SCALE;
   return raw;
@@ -1082,6 +1084,25 @@ export function createPaymentAuthorization(entry) {
   state.paymentAuthorizations.push(row);
   persistState();
   return row;
+}
+
+export function saveStripeCheckoutTerms(entry) {
+  const key = String(entry.requestId || '');
+  if (!/^stripe:cs_[A-Za-z0-9_]+$/.test(key)) throw new Error('invalid_stripe_checkout_id');
+  const previous = getStripeCheckoutTerms(key);
+  if (previous) {
+    for (const field of ['userId', 'requesterId', 'credits', 'amountUsdCents', 'currency', 'livemode', 'mode']) {
+      if (previous[field] !== entry[field]) throw new Error('stripe_checkout_terms_conflict');
+    }
+    return previous;
+  }
+  state.stripeCheckoutTerms[key] = { ...entry, createdAt: new Date().toISOString() };
+  persistState();
+  return state.stripeCheckoutTerms[key];
+}
+
+export function getStripeCheckoutTerms(key) {
+  return Object.hasOwn(state.stripeCheckoutTerms, key) ? state.stripeCheckoutTerms[key] : null;
 }
 
 export function getPaymentAuthorization(id) {

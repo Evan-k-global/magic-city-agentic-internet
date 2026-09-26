@@ -72,6 +72,7 @@ try {
     MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY: crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' })
   };
   for (const name of ['ADMIN_TOKEN', 'PRIVACY_SALT', 'MISSION_BOUND_AUTH_SECRET', 'MCP_OAUTH_SECRET', 'MAGIC_CITY_STATE_ENCRYPTION_KEY', 'PUBLIC_API_KEYS']) env[name] = crypto.randomBytes(32).toString('hex');
+  if (process.env.MAGIC_CITY_AUDIT_RELEASE_ROUTES === '1') env.STRIPE_WEBHOOK_SECRET = crypto.randomBytes(32).toString('hex');
   const serverFile = path.join(root, 'src/server.js');
   // Demonstrate startup fails before opening storage/listening with placeholders.
   const invalid = spawnSync(process.execPath, [serverFile], { cwd: dir, env: { ...env, ADMIN_TOKEN: 'change-me' }, encoding: 'utf8', timeout: 10000 });
@@ -120,6 +121,10 @@ try {
   assert.equal((await register.clone().json()).user.adminAccount, false, 'publicly asserted email must not grant production admin');
   assert.match(register.headers.get('set-cookie'), /Secure/);
   const cookie = register.headers.get('set-cookie').split(';')[0];
+  if (process.env.MAGIC_CITY_AUDIT_RELEASE_ROUTES === '1') {
+    const { auditReleaseRoutes } = await import('./audit-release-route-authorization.mjs');
+    await auditReleaseRoutes({ request, env, ownerCookie: cookie, root });
+  }
   const crossOrigin = await request('/auth/logout', { method: 'POST', headers: { cookie, origin: 'https://evil.test' } });
   assert.equal(crossOrigin.status, 403);
   const sameOrigin = await request('/auth/logout', { method: 'POST', headers: { cookie, origin: 'https://app.test' } });

@@ -105,6 +105,19 @@ snapshot multi-writer-safe: retain one application writer.
 
 ## Existing deployment: do not flip every setting at once
 
+Also apply the [release remediation checklist](enterprise-security-remediation-2026-09-26.md).
+Owner authentication now covers billing, private intent aliases and agent receipt
+lists; operator authentication covers attestation, slash and dispute resolution.
+Production disables demo faucet/stake minting entirely. Integrations must use
+authenticated owner sessions or trusted backend operator credentials, never a
+public requester email as authorization.
+
+Stripe preparation now durably saves the exact checkout terms before returning
+the payment URL. Drain or operator-reconcile outstanding pre-upgrade checkout
+sessions first: they lack these terms and cannot safely be credited from
+metadata alone. New paid sessions reconcile exactly once using the existing
+Stripe provider and persistence; no new service is required.
+
 Also review the [account/session/funding follow-up](enterprise-security-followup-2026-09-26.md):
 it changes refresh rotation, password revocation, provider linking and payout API
 requirements. Strict production profile also rejects

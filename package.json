@@ -5,6 +5,9 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "test:release-security": "node scripts/test-release-security.mjs",
+    "test:release-route-authorization": "MAGIC_CITY_AUDIT_RELEASE_ROUTES=1 node scripts/test-production-security-integration.mjs",
+    "test:native-runner-active-port-recovery": "MAGIC_CITY_BROWSER_SMOKE_FOCUS=active-port-recovery node scripts/smoke-native-runner-extension-browser.mjs",
     "test:account-payment-security": "node scripts/test-account-payment-security.mjs",
     "test:account-payment-security-http": "node scripts/test-account-payment-security-http.mjs",
     "check:deployment-security": "node scripts/check-deployment-security.mjs",
@@ -111,12 +114,12 @@
     "node": ">=20"
   },
   "dependencies": {
-    "ethers": "^6.16.0",
+    "ethers": "6.17.0",
     "o1js": "^2.14.0",
     "pdfjs-dist": "^4.10.38",
     "pg": "^8.20.0",
     "playwright": "^1.58.2",
     "reflect-metadata": "^0.2.2",
-    "xlsx": "^0.18.5"
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   }
 }

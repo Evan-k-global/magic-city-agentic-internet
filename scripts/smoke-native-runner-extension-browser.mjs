@@ -3299,6 +3299,7 @@ async function main() {
       console.log('native-runner final-submit lease behavior smoke passed');
       return;
     }
+    if (smokeMode !== 'active-port-recovery') {
     console.log('native-runner browser smoke running full checkout matrix');
     const commandPage = async (page, message) => {
       const activeWorker = context.serviceWorkers()[0] || worker;
@@ -5902,6 +5903,7 @@ async function main() {
       fail(`browser_extension_stale_permission_mission_visible:${JSON.stringify(stalePendingResponse)}`);
     }
 
+    }
     // Disconnect the website's active port while a long merchant observation
     // is in flight, then terminate the MV3 worker. The durable active run and
     // crash-recovery alarm must resume the same read-only confirmation step;
@@ -5910,6 +5912,8 @@ async function main() {
     fulfillment = null;
     distractorSession = null;
     const disconnectedSessionId = 'browser-smoke-active-port-disconnect-session';
+    // This is a fresh mission, not the preceding stale-permission fixture.
+    transientRunnerStatusFailures = 0;
     const disconnectedPlan = rehashExtensionPlan({
       ...plan,
       planId: 'mplan_browser-smoke-active-port-disconnect-session',
@@ -5937,6 +5941,7 @@ async function main() {
       status: 'queued',
       claimedByPluginId: null,
       fulfillment: null,
+      executionLive: null,
       extensionCheckoutProfileEnabled: false,
       executionRequestedAt: new Date().toISOString(),
       missionBoundAuth: {
@@ -5980,6 +5985,10 @@ async function main() {
     if (!disconnectedPort.disconnected) {
       fail(`browser_extension_active_port_disconnect_not_exercised:${JSON.stringify(disconnectedPort)}`);
     }
+    const recoveryAlarmsBeforeStop = await popup.evaluate(() => chrome.alarms.getAll());
+    if (!recoveryAlarmsBeforeStop.some((alarm) => alarm.name === 'magic-city-runner-resume')) {
+      fail('browser_extension_active_port_recovery_alarm_not_armed');
+    }
     const disconnectRecoveryCdp = await context.newCDPSession(disconnectWakePage);
     await disconnectRecoveryCdp.send('ServiceWorker.enable');
     await disconnectRecoveryCdp.send('ServiceWorker.stopAllWorkers');
@@ -5989,7 +5998,8 @@ async function main() {
       const runnerState = await popup.evaluate(() => new Promise((resolve) => {
         chrome.storage.local.get(['lastError', 'lastExecution', 'activeRun'], resolve);
       }));
-      fail(`browser_extension_active_port_disconnect_recovery_timeout:${JSON.stringify({ runnerState, checkpoints })}`);
+      const recoveryAlarmsAfterTimeout = await popup.evaluate(() => chrome.alarms.getAll());
+      fail(`browser_extension_active_port_disconnect_recovery_timeout:${JSON.stringify({ runnerState, recoveryAlarmsBeforeStop, recoveryAlarmsAfterTimeout, checkpoints })}`);
     }
     const disconnectWorkerStarts = [...new Set(checkpoints
       .map((checkpoint) => String(checkpoint?.runnerTiming?.workerStartedAt || ''))
@@ -6009,7 +6019,7 @@ async function main() {
     });
     await disconnectWakePage.close();
 
-    if (purchaseScenarioResults.length < 10) {
+    if (purchaseScenarioResults.length < (smokeMode === 'active-port-recovery' ? 1 : 10)) {
       fail(`browser_extension_purchase_matrix_incomplete:${JSON.stringify(purchaseScenarioResults)}`);
     }
     if (selectionRankRequestCount !== 0) {

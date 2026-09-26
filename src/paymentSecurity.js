@@ -3,6 +3,19 @@ import { toUnits } from './units.js';
 const fail = (message, statusCode = 409) => Object.assign(new Error(message), { statusCode });
 const address = (value) => String(value || '').trim().toLowerCase();
 const validAddress = (value) => /^0x[\da-f]{40}$/.test(address(value));
+
+// Both webhook and browser-return reconciliation use these saved server terms.
+// Stripe metadata alone is not proof that this deployment sold these credits.
+export function assertStripeCheckoutTerms(session, prepared, { account = null, eventLivemode = session?.livemode } = {}) {
+  if (!prepared || prepared.mode !== 'stripe_credit_topup' || prepared.requestId !== `stripe:${session?.id}`) throw fail('stripe_checkout_not_prepared');
+  if (account || typeof session.livemode !== 'boolean' || eventLivemode !== prepared.livemode || session.livemode !== prepared.livemode) throw fail('stripe_checkout_account_or_mode_mismatch');
+  if (session.mode !== 'payment' || session.currency !== prepared.currency
+    || !Number.isSafeInteger(session.amount_total) || session.amount_total !== prepared.amountUsdCents
+    || session.metadata?.requesterId !== prepared.requesterId
+    || String(session.metadata?.amountCredits) !== String(prepared.credits)) throw fail('stripe_checkout_terms_mismatch');
+  if (session.payment_status !== 'paid' || session.status !== 'complete') throw fail('stripe_checkout_not_paid');
+  return prepared;
+}
 export function assertPreparedPaymentSubmission(authorization, body, authUserId, transactionOwner = null) {
   if (!authorization || !body.requestId || authorization.requestId !== body.requestId || authorization.userId !== authUserId) throw fail('payment_request_not_found', 404);
   if (authorization.metadata?.source !== 'wallet_request') throw fail('prepared_payment_request_required');

@@ -206,7 +206,7 @@ export function verifyStripeWebhookSignature(rawBody, signatureHeader, secretOve
   }
 
   const parsed = parseStripeSignature(signatureHeader);
-  if (!parsed.t || parsed.v1.length === 0) {
+  if (!/^\d+$/.test(parsed.t || '') || !Number.isSafeInteger(Number(parsed.t)) || parsed.v1.length === 0) {
     throw new Error('invalid_stripe_signature_header');
   }
 
@@ -218,7 +218,8 @@ export function verifyStripeWebhookSignature(rawBody, signatureHeader, secretOve
     throw new Error('stripe_signature_verification_failed');
   }
 
-  const tolerance = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS ?? 300);
+  const configuredTolerance = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_SECONDS ?? 300);
+  const tolerance = Number.isFinite(configuredTolerance) && configuredTolerance >= 0 ? Math.min(configuredTolerance, 300) : 300;
   const age = Math.abs(Math.floor(Date.now() / 1000) - Number(parsed.t));
   if (age > tolerance) {
     throw new Error('stripe_signature_too_old');
