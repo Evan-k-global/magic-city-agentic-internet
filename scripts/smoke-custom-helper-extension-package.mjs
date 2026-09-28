@@ -321,6 +321,13 @@ async function main() {
       fail('rejected_origin_created_browser_tab');
     }
 
+    await popup.reload();
+    // Development builds intentionally grant their fixture origin in the
+    // manifest; Chrome cannot remove a required host permission at runtime.
+    await popup.waitForFunction(() => document.querySelector('#grantedSites')?.textContent?.includes('Required by this build:'));
+    if (!await popup.locator('#modelConsent').isDisabled()) fail('disabled model adapter must not offer model access');
+    if (await popup.locator('#grantedSites button').count()) fail('required development origins must not offer ineffective revocation');
+
     console.log(`custom helper extension release package smoke passed: ${zipPath}`);
     console.log(`session ${sessionId} produced ${boundaryEventCount} mission-bound events`);
   } catch (error) {

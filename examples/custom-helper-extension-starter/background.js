@@ -1,4 +1,5 @@
 import { PARTNER_CONFIG } from './partner-config.js';
+import { modelConsentKey } from './model-privacy.js';
 
 const CONTROL_PLANE_ORIGIN = String(PARTNER_CONFIG.controlPlaneOrigin || '').replace(/\/+$/, '');
 const HELPER_PLUGIN_ID = PARTNER_CONFIG.helperPluginId;
@@ -69,6 +70,7 @@ async function getConfig() {
     'holderPublicJwk',
     'holderPrivateJwk',
     'registered',
+    'modelConsent',
     'last'
   ]);
   if (config.deviceToken && config.pairedControlPlaneOrigin !== CONTROL_PLANE_ORIGIN) {
@@ -384,8 +386,10 @@ async function pollOnce() {
   return { sessions: sessions.length, executed };
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
+    if (['HELPER_MODEL_CONSENT', 'HELPER_REVOKE_SITE_ACCESS'].includes(message?.type)
+      && (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html'))) throw new Error('popup_required');
     if (message?.type === 'HELPER_PAIR') return { ok: true, data: await pair(message) };
     if (message?.type === 'HELPER_REGISTER') return { ok: true, data: await register() };
     if (message?.type === 'HELPER_GRANT_SITE_ACCESS') {
@@ -394,8 +398,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return { ok: granted, granted, origins: OPTIONAL_MERCHANT_ORIGINS };
     }
     if (message?.type === 'HELPER_POLL_ONCE') return { ok: true, result: await pollOnce() };
+    if (message?.type === 'HELPER_REVOKE_SITE_ACCESS') {
+      const origin = String(message.origin || '');
+      if (!OPTIONAL_MERCHANT_ORIGINS.includes(origin) || (chrome.runtime.getManifest().host_permissions || []).includes(origin)) throw new Error('permission_not_revocable');
+      return { ok: await chrome.permissions.remove({ origins: [origin] }) };
+    }
+    if (message?.type === 'HELPER_MODEL_CONSENT') {
+      const consent = message.enabled === true && PARTNER_CONFIG.modelAdapter?.mode === 'control_plane'
+        ? modelConsentKey({ ...PARTNER_CONFIG.modelAdapter, controlPlaneOrigin: CONTROL_PLANE_ORIGIN }) : '';
+      await chrome.storage.local.set({ modelConsent: consent });
+      return { ok: true };
+    }
     if (message?.type === 'HELPER_STATUS') {
       const config = await getConfig();
+      const permissions = await chrome.permissions.getAll();
+      const requiredOrigins = chrome.runtime.getManifest().host_permissions || [];
+      const { modelConsent = '' } = await chrome.storage.local.get('modelConsent');
       return {
         ok: true,
         paired: Boolean(config.deviceToken),
@@ -404,7 +422,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
         launchOrigins: Array.from(LAUNCH_ORIGINS),
         extensionName: PARTNER_CONFIG.extensionName,
-        profile: PARTNER_CONFIG.profile
+        profile: PARTNER_CONFIG.profile,
+        grantedOrigins: (permissions.origins || []).filter((origin) => OPTIONAL_MERCHANT_ORIGINS.includes(origin) && !requiredOrigins.includes(origin)),
+        requiredPageOrigins: requiredOrigins.filter((origin) => origin !== `${CONTROL_PLANE_ORIGIN}/*`),
+        modelRouting: PARTNER_CONFIG.modelAdapter?.mode === 'control_plane' ? PARTNER_CONFIG.modelAdapter.dataRouting : 'disabled',
+        modelEnabled: PARTNER_CONFIG.modelAdapter?.mode === 'control_plane' && modelConsent === modelConsentKey({ ...PARTNER_CONFIG.modelAdapter, controlPlaneOrigin: CONTROL_PLANE_ORIGIN })
       };
     }
     return { ok: false, error: 'unknown_message' };

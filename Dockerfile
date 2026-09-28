@@ -7,7 +7,6 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY public ./public
 COPY .well-known ./.well-known
-COPY env ./env
 
 EXPOSE 4411
 

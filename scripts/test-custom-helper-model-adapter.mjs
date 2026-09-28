@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
-import { consultPartnerModel, MODEL_ADAPTER_SCHEMAS } from '../examples/custom-helper-extension-starter/model-adapter.js';
+import { consultPartnerModel as consult, MODEL_ADAPTER_SCHEMAS } from '../examples/custom-helper-extension-starter/model-adapter.js';
+import { modelConsentKey } from '../examples/custom-helper-extension-starter/model-privacy.js';
+
+const consultPartnerModel = (args) => consult({ ...args, modelConsent: modelConsentKey({ ...args.config, controlPlaneOrigin: args.controlPlaneOrigin }) });
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const config = {
   mode: 'control_plane',
+  dataRouting: 'local',
+  observationPolicy: {
+    allowedOrigins: ['https://shop.partner.test'],
+    pageFields: ['url', 'title', 'heading', 'description'],
+    candidateFields: ['id', 'title', 'price', 'currency', 'availability', 'attributes']
+  },
   path: '/partner/model/consult',
   modelId: 'partner-selection-model',
   timeoutMs: 1000,
@@ -18,6 +27,8 @@ const session = {
 const planAction = { id: 'select-candidate-1' };
 const observation = {
   page: {
+    kind: 'search',
+    containsSensitiveData: false,
     url: 'https://user:pass@shop.partner.test/search?q=gadget&token=FAKE_TEST_SECRET#private',
     title: 'Partner catalog',
     heading: 'Gadgets',

@@ -22,6 +22,8 @@ licensed so builders can make and connect their own local helper agents.
 - [IP-NOTICE.md](/Users/evankereiakes/Documents/Codex/agent-verification/IP-NOTICE.md)
 - [docs/MAGIC_CITY_PUBLIC_IP_THESIS.md](/Users/evankereiakes/Documents/Codex/agent-verification/docs/MAGIC_CITY_PUBLIC_IP_THESIS.md)
 - [Partner and white-label quickstart](docs/partner-white-label-quickstart.md)
+- [Production security profile and migration](docs/production-security.md)
+- [Security hardening review and remaining enterprise gates](docs/enterprise-readiness-review-2026-09-26.md)
 
 Execution architecture specs:
 - [SCHEDULED_WORKFLOWS_SPEC.md](/Users/evankereiakes/Documents/Codex/agent-verification/SCHEDULED_WORKFLOWS_SPEC.md)

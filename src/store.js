@@ -89,6 +89,7 @@ const defaultState = () => ({
   },
   unitScale: CREDIT_SCALE,
   processedStripeEvents: {},
+  stripeCheckoutTerms: {},
   payoutByTransferId: {}
 });
 
@@ -163,6 +164,7 @@ function withDefaults(raw = {}) {
     lastSettlementId: null
   };
   raw.processedStripeEvents = raw.processedStripeEvents ?? {};
+  raw.stripeCheckoutTerms = raw.stripeCheckoutTerms ?? {};
   raw.payoutByTransferId = raw.payoutByTransferId ?? {};
   raw.unitScale = raw.unitScale ?? CREDIT_SCALE;
   return raw;
@@ -995,10 +997,8 @@ export function addReceipt(receipt) {
   };
   state.receipts.push(row);
 
-  const price = Number(row.payment?.amountUnits ?? 0);
-  if (Number.isFinite(price) && price > 0 && row.agentId) {
-    state.balances[row.agentId] = (state.balances[row.agentId] ?? 0) + price;
-  }
+  // Receipts are evidence, never funding. Platform credit capture is performed
+  // by settleLockedCredits against an existing lock, not a reported amount.
 
   persistState();
   return row;
@@ -1082,6 +1082,25 @@ export function createPaymentAuthorization(entry) {
   state.paymentAuthorizations.push(row);
   persistState();
   return row;
+}
+
+export function saveStripeCheckoutTerms(entry) {
+  const key = String(entry.requestId || '');
+  if (!/^stripe:cs_[A-Za-z0-9_]+$/.test(key)) throw new Error('invalid_stripe_checkout_id');
+  const previous = getStripeCheckoutTerms(key);
+  if (previous) {
+    for (const field of ['userId', 'requesterId', 'credits', 'amountUsdCents', 'currency', 'livemode', 'mode']) {
+      if (previous[field] !== entry[field]) throw new Error('stripe_checkout_terms_conflict');
+    }
+    return previous;
+  }
+  state.stripeCheckoutTerms[key] = { ...entry, createdAt: new Date().toISOString() };
+  persistState();
+  return state.stripeCheckoutTerms[key];
+}
+
+export function getStripeCheckoutTerms(key) {
+  return Object.hasOwn(state.stripeCheckoutTerms, key) ? state.stripeCheckoutTerms[key] : null;
 }
 
 export function getPaymentAuthorization(id) {
@@ -2229,6 +2248,43 @@ export function getAuthUserByEmail(email) {
   return ensureAuthUserDefaults(Object.values(state.authUsers).find((row) => row.email === normalizedEmail) ?? null);
 }
 
+export function getAuthUserByProviderSubject(provider, subject) {
+  if (!subject || !['google', 'github'].includes(provider)) return null;
+  return ensureAuthUserDefaults(Object.values(state.authUsers).find((row) =>
+    String(provider === 'google' ? row.googleProfile?.subject || '' : row.githubProfile?.id || '') === String(subject)) ?? null);
+}
+
+export function revokeUserCredentials(userId, reason = 'security_reset') {
+  const now = new Date().toISOString();
+  for (const collection of [state.authSessions, state.authPasswordResets, state.oauthAuthorizationCodes, state.oauthAccessTokens, state.oauthRefreshTokens, state.walletChallenges]) {
+    for (const row of Object.values(collection)) {
+      if (row.userId === userId && !row.revokedAt) Object.assign(row, { revokedAt: now, updatedAt: now, revokeReason: reason });
+    }
+  }
+  for (const row of [...state.nativeRunnerDevices, ...state.nativeRunnerPairingSessions]) {
+    if (row.authUserId === userId) Object.assign(row, { status: 'revoked', revokedAt: now, updatedAt: now, revokedReason: reason });
+  }
+  persistState();
+}
+
+export function revokeOAuthTokenFamily(tokenHash, reason = 'revoked') {
+  const refresh = state.oauthRefreshTokens[tokenHash];
+  if (!refresh) return revokeOAuthAccessToken(tokenHash);
+  const family = refresh.metadata?.familyId || refresh.tokenHash;
+  const now = new Date().toISOString();
+  const hashes = new Set();
+  for (const row of Object.values(state.oauthRefreshTokens)) {
+    if ((row.metadata?.familyId || row.tokenHash) === family) {
+      hashes.add(row.tokenHash);
+      Object.assign(row, { revokedAt: now, updatedAt: now, revokeReason: reason });
+    }
+  }
+  for (const row of Object.values(state.oauthAccessTokens)) {
+    if (hashes.has(row.refreshTokenHash)) Object.assign(row, { revokedAt: now, updatedAt: now, revokeReason: reason });
+  }
+  persistState();
+}
+
 export function getAuthUserByRequesterId(requesterId) {
   const normalizedRequesterId = String(requesterId || '').trim().toLowerCase();
   if (!normalizedRequesterId) return null;
@@ -2723,11 +2779,12 @@ export function touchOAuthRefreshToken(tokenHash) {
   return state.oauthRefreshTokens[tokenHash];
 }
 
-export function revokeOAuthRefreshToken(tokenHash) {
+export function revokeOAuthRefreshToken(tokenHash, metadataPatch = {}) {
   const current = state.oauthRefreshTokens[tokenHash];
   if (!current) return null;
   state.oauthRefreshTokens[tokenHash] = {
     ...current,
+    metadata: { ...(current.metadata || {}), ...metadataPatch },
     updatedAt: new Date().toISOString(),
     revokedAt: new Date().toISOString()
   };
@@ -3271,7 +3328,15 @@ export function anonymizeUser(userHash) {
   persistState();
 }
 
-export function createPayoutRequest({ agentId, amount, rail, destination }) {
+export function createPayoutRequest({ agentId, amount, rail, destination, requestId = null }) {
+  if (!Number.isSafeInteger(amount) || amount <= 0) return { ok: false, reason: 'invalid_payout_amount' };
+  if (requestId) {
+    const existing = state.payoutRequests.find((row) => row.agentId === agentId && row.requestId === requestId);
+    if (existing) {
+      if (existing.amount !== amount || existing.rail !== rail || existing.destination !== destination) return { ok: false, reason: 'payout_idempotency_conflict' };
+      return { ok: true, payout: existing, deduped: true };
+    }
+  }
   const current = state.balances[agentId] ?? 0;
   const delta = Math.max(0, Math.trunc(Number(amount ?? 0)));
   if (delta <= 0 || current < delta) {
@@ -3283,6 +3348,7 @@ export function createPayoutRequest({ agentId, amount, rail, destination }) {
     createdAt: new Date().toISOString(),
     status: 'requested',
     agentId,
+    requestId,
     amount: delta,
     rail,
     destination

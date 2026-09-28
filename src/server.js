@@ -1,3 +1,9 @@
+import './securityBootstrap.js';
+import { readMissionKeyTransition, verifyMissionTokenSignature } from './missionKeyTransition.js';
+import { createRequestSecurity, deploymentIsProduction, productionAdminAccount } from './deploymentSecurity.js';
+import { createRequestLimiter } from './requestRateLimits.js';
+import { futureExpiry, equalSecret, verifiedProviderIdentity, assertProviderAccountLink, assertOauthBrowserBinding } from './accountSecurity.js';
+import { assertPreparedPaymentSubmission, validTopupTransfer, assertStripeCheckoutTerms } from './paymentSecurity.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -38,6 +44,9 @@ import {
   createAuthUser,
   getAuthUser,
   getAuthUserByEmail,
+  getAuthUserByProviderSubject,
+  revokeUserCredentials,
+  revokeOAuthTokenFamily,
   getAuthUserByRequesterId,
   getAuthUserByEvmWalletAddress,
   getAuthUserByReferralCode,
@@ -66,7 +75,6 @@ import {
   revokeOAuthAccessToken,
   createOAuthRefreshToken,
   getOAuthRefreshToken,
-  touchOAuthRefreshToken,
   revokeOAuthRefreshToken,
   creditUserAccount,
   grantRewardCredits,
@@ -119,6 +127,8 @@ import {
   updateSettlementRegistryEntry,
   upsertPlatformSettlementRegistryEntry,
   createPaymentAuthorization,
+  saveStripeCheckoutTerms,
+  getStripeCheckoutTerms,
   getPaymentAuthorization,
   findPaymentAuthorizationByRequestId,
   findPaymentAuthorizationByTxHash,
@@ -338,32 +348,11 @@ import {
 } from './foodCatalog94107.js';
 import { getWorkflowDefinition, listWorkflowDefinitionsForClient } from './workflowRegistry.js';
 
-function loadEnvFileWithOverride(filePath) {
-  try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const match = trimmed.match(/^([A-Z0-9_]+)=(.*)$/);
-      if (!match) continue;
-      const [, key, value] = match;
-      // Deployment secrets must override local convenience env files.
-      if (typeof process.env[key] === 'undefined' || process.env[key] === '') process.env[key] = value;
-    }
-  } catch {
-    // ignore missing local env file
-  }
-}
-
-loadEnvFileWithOverride(path.resolve(process.cwd(), '.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'providers.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'stripe.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'square.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'google.env'));
-loadEnvFileWithOverride(path.resolve(process.cwd(), 'env', 'github.env'));
-
 const PORT = Number(process.env.PORT ?? 4411);
 const HOST = process.env.HOST ?? '0.0.0.0';
+const requestSecurity = createRequestSecurity();
+const productionProfile = deploymentIsProduction();
+const requestLimiter = createRequestLimiter();
 const MAGIC_CITY_SAFE_HTTP_STARTUP = process.env.MAGIC_CITY_SAFE_HTTP_STARTUP !== 'false';
 const MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE = String(process.env.MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE || '').toLowerCase() === 'true';
 const MAGIC_CITY_SANTACLAWZ_MODE = ['disabled', 'read_only', 'live'].includes(String(process.env.MAGIC_CITY_SANTACLAWZ_MODE || 'disabled').trim().toLowerCase())
@@ -584,9 +573,9 @@ const AUTH_EMAIL_FROM = process.env.AUTH_EMAIL_FROM || process.env.RESEND_FROM_E
 const AUTH_EMAIL_REPLY_TO = process.env.AUTH_EMAIL_REPLY_TO || '';
 const RESEND_API_KEY = process.env.RESEND_API_KEY || process.env.AUTH_EMAIL_API_KEY || '';
 const AUTH_PASSWORD_RESET_DEV_LINKS =
-  process.env.AUTH_PASSWORD_RESET_DEV_LINKS === 'true' ||
-  (process.env.NODE_ENV !== 'production' && process.env.AUTH_PASSWORD_RESET_DEV_LINKS !== 'false');
-const MAGIC_CITY_PUBLIC_BASE_URL = String(process.env.MAGIC_CITY_PUBLIC_BASE_URL || 'https://magic-city.ai')
+  !productionProfile && (process.env.AUTH_PASSWORD_RESET_DEV_LINKS === 'true' ||
+  (process.env.NODE_ENV !== 'production' && process.env.AUTH_PASSWORD_RESET_DEV_LINKS !== 'false'));
+const MAGIC_CITY_PUBLIC_BASE_URL = String(process.env.MAGIC_CITY_CANONICAL_ORIGIN || process.env.MAGIC_CITY_PUBLIC_BASE_URL || 'https://magic-city.ai')
   .trim()
   .replace(/\/+$/, '') || 'https://magic-city.ai';
 const MAGIC_CITY_PUBLIC_DOMAIN = (() => {
@@ -601,15 +590,16 @@ const MAGIC_CITY_GOOGLE_PRODUCTION_HOSTS = new Set(['magic-city.ai']);
 const MAGIC_CITY_MCP_SCOPE = process.env.MAGIC_CITY_MCP_SCOPE || 'magiccity.mcp';
 const MCP_OAUTH_SECRET =
   process.env.MCP_OAUTH_SECRET ||
-  process.env.GOOGLE_CONNECTOR_SECRET ||
+  (productionProfile ? '' : process.env.GOOGLE_CONNECTOR_SECRET ||
   process.env.ADMIN_TOKEN ||
   process.env.STRIPE_SECRET_KEY ||
-  'magic-city-staging-oauth-secret';
+  'magic-city-staging-oauth-secret');
 const MISSION_BOUND_AUTH_SECRET =
   process.env.MISSION_BOUND_AUTH_SECRET ||
   process.env.MAGIC_CITY_MISSION_AUTH_SECRET ||
   MCP_OAUTH_SECRET;
 const MISSION_BOUND_AUTH_PUBLIC_KEY_ID = process.env.MISSION_BOUND_AUTH_PUBLIC_KEY_ID || 'magic-city-mission-bound-auth-v1';
+const MISSION_KEY_TRANSITION = readMissionKeyTransition();
 const MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY =
   process.env.MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY ||
   process.env.MAGIC_CITY_MISSION_AUTH_ED25519_PRIVATE_KEY ||
@@ -646,19 +636,18 @@ const MAGIC_CITY_CREDIT_BACKED_X402_MAX_USD_CENTS = Math.max(
 );
 const EVM_ERC20_INTERFACE = new Interface(['function transfer(address to, uint256 value) returns (bool)']);
 const EVM_TRANSFER_EVENT_INTERFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
-const requestRateLimitState = new Map();
 const GOOGLE_CONNECTOR_SECRET =
   process.env.GOOGLE_CONNECTOR_SECRET ||
-  process.env.AUTH_CONNECTOR_SECRET ||
+  (productionProfile ? '' : process.env.AUTH_CONNECTOR_SECRET ||
   process.env.ADMIN_TOKEN ||
   process.env.STRIPE_SECRET_KEY ||
-  '';
+  '');
 const GITHUB_CONNECTOR_SECRET =
   process.env.GITHUB_CONNECTOR_SECRET ||
-  process.env.AUTH_CONNECTOR_SECRET ||
+  (productionProfile ? '' : process.env.AUTH_CONNECTOR_SECRET ||
   process.env.GITHUB_CLIENT_SECRET ||
   process.env.ADMIN_TOKEN ||
-  '';
+  '');
 const LOCAL_ADMIN_REQUESTER_IDS = new Set(
   String(process.env.LOCAL_ADMIN_REQUESTER_IDS || 'evan,local-admin,magic-city-admin')
     .split(',')
@@ -984,7 +973,7 @@ function assertToken(req, expectedToken, headerName) {
     throw err;
   }
   const actual = req.headers[headerName];
-  if (actual !== expectedToken) {
+  if (!equalSecret(actual, expectedToken)) {
     const err = new Error('unauthorized');
     err.statusCode = 401;
     throw err;
@@ -1017,7 +1006,28 @@ function assertPluginApiKey(req) {
     err.statusCode = 401;
     throw err;
   }
+  if (PUBLIC_API_KEYS.has(MAGIC_CITY_PLUGIN_API_KEY)) {
+    throw createHttpError('plugin_credential_must_be_separate', 503);
+  }
   return true;
+}
+
+function assertScopedPlugin(req, { pluginId = '', body = {}, session = null } = {}) {
+  assertPluginApiKey(req);
+  const allowed = new Set(String(process.env.MAGIC_CITY_PLUGIN_ALLOWED_IDS || '').split(',').map((v) => v.trim()).filter(Boolean));
+  if (!allowed.has(pluginId)) throw createHttpError('plugin_scope_denied', 403);
+  // Service credentials never impersonate paired browser devices.
+  if (isNativeRunnerExecutionAgentId(pluginId) || isDeclarativeExtensionExecutionAgentId(pluginId)) {
+    throw createHttpError('native_runner_device_required', 403);
+  }
+  const owners = JSON.parse(process.env.MAGIC_CITY_PLUGIN_OWNER_AGENT_IDS || '{}');
+  const ownerAgentId = Object.hasOwn(owners, pluginId) ? owners[pluginId] : pluginId;
+  if (body.ownerAgentId && body.ownerAgentId !== ownerAgentId) throw createHttpError('plugin_owner_mismatch', 403);
+  if (session && (!session.preferredExecutionAgentId
+    || !canExecutionPluginActForPreferredAgent({ session, pluginId })
+    || (session.claimedByPluginId && session.claimedByPluginId !== pluginId))) {
+    throw createHttpError('plugin_session_scope_denied', 403);
+  }
 }
 
 function parseCookies(req) {
@@ -1126,11 +1136,7 @@ function getMissionVerifierKeyPair() {
 }
 
 function buildRequestBaseUrl(req) {
-  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  const proto = forwardedProto || (req.socket?.encrypted ? 'https' : 'http');
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
-  const host = forwardedHost || String(req.headers.host || '').trim() || `127.0.0.1:${PORT}`;
-  return `${proto}://${host}`.replace(/\/+$/, '');
+  return requestSecurity.baseUrl(req);
 }
 
 function getRequestHostname(req) {
@@ -1142,11 +1148,7 @@ function getRequestHostname(req) {
 }
 
 function isSecureRequest(req) {
-  try {
-    return new URL(buildRequestBaseUrl(req)).protocol === 'https:';
-  } catch {
-    return false;
-  }
+  return requestSecurity.secure(req);
 }
 
 function resolveSessionCookieDomain(req) {
@@ -1269,6 +1271,28 @@ function parseBearerToken(req) {
   return match?.[1] ? String(match[1]).trim() : '';
 }
 
+function beginOauthBrowserBinding(req, res, provider) {
+  const value = createOAuthOpaqueValue();
+  setCookie(res, `mc_oauth_${provider}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900${isSecureRequest(req) ? '; Secure' : ''}`);
+  return hashOpaqueValue(value);
+}
+
+function consumeOauthBrowserBinding(req, res, provider, state) {
+  if (state.mode !== 'signin') return;
+  assertOauthBrowserBinding(state, parseCookies(req)[`mc_oauth_${provider}`]);
+  setCookie(res, `mc_oauth_${provider}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${isSecureRequest(req) ? '; Secure' : ''}`);
+}
+
+function resolveProviderSignin(req, provider, profile, emails = []) {
+  const identity = verifiedProviderIdentity(provider, profile, emails);
+  const subjectUser = getAuthUserByProviderSubject(provider, identity.subject);
+  const emailUser = getAuthUserByEmail(identity.email);
+  if (subjectUser && emailUser && subjectUser.id !== emailUser.id) throw createHttpError('provider_account_conflict', 403);
+  const user = subjectUser || emailUser;
+  assertProviderAccountLink(user, identity, getAuthenticatedContext(req));
+  return { identity, user };
+}
+
 function buildMcpProtectedResourceMetadataUrl(req) {
   return `${buildRequestBaseUrl(req)}/mcp/.well-known/oauth-protected-resource`;
 }
@@ -1345,6 +1369,10 @@ function escapeScriptJson(value) {
     .replaceAll('\u2029', '\\u2029');
 }
 
+function scriptJson(value) {
+  return escapeScriptJson(JSON.stringify(value));
+}
+
 function safeJsonParse(raw) {
   try {
     return JSON.parse(raw);
@@ -1361,22 +1389,6 @@ function createHttpError(message, statusCode = 500, options = {}) {
   return error;
 }
 
-function consumeRateLimit(key, { windowMs, max }) {
-  const now = Date.now();
-  const entry = requestRateLimitState.get(key) ?? { timestamps: [] };
-  const timestamps = entry.timestamps.filter((value) => now - value < windowMs);
-  if (timestamps.length >= max) {
-    const retryAfterMs = Math.max(1000, windowMs - (now - timestamps[0]));
-    return {
-      allowed: false,
-      retryAfterMs
-    };
-  }
-  timestamps.push(now);
-  requestRateLimitState.set(key, { timestamps });
-  return { allowed: true, retryAfterMs: 0 };
-}
-
 function buildRateLimitKey(req, bucket, { auth = null, extra = '' } = {}) {
   const subject =
     auth?.oauthAccessToken?.id
@@ -1387,8 +1399,13 @@ function buildRateLimitKey(req, bucket, { auth = null, extra = '' } = {}) {
   return [bucket, subject, extra].filter(Boolean).join(':');
 }
 
-function enforceRateLimit(req, { bucket, max, windowMs, auth = null, extra = '' }) {
-  const result = consumeRateLimit(buildRateLimitKey(req, bucket, { auth, extra }), { max, windowMs });
+async function enforceRateLimit(req, { bucket, max, windowMs, auth = null, extra = '' }) {
+  let result;
+  try {
+    result = await requestLimiter.consume(buildRateLimitKey(req, bucket, { auth, extra }), { max, windowMs });
+  } catch {
+    throw createHttpError('rate_limit_service_unavailable', 503);
+  }
   if (result.allowed) return true;
   throw createHttpError('rate_limit_exceeded', 429, {
     headers: { 'Retry-After': String(Math.ceil(result.retryAfterMs / 1000)) },
@@ -1467,7 +1484,7 @@ function getAuthenticatedContext(req) {
   const tokenHash = hashSessionToken(token);
   const authSession = getAuthSession(tokenHash);
   if (!authSession || authSession.revokedAt) return null;
-  if (new Date(authSession.expiresAt).getTime() <= Date.now()) return null;
+  if (!futureExpiry(authSession.expiresAt)) return null;
   const authUser = getAuthUser(authSession.userId);
   if (!authUser) return null;
   touchAuthSession(tokenHash);
@@ -1482,6 +1499,9 @@ function getAuthenticatedContext(req) {
 function resolveRequesterIdentity(req, explicitRequesterId = null) {
   const auth = getAuthenticatedContext(req);
   const provided = String(explicitRequesterId || '').trim();
+  // An asserted email is never authority over an existing account. Anonymous
+  // development demos remain available only outside the production profile.
+  if (productionProfile && !auth && provided) throw createHttpError('auth_required', 401);
   if (auth && provided && provided !== auth.authUser.requesterId) {
     const err = new Error('requester_id_mismatch');
     err.statusCode = 409;
@@ -1584,7 +1604,7 @@ function serializeAuthUser(authUser, authSession = null) {
       github: buildGitHubConnectorStatus(authUser),
       evmWallets: buildEvmWalletStatus(authUser)
     },
-    adminAccount: isLocalAdminRequester(authUser.requesterId) || LOCAL_ADMIN_EMAILS.has(String(authUser.email || '').trim().toLowerCase()),
+    adminAccount: productionAdminAccount(authUser),
     createdAt: authUser.createdAt,
     lastLoginAt: authUser.lastLoginAt
   };
@@ -1950,6 +1970,7 @@ function buildEvmUsdcTransferRequest({
   } : null;
   if (!normalizedWallet?.address) throw createHttpError('evm_wallet_not_connected', 409);
   const config = getSupportedEvmChainConfig(chainId || normalizedWallet.chainId);
+  if (Number(chainId || normalizedWallet.chainId) !== config.chainId) throw createHttpError('evm_wallet_chain_not_supported', 409);
   if (!config.tokenAddress) throw createHttpError('evm_wallet_chain_not_supported', 409);
   const targetRecipient = normalizeEvmAddress(
     mode === 'credit_topup'
@@ -1962,10 +1983,12 @@ function buildEvmUsdcTransferRequest({
       mode === 'credit_topup' ? 409 : 400
     );
   }
-  const normalizedCredits = credits == null ? null : Math.max(1, Math.trunc(Number(credits) || 0));
+  const normalizedCredits = credits == null ? null : Number(credits);
+  if (mode === 'credit_topup' && (!Number.isSafeInteger(normalizedCredits) || normalizedCredits < 1 || !Number.isSafeInteger(toUnits(normalizedCredits)))) throw createHttpError('invalid_topup_credits', 400);
   const normalizedUsdCents = mode === 'credit_topup'
     ? creditsToUsdCents(normalizedCredits)
-    : Math.max(1, Math.trunc(Number(amountUsdCents) || 0));
+    : Number(amountUsdCents);
+  if (!Number.isSafeInteger(normalizedUsdCents) || normalizedUsdCents < 1) throw createHttpError('invalid_payment_amount', 400);
   const amountBaseUnits = BigInt(normalizedUsdCents) * 10000n;
   const transferData = EVM_ERC20_INTERFACE.encodeFunctionData('transfer', [targetRecipient, amountBaseUnits]);
   const requestId = `evmpay_${createOAuthOpaqueValue()}`;
@@ -2012,7 +2035,7 @@ function verifyEvmChallengeSignature({ challenge, signature, signedMessage = nul
   if (!challenge) throw createHttpError('wallet_challenge_not_found', 404);
   if (challenge.revokedAt) throw createHttpError('wallet_challenge_revoked', 409);
   if (challenge.consumedAt) throw createHttpError('wallet_challenge_consumed', 409);
-  if (new Date(challenge.expiresAt).getTime() <= Date.now()) {
+  if (!futureExpiry(challenge.expiresAt)) {
     revokeWalletChallenge(challenge.id, 'expired');
     throw createHttpError('wallet_challenge_expired', 409);
   }
@@ -2098,7 +2121,7 @@ function verifyOauthStateWithSecret(stateToken, secret, invalidCode = 'invalid_o
   }
   const payload = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'));
   const createdAt = Number(payload.createdAt || 0);
-  if (!Number.isFinite(createdAt) || Date.now() - createdAt > 15 * 60 * 1000) {
+  if (!Number.isFinite(createdAt) || createdAt <= 0 || createdAt > Date.now() + 30000 || Date.now() - createdAt > 15 * 60 * 1000) {
     throw new Error(expiredCode);
   }
   return payload;
@@ -2541,10 +2564,7 @@ function verifyMissionCapabilityToken(token, {
   if (prefix !== 'mcap' || !payloadPart || !signaturePart) {
     throw createHttpError('invalid_mission_capability', 401);
   }
-  const expectedSignature = crypto.createHmac('sha256', normalizedSecret).update(payloadPart).digest('base64url');
-  const actual = Buffer.from(signaturePart);
-  const expected = Buffer.from(expectedSignature);
-  if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+  if (!verifyMissionTokenSignature(String(token).trim(), normalizedSecret, MISSION_KEY_TRANSITION)) {
     throw createHttpError('invalid_mission_capability_signature', 401);
   }
   let payload = null;
@@ -6886,12 +6906,12 @@ function maybeFinalizeWalletTopupAuthorization(authorization, observedTransfer =
   if (normalizeEvmAddress(authorization.tokenAddress || '') !== chainConfig.tokenAddress) {
     return { finalized: false, reason: 'topup_token_mismatch' };
   }
-  if (observedTransfer?.matched === false) {
-    return { finalized: false, reason: observedTransfer.reason || 'transfer_log_mismatch' };
+  if (!validTopupTransfer(authorization, observedTransfer, chainConfig, creditsToUsdCents)) {
+    return { finalized: false, reason: 'verified_topup_transfer_required' };
   }
   const credits = Math.max(1, Math.trunc(Number(authorization.credits || 0)));
   const userHash = hashIdentifier(authUser.requesterId);
-  const topupExternalId = authorization.walletTxHash || authorization.requestId || authorization.id;
+  const topupExternalId = authorization.walletTxHash.toLowerCase();
   const account = creditUserAccount(
     userHash,
     toUnits(credits),
@@ -7979,8 +7999,8 @@ function requirePluginApiKeyOrNativeRunner(req, options = {}) {
   if (nativeRunnerDevice) {
     return { type: 'native_runner', nativeRunnerDevice };
   }
-  assertPublicApiKey(req);
-  return { type: 'api_key', nativeRunnerDevice: null };
+  assertScopedPlugin(req, options);
+  return { type: 'plugin_key', nativeRunnerDevice: null };
 }
 
 function requireAuthenticatedOwnedResource(req, authUser, allowed, resourceName = 'resource') {
@@ -8275,7 +8295,10 @@ function resolvePersonalAgentRuntimeFromRequest(req, body = null) {
   })();
   const token = headerToken || bodyToken || queryToken;
   if (!token) return null;
-  return getPersonalAgentRuntimeByToken(token);
+  const runtime = getPersonalAgentRuntimeByToken(token);
+  if (!runtime || runtime.revokedAt || ['revoked', 'disabled'].includes(runtime.status)
+    || (runtime.expiresAt && !(Date.parse(runtime.expiresAt) > Date.now()))) return null;
+  return runtime;
 }
 
 function updateSessionJobLedgerFromAgent(session, updates = [], runtime = null, note = '') {
@@ -9943,11 +9966,12 @@ function resolveAgentSdkCaller(req, body = {}, auth = null) {
         : 'external';
   const agent = getAgent(agentId) || (agentId.startsWith('santaclawz:') ? getSantaClawzAgentRowByMagicId(agentId) : null);
   return {
+    credentialHash: !auth?.authUser && !runtime ? authenticatedSdkCredentialHash(req) : null,
     agentId,
     runtimeId: runtime?.id || null,
     authUserId: auth?.authUser?.id || null,
-    requesterId: auth?.authUser?.requesterId || String(body.requesterId || '').trim() || null,
-    requesterHash: auth?.authUser?.requesterId ? hashIdentifier(auth.authUser.requesterId) : body.requesterId ? hashIdentifier(body.requesterId) : null,
+    requesterId: auth?.authUser?.requesterId || runtime?.requesterId || null,
+    requesterHash: auth?.authUser?.requesterId ? hashIdentifier(auth.authUser.requesterId) : runtime?.requesterId ? hashIdentifier(runtime.requesterId) : null,
     source,
     registry: source === 'santaclawz'
       ? {
@@ -9964,8 +9988,20 @@ function requireAgentSdkWriteAuth(req, body = {}) {
   const auth = getAuthenticatedContext(req);
   const runtime = resolvePersonalAgentRuntimeFromRequest(req, body);
   if (auth?.authUser || runtime) return { auth, runtime };
-  assertPublicApiKey(req);
+  if (!authenticatedSdkCredentialHash(req)) throw createHttpError('auth_required', 401);
   return { auth: null, runtime: null };
+}
+
+function authenticatedSdkCredentialHash(req) {
+  const key = String(req.headers['x-api-key'] || '');
+  return key && PUBLIC_API_KEYS.has(key) ? hashHex(`agent-sdk-credential:${key}`) : null;
+}
+
+function assertReceiptIntentBinding(intentId, agentId) {
+  if (!intentId) return;
+  const intent = getIntent(intentId);
+  const provider = intent?.routedAgentId || intent?.providerAgentId;
+  if (!intent || !provider || provider !== agentId) throw createHttpError('receipt_intent_provider_mismatch', 409);
 }
 
 function canAccessAgentSdkMission(req, authUser, caller, mission) {
@@ -9974,7 +10010,8 @@ function canAccessAgentSdkMission(req, authUser, caller, mission) {
   if (authUser?.id && mission.authUserId && authUser.id === mission.authUserId) return true;
   const requesterHash = authUser ? getAuthUserRequesterHash(authUser) : '';
   if (requesterHash && mission.requesterHash && requesterHash === mission.requesterHash) return true;
-  if (caller?.agentId && mission.agentId && caller.agentId === mission.agentId) return true;
+  if (caller?.runtimeId && mission.runtimeId === caller.runtimeId) return true;
+  if (caller?.credentialHash && mission.credentialHash === caller.credentialHash) return true;
   return false;
 }
 
@@ -11554,28 +11591,16 @@ function maybeAutoTopupRequester(userHash, amountUnitsNeeded) {
 }
 
 function isLocalAdminRequester(requesterId) {
-  if (!requesterId) return false;
-  return LOCAL_ADMIN_REQUESTER_IDS.has(String(requesterId).trim().toLowerCase());
+  // A client-supplied email/requester string is not proof of admin identity.
+  return false;
 }
 
 function getRequestIp(req) {
-  const forwarded = String(req.headers['x-forwarded-for'] || '')
-    .split(',')
-    .map((value) => value.trim())
-    .filter(Boolean)[0];
-  const remote = forwarded || req.socket?.remoteAddress || '';
-  return String(remote || '').trim().toLowerCase();
+  return requestSecurity.clientIp(req);
 }
 
 function hasAdminAccess(req, authUser = null) {
-  if (authUser) {
-    const requesterId = String(authUser.requesterId || '').trim().toLowerCase();
-    const email = String(authUser.email || '').trim().toLowerCase();
-    if ((requesterId && LOCAL_ADMIN_REQUESTER_IDS.has(requesterId)) || (email && LOCAL_ADMIN_EMAILS.has(email))) {
-      return true;
-    }
-    return false;
-  }
+  if (authUser || productionProfile) return productionAdminAccount(authUser);
   if (!ALLOW_LOCAL_IP_ADMIN) return false;
   const requestIp = getRequestIp(req);
   return Boolean(requestIp && LOCAL_ADMIN_IPS.has(requestIp));
@@ -12889,6 +12914,10 @@ async function processEthereumConfirmationIndexerJob(job) {
   const provider = getEvmProvider(chainConfig.chainId);
   if (provider && job.txHash && !ETHEREUM_CONFIRMATION_INDEXER_AUTO_CONFIRM) {
     try {
+      // staticNetwork avoids automatic detection; explicitly check the RPC
+      // before trusting a receipt for this configured settlement chain.
+      const rpcChainId = Number(BigInt(await provider.send('eth_chainId', [])));
+      if (rpcChainId !== chainConfig.chainId || Number(job.chainId) !== chainConfig.chainId) throw new Error('payment_rpc_chain_mismatch');
       const receipt = await provider.getTransactionReceipt(job.txHash);
       if (!receipt) {
         patch = {
@@ -12907,9 +12936,10 @@ async function processEthereumConfirmationIndexerJob(job) {
           txHash: job.txHash
         };
       } else {
+        if (String(receipt.hash || '').toLowerCase() !== String(job.txHash).toLowerCase()) throw new Error('payment_receipt_hash_mismatch');
         const currentBlock = await provider.getBlockNumber();
         const confirmationsObserved = receipt.blockNumber
-          ? Math.max(1, currentBlock - Number(receipt.blockNumber) + 1)
+          ? Math.max(0, currentBlock - Number(receipt.blockNumber) + 1)
           : 0;
         const authorization = getPaymentAuthorization(job.authorizationId || '');
         const transferMatch = findMatchingUsdcTransferLog(receipt, authorization);
@@ -12936,6 +12966,7 @@ async function processEthereumConfirmationIndexerJob(job) {
             receiptBlockNumber: transferMatch.blockNumber,
             receiptLogIndex: transferMatch.logIndex,
             receiptTokenAddress: transferMatch.tokenAddress,
+            receiptTransactionHash: receipt.hash,
             observedTransferFrom: transferMatch.from,
             observedTransferTo: transferMatch.to,
             observedTransferValue: transferMatch.value
@@ -12990,7 +13021,9 @@ async function processEthereumConfirmationIndexerJob(job) {
         matched: true,
         from: updatedJob.observedTransferFrom ?? null,
         to: updatedJob.observedTransferTo ?? null,
-        value: updatedJob.observedTransferValue ?? null
+        value: updatedJob.observedTransferValue ?? null,
+        tokenAddress: updatedJob.receiptTokenAddress ?? null,
+        transactionHash: updatedJob.receiptTransactionHash
       });
       if (finalization.finalized && !finalization.alreadyFinalized) {
         authorization = updatePaymentAuthorization(authorization.id, {
@@ -16515,11 +16548,12 @@ function finalizeActionForIntent({ intent, actionRun, execution, candidateAgent,
 }
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || '/', buildRequestBaseUrl(req));
-  const urlPath = url.pathname;
-  const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
-
   try {
+    requestSecurity.setHeaders(req, res);
+    const url = new URL(req.url || '/', buildRequestBaseUrl(req));
+    requestSecurity.validateBrowserMutation(req);
+    const urlPath = url.pathname;
+    const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
     if (req.method === 'GET' && urlPath === '/health') {
       const persistence = getPublicPersistenceStatus();
       const persistenceReady = persistence.ready
@@ -16611,7 +16645,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/mission-auth/capabilities') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'mission_auth_issue_capability',
         max: 40,
         windowMs: 60 * 1000,
@@ -16683,7 +16717,7 @@ const server = http.createServer(async (req, res) => {
       if (!session) return notFound(res);
       const auth = getAuthenticatedContext(req);
       requireOwnedResource(req, auth?.authUser || null, canAuthUserAccessConnectorSession(auth?.authUser || null, session), 'connector_session');
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'mission_auth_create_receipt',
         max: auth?.authUser ? 30 : 10,
         windowMs: 60 * 1000,
@@ -17079,10 +17113,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/agent-sdk/v1/missions') {
-      const auth = getAuthenticatedContext(req);
+      const { auth } = requireAgentSdkWriteAuth(req);
       const agentId = String(url.searchParams.get('agentId') || req.headers['x-magic-city-agent-id'] || '').trim();
+      const caller = resolveAgentSdkCaller(req, { agentId }, auth);
       const requesterHash = auth?.authUser ? getAuthUserRequesterHash(auth.authUser) : '';
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_list_missions',
         max: auth?.authUser ? 60 : 20,
         windowMs: 60 * 1000,
@@ -17094,7 +17129,6 @@ const server = http.createServer(async (req, res) => {
         requesterHash: agentId ? '' : requesterHash,
         limit: url.searchParams.get('limit') || 50
       }).filter((mission) => {
-        const caller = { agentId: agentId || mission.agentId };
         return canAccessAgentSdkMission(req, auth?.authUser || null, caller, mission);
       });
       return sendJson(res, 200, {
@@ -17105,7 +17139,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/agent-sdk/v1/missions') {
       const { auth } = requireAgentSdkWriteAuth(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_propose_mission',
         max: auth?.authUser ? 40 : 16,
         windowMs: 60 * 1000,
@@ -17116,6 +17150,7 @@ const server = http.createServer(async (req, res) => {
       const goal = String(body.goal || body.mission?.goal || body.prompt || '').trim();
       if (!goal) return sendJson(res, 400, { error: 'missing_goal' });
       const mission = createAgentSdkMission({
+        credentialHash: caller.credentialHash,
         agentId: caller.agentId,
         runtimeId: caller.runtimeId,
         authUserId: caller.authUserId,
@@ -17159,7 +17194,7 @@ const server = http.createServer(async (req, res) => {
       if (!mission) return notFound(res);
       const caller = resolveAgentSdkCaller(req, body, auth);
       assertAgentSdkMissionAccess(req, auth?.authUser || null, caller, mission);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_submit_options',
         max: 60,
         windowMs: 60 * 1000,
@@ -17199,7 +17234,7 @@ const server = http.createServer(async (req, res) => {
       if (!mission) return notFound(res);
       const caller = resolveAgentSdkCaller(req, body, auth);
       assertAgentSdkMissionAccess(req, auth?.authUser || null, caller, mission);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_submit_artifact',
         max: 40,
         windowMs: 60 * 1000,
@@ -17249,7 +17284,7 @@ const server = http.createServer(async (req, res) => {
       if (!mission) return notFound(res);
       const caller = resolveAgentSdkCaller(req, body, auth);
       assertAgentSdkMissionAccess(req, auth?.authUser || null, caller, mission);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_sdk_browser_worker_request',
         max: 20,
         windowMs: 60 * 1000,
@@ -17398,12 +17433,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && urlPath === '/connectors/sessions') {
       const pluginId = String(url.searchParams.get('pluginId') || '').trim();
       if (pluginId) {
-        assertPluginApiKey(req);
+        assertScopedPlugin(req, { pluginId });
         if (pluginId !== HOSTED_BROWSER_WORKER_PLUGIN_ID) {
           return sendJson(res, 403, { error: 'plugin_queue_not_allowed' });
         }
         await sweepConnectorSessionExecutionWatchdog();
         const sessions = listConnectorSessions(100)
+          .filter((session) => session.preferredExecutionAgentId && (!session.claimedByPluginId || session.claimedByPluginId === pluginId))
           .filter((session) => canExecutionPluginActForPreferredAgent({ session, pluginId }))
           .filter((session) => String(session.handoffData?.kind || '').trim() === 'browser')
           .filter((session) => ['confirmed', 'queued', 'claimed', 'executing'].includes(String(session.status || '').trim()))
@@ -17489,7 +17525,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/connectors/sessions/start') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'connector_session_start',
         max: auth?.authUser ? 40 : 16,
         windowMs: 60 * 1000,
@@ -18490,7 +18526,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/helper/pairing/start') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_helper_pairing_start',
         max: 12,
         windowMs: 60 * 1000,
@@ -18561,7 +18597,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/extension/pairing/start') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_extension_pairing_start',
         max: 12,
         windowMs: 60 * 1000,
@@ -18624,7 +18660,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/native-runner/extension/pairing/claim') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_extension_pairing_claim',
         max: 30,
         windowMs: 60 * 1000,
@@ -18754,7 +18790,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/setup') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_setup',
         max: 12,
         windowMs: 60 * 1000,
@@ -18819,7 +18855,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/rotate') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_rotate',
         max: 10,
         windowMs: 60 * 1000,
@@ -18873,7 +18909,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/native-runner/revoke') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'native_runner_revoke',
         max: 20,
         windowMs: 60 * 1000,
@@ -21894,7 +21930,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/agents/register') {
-      assertPublicApiKey(req);
+      // Registry ownership/key changes are operator provisioning, not a public
+      // API-key capability. User-facing agents are registered internally.
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId', 'owner', 'publicKey']);
 
@@ -21924,7 +21962,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/quickstart/register-demo-agent') {
-      assertPublicApiKey(req);
+      if (productionProfile) return sendJson(res, 403, { error: 'demo_registration_disabled_in_production' });
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       const capability = String(body.capability || 'general-chat');
       const requesterId = body.requesterId ? String(body.requesterId) : null;
@@ -22045,7 +22084,7 @@ const server = http.createServer(async (req, res) => {
 
     if ((req.method === 'POST' || req.method === 'DELETE') && /^\/agent-hub\/agents\/[^/]+\/saved$/.test(urlPath)) {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'agent_saved_signal',
         max: auth?.authUser ? 80 : 30,
         windowMs: 60 * 1000,
@@ -22211,10 +22250,13 @@ const server = http.createServer(async (req, res) => {
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
+      const auth = getAuthenticatedContext(req);
+      if (!auth?.authUser) throw createHttpError('auth_required', 401);
+      const receipts = listAgentReceipts(agentId).filter((receipt) => canAuthUserAccessReceipt(req, auth.authUser, receipt));
       return sendJson(res, 200, {
         agentId,
-        count: listAgentReceipts(agentId).length,
-        receipts: listAgentReceipts(agentId)
+        count: receipts.length,
+        receipts
       });
     }
 
@@ -22230,6 +22272,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && matchDynamicPath(urlPath, 'attestations')) {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
@@ -22250,6 +22293,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && matchDynamicPath(urlPath, 'stake')) {
+      if (productionProfile) return sendJson(res, 403, { error: 'demo_stake_disabled_in_production' });
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
@@ -22265,6 +22310,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && matchDynamicPath(urlPath, 'slash')) {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const agentId = parseAgentIdFromPath(urlPath);
       const agent = getAgent(agentId);
       if (!agent) return notFound(res);
@@ -22286,7 +22332,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/receipts') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId', 'taskId', 'outcome']);
 
@@ -22296,6 +22342,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const normalized = normalizeReceiptPayload(body);
+      assertReceiptIntentBinding(normalized.intentId, body.agentId);
       if ((normalized.proofType && !normalized.proofHash) || (!normalized.proofType && normalized.proofHash)) {
         return sendJson(res, 400, { error: 'proof_type_and_proof_hash_must_be_paired' });
       }
@@ -22344,25 +22391,14 @@ const server = http.createServer(async (req, res) => {
         metadata: sanitizeMetadata(body.metadata ?? {})
       });
 
-      if (row.intentId) {
-        const intent = getIntent(row.intentId);
-        const lock = getEscrowLock(row.intentId);
-        if (intent?.requesterHash && lock?.status === 'locked') {
-          if (row.outcome === 'success') {
-            settleLockedCredits(row.intentId, row.agentId, PROTOCOL_FEE_BPS);
-            updateIntent(row.intentId, { status: 'settled', settledAt: new Date().toISOString(), linkedReceiptId: row.id });
-          } else {
-            releaseLockedCredits(row.intentId, 'receipt_failed');
-            updateIntent(row.intentId, { status: 'released', releasedAt: new Date().toISOString(), linkedReceiptId: row.id });
-          }
-        }
-      }
+      // Import evidence only. Completion/credit capture must come from the
+      // validated execution path; a reported outcome cannot settle a lock.
 
       return sendJson(res, 201, { receipt: row, agent: buildAgentView(agent) });
     }
 
     if (req.method === 'POST' && urlPath === '/integrations/acp/intent-sync') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['externalRequestId', 'providerAgentId', 'paymentMode']);
 
@@ -22395,7 +22431,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/integrations/acp/fulfill-sync') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['externalRequestId', 'serviceId', 'status']);
 
@@ -22405,6 +22441,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const intent = findIntentByExternalRequestId(body.externalRequestId);
+      assertReceiptIntentBinding(intent?.id, body.serviceId);
       const normalized = normalizeReceiptPayload({
         ...body,
         intentId: intent?.id ?? null,
@@ -22455,16 +22492,7 @@ const server = http.createServer(async (req, res) => {
           status: body.status === 'completed' ? 'fulfilled' : 'failed',
           linkedReceiptId: row.id
         });
-        const lock = getEscrowLock(intent.id);
-        if (intent.requesterHash && lock?.status === 'locked') {
-          if (body.status === 'completed') {
-            settleLockedCredits(intent.id, body.serviceId, PROTOCOL_FEE_BPS);
-            updateIntent(intent.id, { status: 'settled', settledAt: new Date().toISOString() });
-          } else {
-            releaseLockedCredits(intent.id, 'acp_fulfill_failed');
-            updateIntent(intent.id, { status: 'released', releasedAt: new Date().toISOString() });
-          }
-        }
+        // Imported reports do not authorize credit settlement or release.
       }
 
       if (body.attestation && (body.executionAgentId || body.pluginId)) {
@@ -22502,6 +22530,7 @@ const server = http.createServer(async (req, res) => {
       }
       const budgetUnits = toUnits(budget);
       const requesterIdentity = resolveRequesterIdentity(req, body.requesterId ?? null);
+      if (productionProfile && budgetUnits > 0 && !requesterIdentity.auth) throw createHttpError('auth_required', 401);
       const requesterHash = requesterIdentity.requesterId
         ? hashIdentifier(requesterIdentity.requesterId)
         : hashIdentifier(`ephemeral:${body.ephemeralSessionId ?? crypto.randomUUID()}`);
@@ -23003,6 +23032,7 @@ const server = http.createServer(async (req, res) => {
       const budgetUnits = toUnits(budget);
 
       const requesterIdentity = resolveRequesterIdentity(req, body.requesterId ?? null);
+      if (productionProfile && budgetUnits > 0 && !requesterIdentity.auth) throw createHttpError('auth_required', 401);
       const requesterHash = requesterIdentity.requesterId
         ? hashIdentifier(requesterIdentity.requesterId)
         : hashIdentifier(`ephemeral:${body.ephemeralSessionId ?? crypto.randomUUID()}`);
@@ -23560,7 +23590,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/proofs/verify') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'proof_verify',
         max: auth?.authUser ? 30 : 8,
         windowMs: 60 * 1000,
@@ -23873,7 +23903,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/zeko/settlement-registry/challenge') {
       const auth = getAuthenticatedContext(req);
       if (!auth) assertPublicApiKey(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'settlement_registry_challenge',
         max: auth?.authUser ? 30 : 12,
         windowMs: 60 * 1000,
@@ -23958,7 +23988,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/zeko/settlement-registry/register') {
       const auth = getAuthenticatedContext(req);
       if (!auth) assertPublicApiKey(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'settlement_registry_register',
         max: auth?.authUser ? 60 : 24,
         windowMs: 60 * 1000,
@@ -24456,7 +24486,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/challenge') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_challenge',
         max: 8,
         windowMs: 60 * 1000,
@@ -24508,7 +24538,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/verify') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_verify',
         max: 12,
         windowMs: 60 * 1000,
@@ -24561,7 +24591,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/disconnect') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_disconnect',
         max: 20,
         windowMs: 60 * 1000,
@@ -24588,7 +24618,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/payment-request') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_payment_request',
         max: 20,
         windowMs: 10 * 60 * 1000,
@@ -24694,7 +24724,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/connectors/evm-wallet/payment-submitted') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'evm_wallet_payment_submitted',
         max: 30,
         windowMs: 10 * 60 * 1000,
@@ -24703,57 +24733,15 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req, MCP_OAUTH_JSON_MAX_BODY_BYTES);
       const txHash = String(body.txHash || '').trim();
       if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) return sendJson(res, 400, { error: 'invalid_transaction_hash' });
-      const mode = String(body.mode || 'direct_payment').trim() === 'credit_topup' ? 'credit_topup' : 'direct_payment';
-      const existingAuthorization =
-        findPaymentAuthorizationByRequestId(String(body.requestId || '').trim()) ||
-        findPaymentAuthorizationByTxHash(txHash);
-      if (existingAuthorization && existingAuthorization.userId && existingAuthorization.userId !== auth.authUser.id && !hasAdminAccess(req, auth.authUser)) {
-        return notFound(res);
-      }
-      let authorization = existingAuthorization;
-      if (!authorization) {
-        const wallet = buildEvmWalletStatus(auth.authUser).wallets?.[0] || null;
-        authorization = createPaymentAuthorization({
-          userId: auth.authUser.id,
-          requestId: body.requestId ? String(body.requestId).trim() : null,
-          mode,
-          statementKind: buildPaymentAuthorizationStatementKind({
-            mode,
-            stage: PAYMENT_AUTHORIZATION_STAGES.SUBMITTED
-          }),
-          statementHash: null,
-          authorizationState: PAYMENT_AUTHORIZATION_STAGES.SUBMITTED,
-          verificationState: mode === PAYMENT_AUTHORIZATION_MODES.CREDIT_TOPUP ? 'pending_onchain_verification' : 'wallet_submitted',
-          chainId: body.chainId ? Number(body.chainId) : (wallet?.chainId || EVM_WALLET_DEFAULT_CHAIN_ID),
-          network: getSupportedEvmChainConfig(body.chainId ? Number(body.chainId) : (wallet?.chainId || EVM_WALLET_DEFAULT_CHAIN_ID)).networkLabel,
-          senderAddress: wallet?.address || null,
-          recipientAddress: body.recipientAddress ? normalizeEvmAddress(body.recipientAddress) : null,
-          recipientType: mode === PAYMENT_AUTHORIZATION_MODES.CREDIT_TOPUP ? 'magic_city_treasury' : 'external_recipient',
-          assetSymbol: 'USDC',
-          tokenAddress: getSupportedEvmChainConfig(body.chainId ? Number(body.chainId) : (wallet?.chainId || EVM_WALLET_DEFAULT_CHAIN_ID)).tokenAddress,
-          amountUsdCents: body.amountUsdCents ? Number(body.amountUsdCents) : null,
-          amountBaseUnits: body.amountUsdCents ? String(BigInt(Math.max(1, Math.trunc(Number(body.amountUsdCents) || 0))) * 10000n) : null,
-          credits: body.credits ? Number(body.credits) : null,
-          note: body.note ? String(body.note) : null,
-          walletAddress: wallet?.address || null,
-          settlementRail: buildEvmPaymentSettlementRail(mode, body.chainId ? Number(body.chainId) : (wallet?.chainId || EVM_WALLET_DEFAULT_CHAIN_ID)),
-          fundingMode: mode === PAYMENT_AUTHORIZATION_MODES.CREDIT_TOPUP ? 'evm_wallet_usdc' : 'direct_wallet_payment',
-          metadata: sanitizeMetadata({
-            source: 'wallet_submission_without_request',
-            walletLinked: Boolean(wallet?.address)
-          })
-        });
+      let authorization = findPaymentAuthorizationByRequestId(String(body.requestId || '').trim());
+      const submission = assertPreparedPaymentSubmission(authorization, body, auth.authUser.id, findPaymentAuthorizationByTxHash(txHash));
+      const mode = authorization.mode;
+      if (submission.replay) {
+        const confirmationJob = authorization.confirmationJobId ? getEthereumConfirmationIndexJob(authorization.confirmationJobId) : null;
+        return sendJson(res, 200, { recorded: true, replayed: true, txHash: submission.txHash, verificationState: authorization.verificationState, authorization: formatPaymentAuthorizationForApi(authorization), confirmationJob });
       }
       authorization = updatePaymentAuthorization(authorization.id, {
-        walletTxHash: txHash,
-        chainId: body.chainId ? Number(body.chainId) : authorization.chainId,
-        recipientAddress: body.recipientAddress ? normalizeEvmAddress(body.recipientAddress) : authorization.recipientAddress,
-        amountUsdCents: body.amountUsdCents ? Number(body.amountUsdCents) : authorization.amountUsdCents,
-        amountBaseUnits: body.amountUsdCents
-          ? String(BigInt(Math.max(1, Math.trunc(Number(body.amountUsdCents) || 0))) * 10000n)
-          : authorization.amountBaseUnits,
-        credits: body.credits ? Number(body.credits) : authorization.credits,
-        settlementRail: buildEvmPaymentSettlementRail(mode, body.chainId ? Number(body.chainId) : authorization.chainId),
+        walletTxHash: submission.txHash,
         authorizationState: PAYMENT_AUTHORIZATION_STAGES.SUBMITTED,
         verificationState: mode === PAYMENT_AUTHORIZATION_MODES.CREDIT_TOPUP ? 'pending_onchain_verification' : 'wallet_submitted',
         statementKind: buildPaymentAuthorizationStatementKind({
@@ -24943,11 +24931,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && urlPath === '/auth/google/start') {
       if (!isGoogleAuthAllowedForRequest(req)) return sendJson(res, 404, { error: 'google_signin_only_on_production' });
-      enforceRateLimit(req, { bucket: 'auth_google_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_google_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       if (!isGoogleConfigured()) return sendJson(res, 503, { error: 'google_not_configured' });
       const scopes = getScopesForPreset('sign_in');
       const stateToken = signGoogleOauthState({
         mode: 'signin',
+        browserBinding: beginOauthBrowserBinding(req, res, 'google'),
         preset: 'sign_in',
         scopes,
         createdAt: Date.now(),
@@ -24965,11 +24954,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/auth/github/start') {
-      enforceRateLimit(req, { bucket: 'auth_github_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_github_start_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       if (!isGitHubConfigured()) return sendJson(res, 503, { error: 'github_not_configured' });
       const scopes = ['read:user', 'user:email'];
       const stateToken = signGitHubOauthState({
         mode: 'signin',
+        browserBinding: beginOauthBrowserBinding(req, res, 'github'),
         scopes,
         createdAt: Date.now(),
         nonce: crypto.randomBytes(12).toString('hex')
@@ -25004,7 +24994,7 @@ const server = http.createServer(async (req, res) => {
         return sendHtml(
           res,
           200,
-          `<!doctype html><script>(function(){const payload={type:${JSON.stringify(resultType)},ok:false,error:${JSON.stringify(oauthError)}};if(window.opener){window.opener.postMessage(payload, window.location.origin);window.close();return;}window.location.replace(${JSON.stringify(errorRedirectUrl)});})();</script>`
+          `<!doctype html><script>(function(){const payload={type:${scriptJson(resultType)},ok:false,error:${scriptJson(oauthError)}};if(window.opener){window.opener.postMessage(payload, window.location.origin);window.close();return;}window.location.replace(${scriptJson(errorRedirectUrl)});})();</script>`
         );
       }
       if (!code || !stateToken) {
@@ -25012,14 +25002,15 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const statePayload = verifyGoogleOauthState(stateToken);
+        consumeOauthBrowserBinding(req, res, 'google', statePayload);
         const tokenData = await exchangeGoogleCode({ code });
         const accessToken = tokenData.access_token;
         if (!accessToken) throw new Error('google_access_token_missing');
         const profile = await fetchGoogleUserProfile(accessToken);
         if (statePayload.mode === 'signin') {
-          const email = String(profile.email || '').trim().toLowerCase();
-          if (!email.includes('@')) throw new Error('google_email_missing');
-          let authUser = getAuthUserByEmail(email);
+          const signin = resolveProviderSignin(req, 'google', profile);
+          const email = signin.identity.email;
+          let authUser = signin.user;
           if (!authUser) {
             const salt = crypto.randomBytes(16).toString('hex');
             authUser = createAuthUser({
@@ -25067,7 +25058,7 @@ const server = http.createServer(async (req, res) => {
           return sendHtml(
             res,
             200,
-            `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Signed in with Google</h1><p style="margin:0;color:#9fb0c4">Magic City account access is ready.</p></div><script>(function(){const payload={type:'magic_city_google_auth',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${JSON.stringify(`${appHomeUrl}/?google_auth=success`)});})();</script></body></html>`
+            `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Signed in with Google</h1><p style="margin:0;color:#9fb0c4">Magic City account access is ready.</p></div><script>(function(){const payload={type:'magic_city_google_auth',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${scriptJson(`${appHomeUrl}/?google_auth=success`)});})();</script></body></html>`
           );
         }
         const auth = getAuthenticatedContext(req);
@@ -25114,13 +25105,13 @@ const server = http.createServer(async (req, res) => {
         return sendHtml(
           res,
           200,
-          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Google connected</h1><p style="margin:0;color:#9fb0c4">Calendar, contacts, and Gmail draft access is ready for agent-triggered follow-through.</p></div><script>(function(){const payload={type:'magic_city_google_connector',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${JSON.stringify(`${appHomeUrl}/?google_connector=success`)});})();</script></body></html>`
+          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Google connected</h1><p style="margin:0;color:#9fb0c4">Calendar, contacts, and Gmail draft access is ready for agent-triggered follow-through.</p></div><script>(function(){const payload={type:'magic_city_google_connector',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${scriptJson(`${appHomeUrl}/?google_connector=success`)});})();</script></body></html>`
         );
       } catch (error) {
         return sendHtml(
           res,
           400,
-          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Google connection failed</h1><p style="margin:0;color:#ffb9b9">${escapeHtml(error.message || 'google_connector_failed')}</p></div><script>(function(){const payload={type:'magic_city_google_connector',ok:false,error:${JSON.stringify(String(error.message || 'google_connector_failed'))}};if(window.opener){window.opener.postMessage(payload, window.location.origin);return;}window.location.replace(${JSON.stringify(`${appHomeUrl}/?google_connector_error=${encodeURIComponent(String(error.message || 'google_connector_failed'))}`)});})();</script></body></html>`
+          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Google connection failed</h1><p style="margin:0;color:#ffb9b9">${escapeHtml(error.message || 'google_connector_failed')}</p></div><script>(function(){const payload={type:'magic_city_google_connector',ok:false,error:${scriptJson(String(error.message || 'google_connector_failed'))}};if(window.opener){window.opener.postMessage(payload, window.location.origin);return;}window.location.replace(${scriptJson(`${appHomeUrl}/?google_connector_error=${encodeURIComponent(String(error.message || 'google_connector_failed'))}`)});})();</script></body></html>`
         );
       }
     }
@@ -25143,7 +25134,7 @@ const server = http.createServer(async (req, res) => {
         return sendHtml(
           res,
           200,
-          `<!doctype html><script>(function(){const payload={type:${JSON.stringify(resultType)},ok:false,error:${JSON.stringify(oauthError)}};if(window.opener){window.opener.postMessage(payload, window.location.origin);window.close();return;}window.location.replace(${JSON.stringify(errorRedirectUrl)});})();</script>`
+          `<!doctype html><script>(function(){const payload={type:${scriptJson(resultType)},ok:false,error:${scriptJson(oauthError)}};if(window.opener){window.opener.postMessage(payload, window.location.origin);window.close();return;}window.location.replace(${scriptJson(errorRedirectUrl)});})();</script>`
         );
       }
       if (!code || !stateToken) {
@@ -25151,6 +25142,7 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const statePayload = verifyGitHubOauthState(stateToken);
+        consumeOauthBrowserBinding(req, res, 'github', statePayload);
         const tokenData = await exchangeGitHubCode({ code });
         const accessToken = String(tokenData.access_token || '').trim();
         if (!accessToken) throw new Error('github_access_token_missing');
@@ -25164,8 +25156,8 @@ const server = http.createServer(async (req, res) => {
             ''
           ).trim().toLowerCase();
         if (statePayload.mode === 'signin') {
-          if (!primaryEmail.includes('@')) throw new Error('github_email_missing');
-          let authUser = getAuthUserByEmail(primaryEmail);
+          const signin = resolveProviderSignin(req, 'github', profile, emails);
+          let authUser = signin.user;
           if (!authUser) {
             const salt = crypto.randomBytes(16).toString('hex');
             authUser = createAuthUser({
@@ -25215,7 +25207,7 @@ const server = http.createServer(async (req, res) => {
           return sendHtml(
             res,
             200,
-            `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Signed in with GitHub</h1><p style="margin:0;color:#9fb0c4">Magic City account access is ready.</p></div><script>(function(){const payload={type:'magic_city_github_auth',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${JSON.stringify(`${appHomeUrl}/?github_auth=success`)});})();</script></body></html>`
+            `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">Signed in with GitHub</h1><p style="margin:0;color:#9fb0c4">Magic City account access is ready.</p></div><script>(function(){const payload={type:'magic_city_github_auth',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${scriptJson(`${appHomeUrl}/?github_auth=success`)});})();</script></body></html>`
           );
         }
         const auth = getAuthenticatedContext(req);
@@ -25249,13 +25241,13 @@ const server = http.createServer(async (req, res) => {
         return sendHtml(
           res,
           200,
-          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">GitHub connected</h1><p style="margin:0;color:#9fb0c4">Repo execution access is ready for review briefs, patch artifacts, and PR draft packages.</p></div><script>(function(){const payload={type:'magic_city_github_connector',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${JSON.stringify(`${appHomeUrl}/?github_connector=success`)});})();</script></body></html>`
+          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">GitHub connected</h1><p style="margin:0;color:#9fb0c4">Repo execution access is ready for review briefs, patch artifacts, and PR draft packages.</p></div><script>(function(){const payload={type:'magic_city_github_connector',ok:true};if(window.opener){window.opener.postMessage(payload, window.location.origin);setTimeout(()=>window.close(),300);return;}window.location.replace(${scriptJson(`${appHomeUrl}/?github_connector=success`)});})();</script></body></html>`
         );
       } catch (error) {
         return sendHtml(
           res,
           400,
-          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">GitHub connection failed</h1><p style="margin:0;color:#ffb9b9">${escapeHtml(error.message || 'github_connector_failed')}</p></div><script>(function(){const payload={type:'magic_city_github_connector',ok:false,error:${JSON.stringify(String(error.message || 'github_connector_failed'))}};if(window.opener){window.opener.postMessage(payload, window.location.origin);return;}window.location.replace(${JSON.stringify(`${appHomeUrl}/?github_connector_error=${encodeURIComponent(String(error.message || 'github_connector_failed'))}`)});})();</script></body></html>`
+          `<!doctype html><html><body style="font-family:system-ui;background:#0b0f17;color:#eef6ff;display:grid;place-items:center;min-height:100vh"><div><h1 style="font-size:18px;margin:0 0 8px">GitHub connection failed</h1><p style="margin:0;color:#ffb9b9">${escapeHtml(error.message || 'github_connector_failed')}</p></div><script>(function(){const payload={type:'magic_city_github_connector',ok:false,error:${scriptJson(String(error.message || 'github_connector_failed'))}};if(window.opener){window.opener.postMessage(payload, window.location.origin);return;}window.location.replace(${scriptJson(`${appHomeUrl}/?github_connector_error=${encodeURIComponent(String(error.message || 'github_connector_failed'))}`)});})();</script></body></html>`
         );
       }
     }
@@ -25459,7 +25451,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/register') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_register',
         max: 20,
         windowMs: 10 * 60 * 1000
@@ -25511,7 +25503,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && urlPath === '/oauth/mcp/authorize') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_authorize_get',
         max: 90,
         windowMs: 10 * 60 * 1000,
@@ -25558,7 +25550,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/authorize') {
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_authorize_post',
         max: 45,
         windowMs: 10 * 60 * 1000,
@@ -25634,7 +25626,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/token') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_token',
         max: 120,
         windowMs: 10 * 60 * 1000
@@ -25662,7 +25654,7 @@ const server = http.createServer(async (req, res) => {
         if (!row || row.revokedAt || row.consumedAt || row.clientId !== client.clientId || row.redirectUri !== redirectUri) {
           return sendJson(res, 400, { error: 'invalid_grant' });
         }
-        if (new Date(row.expiresAt).getTime() <= Date.now()) {
+        if (!futureExpiry(row.expiresAt)) {
           revokeOAuthAuthorizationCode(codeHash);
           return sendJson(res, 400, { error: 'invalid_grant' });
         }
@@ -25679,7 +25671,7 @@ const server = http.createServer(async (req, res) => {
           userId: row.userId,
           scope: row.scope,
           expiresAt: new Date(Date.now() + MCP_OAUTH_REFRESH_TTL_SEC * 1000).toISOString(),
-          metadata: { issuedFromCodeId: row.id }
+          metadata: { issuedFromCodeId: row.id, familyId: refreshTokenHash }
         });
         createOAuthAccessToken({
           tokenHash: hashOpaqueValue(accessToken),
@@ -25702,18 +25694,29 @@ const server = http.createServer(async (req, res) => {
       if (grantType === 'refresh_token') {
         const refreshToken = String(body.refresh_token || '').trim();
         const refreshRow = getOAuthRefreshToken(hashOpaqueValue(refreshToken));
+        if (refreshRow?.clientId === client.clientId && refreshRow.revokedAt && refreshRow.metadata?.rotatedTo) {
+          revokeOAuthTokenFamily(refreshRow.tokenHash, 'refresh_reuse_detected');
+        }
         if (!refreshRow || refreshRow.revokedAt || refreshRow.clientId !== client.clientId) {
           return sendJson(res, 400, { error: 'invalid_grant' });
         }
-        if (new Date(refreshRow.expiresAt).getTime() <= Date.now()) {
+        if (!futureExpiry(refreshRow.expiresAt)) {
           revokeOAuthRefreshToken(refreshRow.tokenHash);
           return sendJson(res, 400, { error: 'invalid_grant' });
         }
-        touchOAuthRefreshToken(refreshRow.tokenHash);
+        const nextRefreshToken = createOAuthOpaqueValue();
+        const nextRefreshHash = hashOpaqueValue(nextRefreshToken);
+        // Consume synchronously before response persistence or another request.
+        revokeOAuthRefreshToken(refreshRow.tokenHash, { rotatedTo: nextRefreshHash });
+        createOAuthRefreshToken({
+          tokenHash: nextRefreshHash, clientId: client.clientId, userId: refreshRow.userId,
+          scope: refreshRow.scope, expiresAt: refreshRow.expiresAt,
+          metadata: { familyId: refreshRow.metadata?.familyId || refreshRow.tokenHash }
+        });
         const accessToken = createOAuthOpaqueValue();
         createOAuthAccessToken({
           tokenHash: hashOpaqueValue(accessToken),
-          refreshTokenHash: refreshRow.tokenHash,
+          refreshTokenHash: nextRefreshHash,
           clientId: client.clientId,
           userId: refreshRow.userId,
           scope: refreshRow.scope,
@@ -25724,6 +25727,7 @@ const server = http.createServer(async (req, res) => {
           access_token: accessToken,
           token_type: 'Bearer',
           expires_in: MCP_OAUTH_ACCESS_TTL_SEC,
+          refresh_token: nextRefreshToken,
           scope: refreshRow.scope
         });
       }
@@ -25732,7 +25736,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/oauth/mcp/revoke') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'oauth_mcp_revoke',
         max: 120,
         windowMs: 10 * 60 * 1000
@@ -25741,8 +25745,7 @@ const server = http.createServer(async (req, res) => {
       const token = String(body.token || '').trim();
       if (token) {
         const tokenHash = hashOpaqueValue(token);
-        revokeOAuthAccessToken(tokenHash);
-        revokeOAuthRefreshToken(tokenHash);
+        revokeOAuthTokenFamily(tokenHash);
       }
       return sendJson(res, 200, { revoked: true });
     }
@@ -25773,7 +25776,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/mcp') {
       res.setHeader('access-control-allow-origin', '*');
       const auth = getAuthenticatedContext(req);
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'remote_mcp_post',
         max: auth?.authUser ? 240 : 60,
         windowMs: 60 * 1000,
@@ -25863,7 +25866,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/auth/evm-wallet/challenge') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'auth_evm_wallet_challenge_ip',
         max: 20,
         windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS
@@ -25911,7 +25914,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/auth/evm-wallet/verify') {
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'auth_evm_wallet_verify_ip',
         max: 30,
         windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS
@@ -25997,13 +26000,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/register') {
       const body = await readBody(req);
       requireFields(body, ['email', 'passphrase']);
-      enforceRateLimit(req, { bucket: 'auth_register_ip', max: 8, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_register_ip', max: 8, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS });
       const email = normalizeAuthEmail(body.email);
       const passphrase = String(body.passphrase || '');
       const displayName = String(body.displayName || '').trim();
       const referralCode = String(body.referralCode || '').trim();
       if (!email.includes('@')) return sendJson(res, 400, { error: 'invalid_email' });
-      enforceRateLimit(req, { bucket: 'auth_register_email', max: 3, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS, extra: email });
+      await enforceRateLimit(req, { bucket: 'auth_register_email', max: 3, windowMs: AUTH_REGISTER_RATE_LIMIT_WINDOW_MS, extra: email });
       if (passphrase.length < 8) return sendJson(res, 400, { error: 'passphrase_too_short', minLength: 8 });
       if (getAuthUserByEmail(email)) return sendJson(res, 409, { error: 'account_already_exists' });
       const salt = crypto.randomBytes(16).toString('hex');
@@ -26071,12 +26074,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/login') {
       const body = await readBody(req);
       requireFields(body, ['email', 'passphrase']);
-      enforceRateLimit(req, { bucket: 'auth_login_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_login_ip', max: 30, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       const email = normalizeAuthEmail(body.email);
       const passphrase = String(body.passphrase || '');
-      enforceRateLimit(req, { bucket: 'auth_login_email', max: 10, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS, extra: email || 'blank' });
+      await enforceRateLimit(req, { bucket: 'auth_login_email', max: 10, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS, extra: email || 'blank' });
       const authUser = getAuthUserByEmail(email);
-      if (!authUser) return sendJson(res, 401, { error: 'invalid_credentials' });
+      if (!authUser || authUser.passwordLoginEnabled === false) return sendJson(res, 401, { error: 'invalid_credentials' });
       if (!passwordMatches(passphrase, authUser.passwordSalt, authUser.passwordHash)) {
         return sendJson(res, 401, { error: 'invalid_credentials' });
       }
@@ -26092,9 +26095,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/password-reset/request') {
       const body = await readBody(req);
       const email = normalizeAuthEmail(body.email);
-      enforceRateLimit(req, { bucket: 'auth_password_reset_ip', max: 8, windowMs: AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_password_reset_ip', max: 8, windowMs: AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS });
       if (email) {
-        enforceRateLimit(req, {
+        await enforceRateLimit(req, {
           bucket: 'auth_password_reset_email',
           max: 3,
           windowMs: AUTH_PASSWORD_RESET_RATE_LIMIT_WINDOW_MS,
@@ -26135,13 +26138,13 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const token = String(body.token || '').trim();
       const passphrase = String(body.passphrase || body.newPassphrase || '');
-      enforceRateLimit(req, { bucket: 'auth_password_reset_confirm_ip', max: 15, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
+      await enforceRateLimit(req, { bucket: 'auth_password_reset_confirm_ip', max: 15, windowMs: AUTH_LOGIN_RATE_LIMIT_WINDOW_MS });
       if (!token) return sendJson(res, 400, { error: 'missing_reset_token' });
       if (passphrase.length < 8) return sendJson(res, 400, { error: 'passphrase_too_short', minLength: 8 });
       const tokenHash = hashOpaqueValue(token);
       const reset = getAuthPasswordReset(tokenHash);
       if (!reset || reset.consumedAt || reset.revokedAt) return sendJson(res, 400, { error: 'invalid_or_expired_reset_token' });
-      if (new Date(reset.expiresAt).getTime() <= Date.now()) {
+      if (!futureExpiry(reset.expiresAt)) {
         revokeAuthPasswordReset(tokenHash, 'expired');
         return sendJson(res, 400, { error: 'invalid_or_expired_reset_token' });
       }
@@ -26160,6 +26163,7 @@ const server = http.createServer(async (req, res) => {
           consumedIp: getRequestIp(req)
         }
       });
+      revokeUserCredentials(authUser.id, 'password_reset');
       const signedInUser = issueAuthSessionForUser(req, res, getAuthUser(authUser.id) || authUser);
       const account = getOrCreateUserAccountForApi(signedInUser.requesterId);
       return sendJson(res, 200, {
@@ -26172,7 +26176,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/auth/password/change') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'auth_password_change_user',
         max: 8,
         windowMs: AUTH_PASSWORD_CHANGE_RATE_LIMIT_WINDOW_MS,
@@ -26182,7 +26186,8 @@ const server = http.createServer(async (req, res) => {
       const currentPassphrase = String(body.currentPassphrase || '');
       const newPassphrase = String(body.newPassphrase || body.passphrase || '');
       if (newPassphrase.length < 8) return sendJson(res, 400, { error: 'passphrase_too_short', minLength: 8 });
-      if (!passwordMatches(currentPassphrase, auth.authUser.passwordSalt, auth.authUser.passwordHash)) {
+      const currentUser = getAuthUser(auth.authUser.id);
+      if (!currentUser || currentUser.passwordLoginEnabled === false || !getAuthenticatedContext(req) || !passwordMatches(currentPassphrase, currentUser.passwordSalt, currentUser.passwordHash)) {
         return sendJson(res, 401, { error: 'invalid_credentials' });
       }
       const salt = crypto.randomBytes(16).toString('hex');
@@ -26192,10 +26197,9 @@ const server = http.createServer(async (req, res) => {
         passwordLoginEnabled: true,
         lastAuthMethod: 'password'
       });
-      return sendJson(res, 200, {
-        updated: true,
-        user: serializeAuthUser(updated || getAuthUser(auth.authUser.id) || auth.authUser)
-      });
+      revokeUserCredentials(auth.authUser.id, 'password_changed');
+      issueAuthSessionForUser(req, res, updated);
+      return sendJson(res, 200, { updated: true, user: serializeAuthUser(updated) });
     }
 
     if (req.method === 'POST' && urlPath === '/auth/logout') {
@@ -26364,7 +26368,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlPath === '/billing/stripe/checkout-session') {
       const auth = getAuthenticatedContext(req);
       if (!auth?.authUser) return sendJson(res, 401, { error: 'auth_required' });
-      enforceRateLimit(req, {
+      await enforceRateLimit(req, {
         bucket: 'billing_stripe_checkout_session',
         max: 12,
         windowMs: 60 * 1000,
@@ -26376,7 +26380,7 @@ const server = http.createServer(async (req, res) => {
       }
       requireFields(body, ['amountCredits', 'successUrl', 'cancelUrl']);
       const amountCredits = Number(body.amountCredits);
-      if (!Number.isFinite(amountCredits) || amountCredits <= 0) {
+      if (!Number.isSafeInteger(amountCredits) || amountCredits <= 0 || !Number.isSafeInteger(toUnits(amountCredits)) || !Number.isSafeInteger(creditsToUsdCents(amountCredits))) {
         return sendJson(res, 400, { error: 'invalid_amountCredits' });
       }
       if (amountCredits < STRIPE_MIN_TOPUP_CREDITS) {
@@ -26394,6 +26398,15 @@ const server = http.createServer(async (req, res) => {
         amountCredits,
         successUrl: String(body.successUrl),
         cancelUrl: String(body.cancelUrl)
+      });
+      if (!session.id || typeof session.livemode !== 'boolean') throw createHttpError('invalid_stripe_checkout_response', 502);
+      saveStripeCheckoutTerms({
+        requestId: `stripe:${session.id}`, mode: 'stripe_credit_topup',
+        userId: auth.authUser.id, requesterId, credits: amountCredits,
+        amountUsdCents: creditsToUsdCents(amountCredits),
+        currency: String(process.env.STRIPE_CURRENCY || 'usd').toLowerCase(),
+        livemode: session.livemode, authorizationState: 'requested',
+        metadata: { source: 'stripe_checkout' }
       });
       return sendJson(res, 200, {
         sessionId: session.id,
@@ -26567,20 +26580,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/billing/stripe/session-status') {
+      const auth = getAuthenticatedContext(req);
+      if (!auth?.authUser) throw createHttpError('auth_required', 401);
       if (!process.env.STRIPE_SECRET_KEY) {
         return sendJson(res, 503, { error: 'stripe_not_configured' });
       }
       const sessionId = String(url.searchParams.get('sessionId') || '').trim();
       if (!sessionId) return sendJson(res, 400, { error: 'missing_session_id' });
+      const prepared = getStripeCheckoutTerms(`stripe:${sessionId}`);
+      if (!prepared || prepared.userId !== auth.authUser.id) throw createHttpError('stripe_checkout_not_found', 404);
 	      const session = await getCheckoutSession(sessionId);
-	      const requesterId = String(session?.metadata?.requesterId || '').trim();
-	      const amountCredits = Number(session?.metadata?.amountCredits || 0);
+	      const requesterId = prepared.requesterId;
+	      const amountCredits = prepared.credits;
 	      let credited = false;
 	      let creditPosted = false;
 	      let alreadyProcessed = false;
 	      let account = null;
 	      let userHash = '';
 	      if (session?.payment_status === 'paid' && requesterId && amountCredits > 0) {
+          assertStripeCheckoutTerms(session, prepared);
 	        const completionEventId = `stripe_session:${session.id}`;
 	        userHash = hashIdentifier(requesterId);
 	        alreadyProcessed = hasProcessedStripeEvent(completionEventId);
@@ -26657,23 +26675,33 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && urlPath === '/billing/stripe/webhook') {
       const rawBody = await readRawBody(req);
+      let connectWebhook = false;
       try {
         verifyStripeWebhookSignature(rawBody, req.headers['stripe-signature']);
       } catch (err) {
         if (!STRIPE_CONNECT_WEBHOOK_SECRET) throw err;
         verifyStripeWebhookSignature(rawBody, req.headers['stripe-signature'], STRIPE_CONNECT_WEBHOOK_SECRET);
+        connectWebhook = true;
       }
       const body = JSON.parse(rawBody);
       const eventType = body.type ?? '';
       const eventId = body.id ?? null;
+      // Connected-account events may reconcile transfers, never the platform's
+      // customer-credit ledger (including refund/debit events).
+      if ((connectWebhook || body.account) && !eventType.startsWith('transfer.')) {
+        return sendJson(res, 200, { accepted: true, ignored: true, reason: 'not_platform_event' });
+      }
       if (eventId && hasProcessedStripeEvent(eventId)) {
         return sendJson(res, 200, { accepted: true, deduped: true, eventId });
       }
 
-	      if (eventType === 'checkout.session.completed') {
+	      if (eventType === 'checkout.session.completed' || eventType === 'checkout.session.async_payment_succeeded') {
 	        const checkoutSession = body.data?.object ?? {};
-	        const requesterId = checkoutSession.metadata?.requesterId;
-	        const amountCredits = Number(checkoutSession.metadata?.amountCredits ?? 0);
+          if (connectWebhook || body.account) return sendJson(res, 200, { accepted: true, ignored: true, reason: 'not_platform_checkout' });
+          if (checkoutSession.payment_status !== 'paid') return sendJson(res, 200, { accepted: true, pending: true });
+          const prepared = assertStripeCheckoutTerms(checkoutSession, getStripeCheckoutTerms(`stripe:${checkoutSession.id}`), { account: body.account, eventLivemode: body.livemode });
+	        const requesterId = prepared.requesterId;
+	        const amountCredits = prepared.credits;
 	        if (!requesterId || !Number.isFinite(amountCredits) || amountCredits <= 0) {
 	          return sendJson(res, 400, { error: 'invalid_webhook_payload' });
 	        }
@@ -26794,6 +26822,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && urlPath === '/billing/account') {
+      if (!getAuthenticatedContext(req)?.authUser) throw createHttpError('auth_required', 401);
       const requesterIdentity = resolveRequesterIdentity(req, url.searchParams.get('requesterId'));
       const requesterId = requesterIdentity.requesterId;
       if (!requesterId) return sendJson(res, 400, { error: 'missing_requesterId' });
@@ -26861,6 +26890,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/billing/account/release-stale-locks') {
+      if (!getAuthenticatedContext(req)?.authUser) throw createHttpError('auth_required', 401);
       const body = await readBody(req);
       const requesterIdentity = resolveRequesterIdentity(req, body.requesterId ?? null);
       const requesterId = requesterIdentity.requesterId;
@@ -26890,8 +26920,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/payouts/request') {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId', 'amount', 'rail']);
+      const payoutRequestId = String(req.headers['idempotency-key'] || body.requestId || '').trim();
+      if (!/^[A-Za-z0-9._:-]{8,128}$/.test(payoutRequestId)) return sendJson(res, 400, { error: 'payout_idempotency_key_required' });
       const agent = getAgent(body.agentId);
       if (!agent) return sendJson(res, 404, { error: 'agent_not_found' });
       const amount = Number(body.amount);
@@ -26903,9 +26936,13 @@ const server = http.createServer(async (req, res) => {
         agentId: body.agentId,
         amount: toUnits(amount),
         rail,
-        destination
+        destination,
+        requestId: payoutRequestId
       });
       if (!result.ok) return sendJson(res, 400, result);
+      if (result.deduped) return sendJson(res, 200, { payout: { ...result.payout, amountCredits: fromUnits(result.payout.amount) }, replayed: true });
+      // Durably reserve before transfer; uncertain retries must not rebroadcast.
+      await flushPersistence();
 
       let stripeTransfer = null;
       if ((destination ?? '').startsWith('acct_')) {
@@ -26928,7 +26965,7 @@ const server = http.createServer(async (req, res) => {
         } catch (err) {
           return sendJson(res, 202, {
             payout: { ...result.payout, amountCredits: fromUnits(result.payout.amount) },
-            warning: 'stripe_transfer_not_submitted',
+            warning: 'stripe_transfer_status_unknown',
             reason: err instanceof Error ? err.message : 'unknown_error'
           });
         }
@@ -26969,6 +27006,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && urlPath === '/escrow/lock') {
       const intentId = url.searchParams.get('intentId');
       if (!intentId) return sendJson(res, 400, { error: 'missing_intentId' });
+      const auth = getAuthenticatedContext(req);
+      requireAuthenticatedOwnedResource(req, auth?.authUser, canAuthUserAccessIntent(auth?.authUser, getIntent(intentId)), 'intent');
       const lock = getEscrowLock(intentId);
       if (!lock) return notFound(res);
       return sendJson(res, 200, { lock });
@@ -26981,6 +27020,7 @@ const server = http.createServer(async (req, res) => {
       const agent = getAgent(body.agentId);
       if (!agent) return sendJson(res, 404, { error: 'agent_not_found', agentId: body.agentId });
       const normalized = normalizeReceiptPayload(body);
+      assertReceiptIntentBinding(normalized.intentId, body.agentId);
       const row = addReceipt({
         agentId: body.agentId,
         taskId: body.taskId,
@@ -27007,19 +27047,7 @@ const server = http.createServer(async (req, res) => {
           : { mode: 'credits', amount: 0, amountUnits: 0 },
         metadata: sanitizeMetadata(body.metadata ?? {})
       });
-      if (row.intentId) {
-        const intent = getIntent(row.intentId);
-        const lock = getEscrowLock(row.intentId);
-        if (intent?.requesterHash && lock?.status === 'locked') {
-          if (row.outcome === 'success') {
-            settleLockedCredits(row.intentId, row.agentId, PROTOCOL_FEE_BPS);
-            updateIntent(row.intentId, { status: 'settled', settledAt: new Date().toISOString(), linkedReceiptId: row.id });
-          } else {
-            releaseLockedCredits(row.intentId, 'relayed_receipt_failed');
-            updateIntent(row.intentId, { status: 'released', releasedAt: new Date().toISOString(), linkedReceiptId: row.id });
-          }
-        }
-      }
+      // Relayers attest evidence; only validated execution captures credits.
       return sendJson(res, 201, { relayed: true, receipt: row });
     }
 
@@ -27028,6 +27056,8 @@ const server = http.createServer(async (req, res) => {
       requireFields(body, ['receiptId', 'openedBy', 'reason']);
       const receipt = getReceipt(body.receiptId);
       if (!receipt) return sendJson(res, 404, { error: 'receipt_not_found' });
+      const auth = getAuthenticatedContext(req);
+      requireOwnedResource(req, auth?.authUser, canAuthUserAccessReceipt(req, auth?.authUser, receipt), 'receipt');
       if (receipt.dispute?.status === 'open') {
         return sendJson(res, 409, { error: 'dispute_already_open' });
       }
@@ -27035,7 +27065,7 @@ const server = http.createServer(async (req, res) => {
       const updated = updateReceipt(body.receiptId, {
         dispute: {
           status: 'open',
-          openedBy: body.openedBy,
+          openedBy: auth?.authUser?.id || 'authenticated_operator',
           reason: body.reason,
           openedAt: new Date().toISOString()
         }
@@ -27044,6 +27074,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/disputes/resolve') {
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['receiptId', 'resolvedBy', 'resolution']);
       const receipt = getReceipt(body.receiptId);
@@ -27067,7 +27098,7 @@ const server = http.createServer(async (req, res) => {
           ...receipt.dispute,
           status: 'resolved',
           resolution: body.resolution,
-          resolvedBy: body.resolvedBy,
+          resolvedBy: 'authenticated_operator',
           resolvedAt: new Date().toISOString(),
           notes: body.notes ?? null
         }
@@ -27108,7 +27139,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && urlPath === '/acp/intent') {
-      assertPublicApiKey(req);
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['requesterAgentId', 'providerAgentId', 'action', 'paymentMode']);
 
@@ -27139,10 +27170,14 @@ const server = http.createServer(async (req, res) => {
       const id = urlPath.split('/').filter(Boolean)[2];
       const intent = getIntent(id);
       if (!intent) return notFound(res);
+      const auth = getAuthenticatedContext(req);
+      requireAuthenticatedOwnedResource(req, auth?.authUser, canAuthUserAccessIntent(auth?.authUser, intent), 'intent');
       return sendJson(res, 200, { intent });
     }
 
     if (req.method === 'POST' && urlPath === '/faucet/request') {
+      if (productionProfile) return sendJson(res, 403, { error: 'demo_faucet_disabled_in_production' });
+      assertToken(req, ADMIN_TOKEN, 'x-admin-token');
       const body = await readBody(req);
       requireFields(body, ['agentId']);
 
@@ -27267,6 +27302,7 @@ function assertProductionPersistenceReady() {
 }
 
 assertProductionPersistenceReady();
+await requestLimiter.initialize();
 
 const artifactMigration = migrateLegacyExecutionArtifacts();
 if (artifactMigration.migrated) {

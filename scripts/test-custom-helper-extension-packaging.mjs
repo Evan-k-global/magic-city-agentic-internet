@@ -52,12 +52,15 @@ try {
   assert.match(generatedConfig, /"profile": "release"/);
   assert.match(generatedConfig, /"mode": "disabled"/);
   assert.equal(fs.existsSync(path.join(releaseOut, 'package/model-adapter.js')), true);
+  assert.equal(fs.existsSync(path.join(releaseOut, 'package/model-privacy.js')), true);
 
   const modelConfig = path.join(tmpDir, 'model.json');
   fs.writeFileSync(modelConfig, JSON.stringify({
     ...JSON.parse(fs.readFileSync(releaseConfig, 'utf8')),
     modelAdapter: {
       mode: 'control_plane',
+      dataRouting: 'local',
+      observationPolicy: { allowedOrigins: ['https://shop.partner.test'] },
       path: '/partner/model/consult',
       modelId: 'partner-selection-model',
       timeoutMs: 12000,
@@ -73,6 +76,14 @@ try {
   assert.match(modelGeneratedConfig, /"mode": "control_plane"/);
   assert.match(modelGeneratedConfig, /"modelId": "partner-selection-model"/);
   assert.match(modelGeneratedConfig, /"allowedQueryParameters": \[\s*"q"/);
+
+  for (const privacyPatch of [{ dataRouting: 'disabled' }, { observationPolicy: { allowedOrigins: ['https://unapproved.test'] } }, { observationPolicy: { allowedOrigins: ['https://*.partner.test'] } }, { observationPolicy: { allowedOrigins: ['https://shop.partner.test'], pageFields: ['url', 'cookies'] } }]) {
+    const badPolicy = JSON.parse(fs.readFileSync(modelConfig, 'utf8'));
+    badPolicy.modelAdapter = { ...badPolicy.modelAdapter, ...privacyPatch };
+    const badPolicyFile = path.join(tmpDir, 'bad-policy.json');
+    fs.writeFileSync(badPolicyFile, JSON.stringify(badPolicy));
+    assert.notEqual(runPackage(badPolicyFile, 'release', path.join(tmpDir, 'bad-policy-out')).status, 0, 'unsafe observation policy must fail packaging');
+  }
 
   const invalidModelConfig = path.join(tmpDir, 'invalid-model.json');
   fs.writeFileSync(invalidModelConfig, JSON.stringify({

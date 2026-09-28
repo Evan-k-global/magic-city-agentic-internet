@@ -148,13 +148,21 @@ and executes sessions from that same origin. No dependency on the
 Create new infrastructure and credentials. Never copy production users,
 database contents, pairing tokens, extension tokens or private keys.
 
+Use [the production security profile](production-security.md) and
+`.env.production.example` before exposing a self-hosted deployment. Run
+`npm run check:deployment-security` with its intended environment. This validates
+configuration, not enterprise certification or runtime readiness. Existing
+deployments must follow the staged key/admin/proxy migration in that guide.
+
 | Concern | Existing configuration point |
 | --- | --- |
-| Public service origin | `MAGIC_CITY_BASE_URL`, `MAGIC_CITY_PUBLIC_BASE_URL`, `HOST`, `PORT` |
+| Public service origin | `MAGIC_CITY_CANONICAL_ORIGIN`, `MAGIC_CITY_ALLOWED_HOSTS`, `HOST`, `PORT`; worker clients still use `MAGIC_CITY_BASE_URL` |
 | Durable state | `DATABASE_URL`, database TLS settings, `MAGIC_CITY_REQUIRE_PRODUCTION_PERSISTENCE` |
 | State encryption | `MAGIC_CITY_REQUIRE_STATE_ENCRYPTION`, `MAGIC_CITY_STATE_ENCRYPTION_KEY` |
 | Mission authorization | `MISSION_BOUND_AUTH_SECRET`, `MISSION_BOUND_AUTH_PUBLIC_KEY_ID`, `MISSION_BOUND_AUTH_ED25519_PRIVATE_KEY` |
 | Administrative/API access | `ADMIN_TOKEN`, `PUBLIC_API_KEYS`, `PRIVACY_SALT` |
+| Production UI administrators | `AUTH_ADMIN_USER_IDS`: operator-verified existing account IDs; no email-based grants |
+| Shared request limits | `MAGIC_CITY_RATE_LIMIT_STORE=postgres`, exact trusted proxy CIDRs |
 | Login/session scope | `AUTH_SESSION_COOKIE_DOMAIN`, public URL and provider callback settings |
 | Extension origins | `manifest.json` host permissions, `externally_connectable`, and allowed origins in the extension controller |
 | Branding | `public/index.html`, static assets, extension manifest, popup and icons |
@@ -177,6 +185,9 @@ Minimum clean-install acceptance:
   calls and no secrets in logs or returned session data.
 - The packaged extension matches its tested source and has its own privacy and
   Chrome Web Store disclosures.
+- The helper popup lists revocable granted page origins. Optional model access
+  requires consent to the configured local/cloud route and public-catalog field
+  policy; see `docs/custom-helper-model-access.md`.
 
 ## 3. Embedded Merchant Integration
 

@@ -84,7 +84,7 @@ async function main() {
       new MagicCityAgentSDK({ baseUrl, agentId: 'unauthorized-agent' }).proposeMission({
         goal: 'This write should require API auth.'
       }),
-      /invalid_api_key/
+      /auth_required/
     );
 
     const proposed = await sdk.proposeMission({

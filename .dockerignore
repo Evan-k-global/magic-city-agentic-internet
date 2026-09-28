@@ -11,3 +11,15 @@ public/assets/708063_Square Rotate Cloud 3d_By_Bruno_Tornielli_Artlist_4K.mp4
 
 # Confidential IP materials; do not package or deploy.
 private-ip
+
+# Runtime credentials must never enter build contexts or image layers.
+.env
+.env.*
+**/.env
+**/.env.*
+env
+**/*.pem
+**/*.key
+.git
+artifacts
+audits
