@@ -7291,6 +7291,14 @@ function isChromeExtensionDeclarativeRunnerRequest(req) {
     String(req.headers['x-magic-city-runner-protocol'] || '').trim().toLowerCase() === BROWSER_EXTENSION_PLAN_PROTOCOL;
 }
 
+function isAuthenticatedChromeExtensionRunnerMutation(req, urlPath = '') {
+  if (req.method !== 'POST' || !isChromeExtensionRunnerRequest(req)) return false;
+  const runnerMutation = urlPath === '/plugins/register'
+    || /^\/connectors\/sessions\/[^/]+\/(claim|checkpoint|fulfill|runner-status|rank-candidates|final-submit-chain-authorization)$/.test(urlPath);
+  if (!runnerMutation) return false;
+  return Boolean(resolveNativeRunnerDeviceFromRequest(req));
+}
+
 function isExtensionRunnerSession(session = null) {
   const preferred = String(session?.preferredExecutionAgentId || '').trim();
   return String(session?.handoffData?.kind || '').trim() === 'browser'
@@ -16551,8 +16559,10 @@ const server = http.createServer(async (req, res) => {
   try {
     requestSecurity.setHeaders(req, res);
     const url = new URL(req.url || '/', buildRequestBaseUrl(req));
-    requestSecurity.validateBrowserMutation(req);
     const urlPath = url.pathname;
+    requestSecurity.validateBrowserMutation(req, {
+      authenticatedRunnerMutation: isAuthenticatedChromeExtensionRunnerMutation(req, urlPath)
+    });
     const nativeRunnerRequestTiming = beginNativeRunnerRequestTiming(req, res, urlPath);
     if (req.method === 'GET' && urlPath === '/health') {
       const persistence = getPublicPersistenceStatus();
