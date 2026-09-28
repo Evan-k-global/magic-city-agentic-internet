@@ -1,6 +1,7 @@
 import './securityBootstrap.js';
 import { readMissionKeyTransition, verifyMissionTokenSignature } from './missionKeyTransition.js';
 import { createRequestSecurity, deploymentIsProduction, productionAdminAccount } from './deploymentSecurity.js';
+import { sanitizeExecutionPreviewMetadata } from './executionPreviewSecurity.js';
 import { createRequestLimiter } from './requestRateLimits.js';
 import { futureExpiry, equalSecret, verifiedProviderIdentity, assertProviderAccountLink, assertOauthBrowserBinding } from './accountSecurity.js';
 import { assertPreparedPaymentSubmission, validTopupTransfer, assertStripeCheckoutTerms } from './paymentSecurity.js';
@@ -20773,7 +20774,9 @@ const server = http.createServer(async (req, res) => {
       if (!canExecutionPluginActForPreferredAgent({ session, pluginId: body.pluginId })) {
         return sendJson(res, 409, { error: 'checkpoint_agent_mismatch', preferredExecutionAgentId: session.preferredExecutionAgentId });
       }
-      const browser = body.browser ? sanitizeMetadata(body.browser) : null;
+      const browser = body.browser
+        ? sanitizeExecutionPreviewMetadata(sanitizeMetadata(body.browser))
+        : null;
       const runnerTiming = body.runnerTiming && typeof body.runnerTiming === 'object'
         ? sanitizeMetadata(body.runnerTiming)
         : null;
@@ -21328,7 +21331,7 @@ const server = http.createServer(async (req, res) => {
         : body.result ?? {};
       const fulfillment = {
         status: fulfillmentStatus,
-        result: sanitizeMetadata(fulfillmentResult),
+        result: sanitizeExecutionPreviewMetadata(sanitizeMetadata(fulfillmentResult)),
         handoff: sanitizeMetadata(body.handoff ?? {}),
         notes: rejectedExtensionFulfillment
           ? `Browser execution did not reach a verified checkout or human-approval boundary: ${extensionFulfillmentEvaluation.reason}`
